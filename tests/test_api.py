@@ -227,3 +227,32 @@ def test_signal_poll(client):
     client.post(f"/jobs/{sub['id']}/cancel")
     r2 = client.get(f"/jobs/{sub['id']}/signal")
     assert r2.json()["signal"] == "cancel"
+
+
+def test_list_projects(client):
+    r = client.get("/projects")
+    assert r.status_code == 200
+    assert r.json()["phelipanche"] == 80
+
+
+def test_set_project_priority(client):
+    r = client.post("/projects/phelipanche", json={"priority": 90})
+    assert r.status_code == 200
+    assert r.json()["phelipanche"] == 90
+
+
+def test_nudge_project_priority(client):
+    r = client.post("/projects/phelipanche/nudge", json={"delta": 5})
+    assert r.status_code == 200
+    assert r.json()["phelipanche"] == 85
+
+
+def test_reload_reloads_projects(client, sample_projects_yaml):
+    sample_projects_yaml.write_text("""projects:
+  phelipanche: { priority: 99 }
+  _default: { priority: 40 }
+""")
+    r = client.post("/reload")
+    assert r.status_code == 200
+    g = client.get("/projects").json()
+    assert g["phelipanche"] == 99
