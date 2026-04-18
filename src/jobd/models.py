@@ -58,6 +58,9 @@ class JobInfo(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     exit_code: int | None
+    vram_gb: float = 0
+    ram_gb: float = 0
+    cpus: int = 1
 
 
 class WorkerHeartbeat(BaseModel):
