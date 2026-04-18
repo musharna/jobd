@@ -1,0 +1,17 @@
+[Unit]
+Description=jobd worker — polls broker, runs assigned jobs
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="JOBD_URL=http://100.113.204.41:8765"
+Environment="JOBD_WORKER_HOST=desktop"
+Environment="PATH=/home/mjarnold/.local/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/mjarnold/jobd-worker/.venv/bin/python /home/mjarnold/jobd-worker/job_worker.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
