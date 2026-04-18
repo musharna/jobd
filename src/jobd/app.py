@@ -12,6 +12,7 @@ import os
 from datetime import datetime, UTC
 from pathlib import Path
 
+import yaml
 from fastapi import FastAPI, HTTPException, Request
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -274,7 +275,45 @@ def build_app(
             session.refresh(pick)
             return _to_info(pick)
 
+    @app.get("/projects")
+    def list_projects():
+        return state["projects"]
+
+    @app.post("/projects/{name}")
+    def set_project_priority(name: str, payload: dict):
+        priority = max(0, min(100, int(payload["priority"])))
+        state["projects"][name] = priority
+        _persist_projects(state)
+        return state["projects"]
+
+    @app.post("/projects/{name}/nudge")
+    def nudge_project_priority(name: str, payload: dict):
+        delta = int(payload["delta"])
+        current = state["projects"].get(name, state["projects"].get("_default", 40))
+        new_priority = max(0, min(100, current + delta))
+        state["projects"][name] = new_priority
+        _persist_projects(state)
+        return state["projects"]
+
+    @app.post("/reload")
+    def reload_config():
+        state["projects"] = load_projects(state["paths"]["projects"])
+        state["profiles"] = load_profiles(state["paths"]["profiles"])
+        state["classifier"] = load_classifier_rules(state["paths"]["classifier"])
+        return {"reloaded": True}
+
     return app
+
+
+def _persist_projects(state: dict) -> None:
+    """Write the in-memory projects dict back to YAML in the canonical shape."""
+    data = {
+        "projects": {
+            name: {"priority": priority}
+            for name, priority in state["projects"].items()
+        }
+    }
+    state["paths"]["projects"].write_text(yaml.safe_dump(data, sort_keys=False))
 
 
 def _to_info(job: Job) -> JobInfo:
