@@ -1,0 +1,17 @@
+services:
+  jobd:
+    build: .
+    image: jobd:latest
+    container_name: jobd
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      JOBD_CONFIG_DIR: /app/config
+      JOBD_DB_URL: sqlite:////app/data/jobd.db
+      JOBD_LOGS_DIR: /app/logs
+      JOBD_PORT: 8765
