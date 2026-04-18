@@ -1,0 +1,53 @@
+# Classifier rules — first-match-wins. Seeded from CLAUDE.md heavy-command survey
+# (see /tmp/jobd-heavy-commands.txt from Task 4).
+rules:
+  - id: sdxl-lora-train
+    match:
+      - command_regex: "^(bash\\s+)?train_lora_v\\d+\\.sh\\b"
+      - command_regex: "^accelerate\\s+launch\\s+.*train_lora.*\\.py"
+      - command_contains: "train_lora_silhouette.py"
+    suggest_profile: sdxl-lora-train
+    confidence: high
+
+  - id: stylegan2-train
+    match:
+      - command_regex: "python\\d?\\s+train\\.py\\s+.*--cfg"
+      - command_contains: "stylegan2"
+    suggest_profile: stylegan2-train
+    confidence: high
+
+  - id: project-y-sim
+    match:
+      - command_regex: "\\./build/synthetic_souls\\b"
+      - command_regex: "\\./build/ecology_audit\\b"
+    suggest_profile: project-y-sim
+    confidence: high
+
+  - id: rnaseq-pipeline-R
+    match:
+      - command_regex: "Rscript\\s+.*run_pipeline\\.R\\b"
+      - command_regex: "Rscript\\s+.*run_all\\.R\\b"
+      - command_regex: "snakemake\\s+.*rnaseq"
+      - command_regex: "rmarkdown::render.*ARFD_RNAseq"
+    suggest_profile: rnaseq-3worker
+    host_aware: true
+    confidence: high
+
+  - id: heavy-pytest
+    match:
+      - command_regex: "pytest\\s+.*--slow"
+      - command_regex: "pytest\\s+.*-m\\s+gpu"
+    suggest_profile: clip-audit
+    confidence: medium
+
+  - id: dvc-repro
+    match:
+      - command_regex: "dvc\\s+repro\\b"
+    suggest_profile: clip-audit
+    confidence: medium
+
+  - id: ssh-desktop-heavy
+    match:
+      - command_regex: "ssh\\s+desktop(-wsl)?.*\\b(train_lora|run_pipeline|synthetic_souls|run_all\\.R)\\b"
+    suggest_profile: clip-audit
+    confidence: medium

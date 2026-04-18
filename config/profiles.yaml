@@ -1,0 +1,67 @@
+profiles:
+  sdxl-lora-train:
+    vram_gb: 28
+    ram_gb: 22
+    cpus: 8
+    expected_runtime: 8h
+    preemptible: true
+    host_hint: desktop
+    requires: [cuda>=12.8]
+
+  stylegan2-train:
+    vram_gb: 18
+    ram_gb: 16
+    cpus: 6
+    expected_runtime: 24h
+    preemptible: true
+    host_hint: desktop
+
+  project-y-sim:
+    vram_gb: 8
+    ram_gb: 4
+    cpus: 4
+    expected_runtime: 1h
+    preemptible: false
+    host_hint: desktop
+
+  clip-audit:
+    vram_gb: 6
+    ram_gb: 8
+    cpus: 4
+    expected_runtime: 20m
+    preemptible: true
+    host_hint: any-gpu
+
+  rnaseq-3worker:
+    vram_gb: 0
+    ram_gb: 24
+    cpus: 12
+    expected_runtime: 4h
+    preemptible: false
+    host_hint: desktop
+
+  rnaseq-1worker:
+    vram_gb: 0
+    ram_gb: 10
+    cpus: 3
+    expected_runtime: 12h
+    preemptible: false
+    host_hint: any
+
+  scraper-small:
+    vram_gb: 0
+    ram_gb: 2
+    cpus: 2
+    expected_runtime: 1h
+    preemptible: true
+    host_hint: any
+    fast_path: true
+
+  cpu-quick:
+    vram_gb: 0
+    ram_gb: 1
+    cpus: 1
+    expected_runtime: 10m
+    preemptible: true
+    host_hint: any
+    fast_path: true

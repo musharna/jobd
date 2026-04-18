@@ -1,0 +1,29 @@
+# Starter priority table — see docs/superpowers/specs/2026-04-18-jobd-design.md
+# Adjust via: job projects set NAME PRIORITY  (persists + reloads)
+# Mirrors projects_prioritization_2026-04-18.md. evo2 excluded (model cache, not a project).
+projects:
+  # Tier 1 — active academic obligations
+  phelipanche:             { priority: 80 }
+  arfd-rnaseq:             { priority: 80 }
+  arf-genestruc:           { priority: 75 }
+
+  # Tier 2 — high-novelty research
+  arf-promoter-analysis:   { priority: 70 }
+  dreamer-chassis:         { priority: 70 }
+  modeldna:                { priority: 68 }
+  autosilhouette:          { priority: 65 }
+
+  # Tier 3 — active creative / hobby
+  project-x:             { priority: 55 }
+  project-z:                 { priority: 55 }
+  project-y:                { priority: 50 }
+
+  # Tier 4 — commercial / close to done
+  seed3d:                  { priority: 30 }
+  prompt2brick:            { priority: 25 }
+
+  # Tier 5 — shelved
+  orchidgan:               { priority: 15 }
+  game-neuramon:           { priority: 15 }
+
+  _default:                { priority: 40 }
