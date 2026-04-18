@@ -15,6 +15,7 @@ def client(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifi
         projects_path=sample_projects_yaml,
         profiles_path=sample_profiles_yaml,
         classifier_path=sample_classifier_yaml,
+        logs_path=tmp_path / "logs",
     )
     return TestClient(app)
 
@@ -166,3 +167,63 @@ def test_next_job_empty_queue_returns_null(client):
     )
     assert r.status_code == 200
     assert r.json() is None
+
+
+def test_append_log_and_complete(client):
+    sub = client.post(
+        "/submit",
+        json={"cmd": ["echo", "x"], "cwd": "/tmp", "project": "project-x",
+              "profile": "small", "host_pin": "any"},
+    ).json()
+    client.post(
+        "/heartbeat",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    )
+    claim = client.post(
+        "/next-job",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    ).json()
+    assert claim["id"] == sub["id"]
+
+    r = client.post(f"/jobs/{sub['id']}/log", content=b"hello world\n")
+    assert r.status_code == 200
+    assert r.json()["bytes"] == len(b"hello world\n")
+
+    r = client.post(
+        f"/jobs/{sub['id']}/complete",
+        json={"exit_code": 0, "final_state": "completed"},
+    )
+    assert r.status_code == 200
+    assert r.json()["state"] == "completed"
+
+    j = client.get(f"/jobs/{sub['id']}").json()
+    assert j["state"] == "completed"
+    assert j["exit_code"] == 0
+
+
+def test_signal_poll(client):
+    sub = client.post(
+        "/submit",
+        json={"cmd": ["sleep", "60"], "cwd": "/tmp", "project": "project-x",
+              "profile": "small", "host_pin": "any"},
+    ).json()
+    client.post(
+        "/heartbeat",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    )
+    client.post(
+        "/next-job",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    )
+
+    r = client.get(f"/jobs/{sub['id']}/signal")
+    assert r.status_code == 200
+    assert r.json()["signal"] is None
+
+    client.post(f"/jobs/{sub['id']}/cancel")
+    r2 = client.get(f"/jobs/{sub['id']}/signal")
+    assert r2.json()["signal"] == "cancel"

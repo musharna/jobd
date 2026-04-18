@@ -5,14 +5,17 @@ All endpoints in this file for now; split into submodules when it grows past
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from datetime import datetime, UTC
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
+from sse_starlette.sse import EventSourceResponse
 
 from jobd.config import (
     load_projects,
@@ -34,18 +37,30 @@ from jobd.models import (
 
 log = logging.getLogger("jobd")
 
+TERMINAL_STATES = {
+    JobState.COMPLETED,
+    JobState.FAILED,
+    JobState.CANCELLED,
+    JobState.PREEMPTED,
+    JobState.ORPHANED,
+}
+
 
 def build_app(
     db_url: str,
     projects_path: Path | str,
     profiles_path: Path | str,
     classifier_path: Path | str,
+    logs_path: Path | str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="jobd", version="0.1.0")
 
     engine = create_engine(db_url, future=True)
     init_db(engine)
     SessionLocal = sessionmaker(engine, expire_on_commit=False)
+
+    logs_dir = Path(logs_path) if logs_path else Path(os.environ.get("JOBD_LOGS_DIR", "./logs"))
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     state = {
         "projects": load_projects(projects_path),
@@ -56,6 +71,7 @@ def build_app(
             "profiles": Path(profiles_path),
             "classifier": Path(classifier_path),
         },
+        "logs_dir": logs_dir,
     }
     app.state.shared = state
     app.state.SessionLocal = SessionLocal
@@ -122,6 +138,87 @@ def build_app(
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
             return _to_info(job)
+
+    @app.post("/jobs/{job_id}/log")
+    async def append_log(job_id: int, request: Request):
+        body = await request.body()
+        log_file = logs_dir / f"{job_id}.log"
+        with log_file.open("ab") as f:
+            f.write(body)
+        return {"bytes": len(body)}
+
+    @app.post("/jobs/{job_id}/complete", response_model=JobInfo)
+    def complete_job(job_id: int, payload: dict):
+        exit_code = payload.get("exit_code")
+        final_state = payload.get("final_state", "completed")
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            job.state = final_state
+            job.exit_code = exit_code
+            job.finished_at = datetime.now(UTC)
+            session.commit()
+            session.refresh(job)
+            return _to_info(job)
+
+    @app.post("/jobs/{job_id}/cancel", response_model=JobInfo)
+    def cancel_job(job_id: int):
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            if job.state in (JobState.RUNNING, JobState.ASSIGNED):
+                job.signal = "cancel"
+            elif job.state == JobState.QUEUED:
+                job.state = JobState.CANCELLED
+                job.finished_at = datetime.now(UTC)
+            session.commit()
+            session.refresh(job)
+            return _to_info(job)
+
+    @app.get("/jobs/{job_id}/signal")
+    def get_signal(job_id: int):
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            return {"signal": job.signal}
+
+    @app.get("/wait/{job_id}")
+    async def wait_job(job_id: int):
+        log_file = logs_dir / f"{job_id}.log"
+
+        async def event_generator():
+            position = 0
+            while True:
+                # Read new log bytes since last position
+                if log_file.exists():
+                    with log_file.open("rb") as f:
+                        f.seek(position)
+                        chunk = f.read()
+                    if chunk:
+                        position += len(chunk)
+                        yield {"event": "log", "data": chunk.decode("utf-8", errors="replace")}
+
+                # Check job state
+                with SessionLocal() as session:
+                    job = session.get(Job, job_id)
+
+                if job is None:
+                    yield {"event": "error", "data": "no such job"}
+                    return
+
+                if JobState(job.state) in TERMINAL_STATES:
+                    yield {
+                        "event": "terminal",
+                        "data": json.dumps({"state": job.state, "exit_code": job.exit_code}),
+                    }
+                    return
+
+                await asyncio.sleep(0.5)
+
+        return EventSourceResponse(event_generator())
 
     @app.post("/classify", response_model=ClassifyResult)
     def classify_endpoint(req: ClassifyRequest) -> ClassifyResult:
