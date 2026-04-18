@@ -106,3 +106,63 @@ def test_classify_known_heavy_cmd(client):
     assert body["heavy"] is True
     assert body["rule_id"] == "sdxl-lora-train"
     assert body["suggest_profile"] == "gpu-heavy"
+
+
+def test_heartbeat_registers_worker(client):
+    r = client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
+    )
+    assert r.status_code == 200
+
+
+def test_next_job_returns_highest_priority_fitting(client):
+    # Submit 2 jobs; desktop worker should get the priority-80 one (phelipanche)
+    client.post(
+        "/submit",
+        json={"cmd": ["echo", "1"], "cwd": "/tmp", "project": "orchid-sdxl",
+              "profile": "small", "host_pin": "any"},
+    )
+    client.post(
+        "/submit",
+        json={"cmd": ["echo", "2"], "cwd": "/tmp", "project": "phelipanche",
+              "profile": "small", "host_pin": "any"},
+    )
+    # Heartbeat
+    client.post(
+        "/heartbeat",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    )
+    r = client.post(
+        "/next-job",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body is not None
+    assert body["project"] == "phelipanche"  # priority 80 beats 55
+    assert body["state"] == "assigned"
+    assert body["worker"] == "desktop"
+
+
+def test_next_job_empty_queue_returns_null(client):
+    client.post(
+        "/heartbeat",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    )
+    r = client.post(
+        "/next-job",
+        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
+              "free_ram_gb": 28.0, "idle_cpus": 10},
+    )
+    assert r.status_code == 200
+    assert r.json() is None

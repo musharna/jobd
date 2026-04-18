@@ -21,13 +21,15 @@ from jobd.config import (
     resolve_priority,
     resolve_profile,
 )
-from jobd.db import Base, Job, init_db
+from jobd.db import Base, Job, Worker, init_db
 from jobd.models import (
     JobSubmit,
     JobInfo,
     JobState,
     ClassifyRequest,
     ClassifyResult,
+    WorkerHeartbeat,
+    NextJobQuery,
 )
 
 log = logging.getLogger("jobd")
@@ -125,6 +127,55 @@ def build_app(
     def classify_endpoint(req: ClassifyRequest) -> ClassifyResult:
         from jobd.classifier import classify as _classify
         return _classify(req.cmd, state["classifier"])
+
+    @app.post("/heartbeat")
+    def heartbeat(hb: WorkerHeartbeat):
+        with SessionLocal() as session:
+            worker = session.execute(
+                select(Worker).where(Worker.host == hb.host)
+            ).scalar_one_or_none()
+            now = datetime.now(UTC)
+            if worker is None:
+                worker = Worker(host=hb.host, last_heartbeat=now)
+                session.add(worker)
+            worker.host_aliases_json = json.dumps(hb.host_aliases)
+            worker.last_heartbeat = now
+            worker.free_vram_gb = hb.free_vram_gb
+            worker.unregistered_vram_gb = hb.unregistered_vram_gb
+            worker.free_ram_gb = hb.free_ram_gb
+            worker.idle_cpus = hb.idle_cpus
+            session.commit()
+            return {"ok": True}
+
+    @app.post("/next-job", response_model=JobInfo | None)
+    def next_job(q: NextJobQuery):
+        from jobd.matcher import WorkerSnapshot, pick_next_job
+        with SessionLocal() as session:
+            queued = session.execute(
+                select(Job).where(Job.state == JobState.QUEUED)
+            ).scalars().all()
+            w = WorkerSnapshot(
+                host=q.host,
+                host_aliases=["any", "any-gpu"] if q.free_vram_gb > 0 else ["any"],
+                free_vram_gb=q.free_vram_gb,
+                unregistered_vram_gb=q.unregistered_vram_gb,
+                free_ram_gb=q.free_ram_gb,
+                idle_cpus=q.idle_cpus,
+            )
+            pick = pick_next_job(queued, w)
+            if pick is None:
+                return None
+            # Atomic claim: only one worker can transition queued -> assigned
+            result = session.execute(
+                Job.__table__.update()
+                .where(Job.id == pick.id, Job.state == JobState.QUEUED)
+                .values(state=JobState.ASSIGNED, worker=q.host, started_at=datetime.now(UTC))
+            )
+            session.commit()
+            if result.rowcount == 0:
+                return None  # lost race; next poll
+            session.refresh(pick)
+            return _to_info(pick)
 
     return app
 
