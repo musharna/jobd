@@ -1,0 +1,11 @@
+# Positive/negative examples per rule. Tests iterate these.
+cases:
+  - rule_id: sdxl-lora-train
+    positive:
+      - "bash train_lora_v5.sh"
+      - "train_lora_v5.sh --config x.yaml"
+      - "bash train_lora_v10.sh"
+    negative:
+      - "ls train_lora_v5.sh"
+      - "cat train_lora_v5.sh"
+      - "python scripts/audit_v7.py"
