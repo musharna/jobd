@@ -22,7 +22,13 @@ from jobd.config import (
     resolve_profile,
 )
 from jobd.db import Base, Job, init_db
-from jobd.models import JobSubmit, JobInfo, JobState
+from jobd.models import (
+    JobSubmit,
+    JobInfo,
+    JobState,
+    ClassifyRequest,
+    ClassifyResult,
+)
 
 log = logging.getLogger("jobd")
 
@@ -114,6 +120,11 @@ def build_app(
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
             return _to_info(job)
+
+    @app.post("/classify", response_model=ClassifyResult)
+    def classify_endpoint(req: ClassifyRequest) -> ClassifyResult:
+        from jobd.classifier import classify as _classify
+        return _classify(req.cmd, state["classifier"])
 
     return app
 
