@@ -125,11 +125,28 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         full_cmd = cmd
 
     print(f"[worker] starting job {job_id}: {full_cmd}", file=sys.stderr)
-    proc = subprocess.Popen(
-        full_cmd, cwd=cwd, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        bufsize=1, text=False,
-    )
+    try:
+        proc = subprocess.Popen(
+            full_cmd, cwd=cwd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=1, text=False,
+        )
+    except (OSError, FileNotFoundError) as e:
+        print(f"[worker] failed to start job {job_id}: {e}", file=sys.stderr)
+        try:
+            client.post(
+                f"/jobs/{job_id}/log",
+                content=f"[worker setup error] {e}\n".encode(),
+                timeout=10.0,
+            )
+            client.post(
+                f"/jobs/{job_id}/complete",
+                json={"exit_code": 127, "final_state": "failed"},
+                timeout=10.0,
+            )
+        except Exception as post_err:
+            print(f"[worker] complete POST error: {post_err}", file=sys.stderr)
+        return
     tracked_pids.add(proc.pid)
 
     stop_signal = threading.Event()
