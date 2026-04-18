@@ -91,3 +91,18 @@ def test_submit_unknown_profile_404(client):
         },
     )
     assert r.status_code == 404
+
+
+def test_classify_unknown_cmd_not_heavy(client):
+    r = client.post("/classify", json={"cmd": "ls -la"})
+    assert r.status_code == 200
+    assert r.json()["heavy"] is False
+
+
+def test_classify_known_heavy_cmd(client):
+    r = client.post("/classify", json={"cmd": "bash train_lora_v5.sh"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["heavy"] is True
+    assert body["rule_id"] == "sdxl-lora-train"
+    assert body["suggest_profile"] == "gpu-heavy"
