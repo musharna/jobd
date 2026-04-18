@@ -1,8 +1,4 @@
 """Shared pytest fixtures for jobd tests."""
-import os
-import tempfile
-from pathlib import Path
-
 import pytest
 
 
