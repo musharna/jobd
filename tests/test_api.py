@@ -420,7 +420,7 @@ def test_next_job_uses_persisted_worker_capabilities(client):
     assert r.json()["id"] == job_id
 
 
-def test_orphan_sweeper_reclaims_after_timeout(client, monkeypatch):
+def test_orphan_sweeper_reclaims_after_timeout(client):
     """A job assigned to a worker whose heartbeat went silent >5min must be re-queued."""
     from datetime import UTC, datetime, timedelta
 
@@ -478,6 +478,67 @@ def test_orphan_sweeper_reclaims_after_timeout(client, monkeypatch):
         )
 
     # Trigger sweeper manually (exposed via private test hook)
+    app_mod._sweep_once()
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["state"] == "queued"
+    assert got["worker"] is None
+
+
+def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
+    """A job with requires.idempotent=true reclaims after 90s, not 5min."""
+    from datetime import UTC, datetime, timedelta
+
+    from jobd import app as app_mod
+    from jobd.db import Worker
+    from sqlalchemy import update
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "ghost-idem",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/tmp",
+            "project": "project-x",
+            "requires": {"idempotent": True},
+        },
+    )
+    job_id = r.json()["id"]
+    claim = client.post(
+        "/next-job",
+        json={
+            "host": "ghost-idem",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+    assert claim.json()["id"] == job_id
+
+    engine = app_mod._engine_for_testing()
+    # 2 minutes silent: past idempotent cutoff (90s) but under the 5min default
+    with engine.begin() as conn:
+        conn.execute(
+            update(Worker)
+            .where(Worker.host == "ghost-idem")
+            .values(last_heartbeat=datetime.now(UTC) - timedelta(seconds=120))
+        )
+
     app_mod._sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
