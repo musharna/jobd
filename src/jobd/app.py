@@ -10,7 +10,8 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, UTC
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -20,21 +21,22 @@ from sqlalchemy.orm import sessionmaker
 from sse_starlette.sse import EventSourceResponse
 
 from jobd.config import (
-    load_projects,
-    load_profiles,
     load_classifier_rules,
+    load_profiles,
+    load_projects,
     resolve_priority,
     resolve_profile,
 )
 from jobd.db import Job, Worker, init_db, migrate
 from jobd.models import (
-    JobSubmit,
-    JobInfo,
-    JobState,
     ClassifyRequest,
     ClassifyResult,
-    WorkerHeartbeat,
+    JobInfo,
+    JobRequires,
+    JobState,
+    JobSubmit,
     NextJobQuery,
+    WorkerHeartbeat,
 )
 
 log = logging.getLogger("jobd")
@@ -47,6 +49,11 @@ TERMINAL_STATES = {
     JobState.ORPHANED,
 }
 
+DEAD_WORKER_SECONDS = 300  # 5 min
+IDEMPOTENT_RECLAIM_SECONDS = 90
+OFFLINE_AFTER_SECONDS = 120
+SWEEP_INTERVAL_SECONDS = 30
+
 
 def build_app(
     db_url: str,
@@ -55,7 +62,21 @@ def build_app(
     classifier_path: Path | str,
     logs_path: Path | str | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="jobd", version="0.1.0")
+    async def _sweep_loop():
+        while True:
+            try:
+                _sweep_once()
+            except Exception as e:
+                log.warning("sweeper error: %s", e)
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        task = asyncio.create_task(_sweep_loop())
+        yield
+        task.cancel()
+
+    app = FastAPI(title="jobd", version="0.1.0", lifespan=lifespan)
 
     engine = create_engine(db_url, future=True)
     init_db(engine)
@@ -338,6 +359,45 @@ def build_app(
         state["classifier"] = load_classifier_rules(state["paths"]["classifier"])
         return {"reloaded": True}
 
+    def _sweep_once():
+        """One pass: reclaim orphans, mark offline workers."""
+        # SQLite stores datetimes as naive UTC; compare naive-to-naive.
+        now = datetime.now(UTC).replace(tzinfo=None)
+        with SessionLocal() as session:
+            # Mark workers offline past threshold
+            offline_cutoff = now - timedelta(seconds=OFFLINE_AFTER_SECONDS)
+            session.execute(
+                Worker.__table__.update()
+                .where(Worker.last_heartbeat < offline_cutoff, Worker.state != "offline")
+                .values(state="offline")
+            )
+            # Reclaim assigned jobs whose worker is stale
+            assigned = (
+                session.execute(select(Job).where(Job.state == JobState.ASSIGNED)).scalars().all()
+            )
+            for j in assigned:
+                reclaim_seconds = DEAD_WORKER_SECONDS
+                if j.requires_json and j.requires_json != "{}":
+                    try:
+                        req = JobRequires.model_validate_json(j.requires_json)
+                        if req.idempotent:
+                            reclaim_seconds = IDEMPOTENT_RECLAIM_SECONDS
+                    except Exception:
+                        pass
+                cutoff = now - timedelta(seconds=reclaim_seconds)
+                w = session.execute(
+                    select(Worker).where(Worker.host == j.worker)
+                ).scalar_one_or_none()
+                if w is None or w.last_heartbeat < cutoff:
+                    j.state = JobState.QUEUED
+                    j.worker = None
+                    j.started_at = None
+            session.commit()
+
+    # Expose as test seams at module scope
+    globals()["_sweep_once"] = _sweep_once
+    globals()["_engine_for_testing"] = lambda: engine
+
     return app
 
 
@@ -352,8 +412,6 @@ def _persist_projects(state: dict) -> None:
 def _to_info(job: Job) -> JobInfo:
     req = None
     if job.requires_json and job.requires_json != "{}":
-        from jobd.models import JobRequires
-
         try:
             req = JobRequires.model_validate_json(job.requires_json)
         except Exception:

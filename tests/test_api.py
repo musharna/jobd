@@ -1,6 +1,5 @@
 """API tests via FastAPI TestClient (in-process, fast)."""
 
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -419,3 +418,68 @@ def test_next_job_uses_persisted_worker_capabilities(client):
         },
     )
     assert r.json()["id"] == job_id
+
+
+def test_orphan_sweeper_reclaims_after_timeout(client, monkeypatch):
+    """A job assigned to a worker whose heartbeat went silent >5min must be re-queued."""
+    from datetime import UTC, datetime, timedelta
+
+    from jobd import app as app_mod
+    from sqlalchemy import update
+
+    # Worker heartbeats once
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    # Submit + claim
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/tmp",
+            "project": "project-x",
+        },
+    )
+    job_id = r.json()["id"]
+    claim = client.post(
+        "/next-job",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+    assert claim.json()["id"] == job_id
+    assert claim.json()["state"] == "assigned"
+
+    # Fast-forward: manually backdate the worker's heartbeat >5min
+    from jobd.db import Worker
+
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Worker)
+            .where(Worker.host == "ghost")
+            .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=6))
+        )
+
+    # Trigger sweeper manually (exposed via private test hook)
+    app_mod._sweep_once()
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["state"] == "queued"
+    assert got["worker"] is None
