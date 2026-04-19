@@ -13,6 +13,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -28,6 +29,7 @@ from jobd.config import (
     resolve_profile,
 )
 from jobd.db import Job, Worker, init_db, migrate
+from jobd.matcher import WorkerSnapshot, selectors_only_match
 from jobd.models import (
     ClassifyRequest,
     ClassifyResult,
@@ -53,6 +55,7 @@ DEAD_WORKER_SECONDS = 300  # 5 min
 IDEMPOTENT_RECLAIM_SECONDS = 90
 OFFLINE_AFTER_SECONDS = 120
 SWEEP_INTERVAL_SECONDS = 30
+UNMATCHEABLE_THRESHOLD_SECONDS = 60
 
 
 def build_app(
@@ -285,7 +288,7 @@ def build_app(
 
     @app.post("/next-job", response_model=JobInfo | None)
     def next_job(q: NextJobQuery):
-        from jobd.matcher import WorkerSnapshot, pick_next_job
+        from jobd.matcher import pick_next_job
 
         with SessionLocal() as session:
             queued = (
@@ -392,6 +395,64 @@ def build_app(
                     j.state = JobState.QUEUED
                     j.worker = None
                     j.started_at = None
+            session.commit()
+
+            # Soft unmatcheable warning: queued >60s + no online worker advertises caps
+            stale_queued = (
+                session.execute(
+                    select(Job).where(
+                        Job.state == JobState.QUEUED,
+                        Job.submitted_at < now - timedelta(seconds=UNMATCHEABLE_THRESHOLD_SECONDS),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            workers = (
+                session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
+            )
+            snapshots = [
+                WorkerSnapshot(
+                    host=w.host,
+                    host_aliases=json.loads(w.host_aliases_json),
+                    free_vram_gb=w.free_vram_gb,
+                    unregistered_vram_gb=w.unregistered_vram_gb,
+                    free_ram_gb=w.free_ram_gb,
+                    idle_cpus=w.idle_cpus,
+                    arch=w.arch,
+                    os=w.os,
+                    gpu=w.gpu,
+                    tags=json.loads(w.tags_json),
+                )
+                for w in workers
+            ]
+            host_list = [w.host for w in workers]
+            for j in stale_queued:
+                req = None
+                if j.requires_json and j.requires_json != "{}":
+                    try:
+                        req = JobRequires.model_validate_json(j.requires_json)
+                    except Exception:
+                        continue
+                shim = SimpleNamespace(
+                    id=j.id,
+                    priority=j.priority,
+                    submitted_at=j.submitted_at,
+                    host_pin=j.host_pin,
+                    vram_gb=j.vram_gb,
+                    ram_gb=j.ram_gb,
+                    cpus=j.cpus,
+                    requires=req,
+                )
+                matcheable = any(selectors_only_match(shim, ws) for ws in snapshots)
+                if not matcheable and j.warning is None:
+                    j.warning = (
+                        f"no matching worker — none of {host_list} advertise required capabilities"
+                    )
+                    j.warning_at = now
+                elif matcheable and j.warning is not None:
+                    j.warning = None
+                    j.warning_at = None
             session.commit()
 
     # Expose as test seams at module scope
