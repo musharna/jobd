@@ -101,6 +101,11 @@ def build_app(
         cpus = profile_spec.cpus if profile_spec else 1
         preemptible = req.preemptible or (profile_spec.preemptible if profile_spec else False)
 
+        requires = req.requires
+        if requires is None and profile_spec and profile_spec.requires:
+            requires = profile_spec.requires
+        requires_json = requires.model_dump_json() if requires is not None else "{}"
+
         with SessionLocal() as session:
             job = Job(
                 project=req.project,
@@ -117,6 +122,7 @@ def build_app(
                 cpus=cpus,
                 session_id=req.session_id,
                 submitted_at=datetime.now(UTC),
+                requires_json=requires_json,
             )
             session.add(job)
             session.commit()
@@ -248,6 +254,11 @@ def build_app(
             worker.unregistered_vram_gb = hb.unregistered_vram_gb
             worker.free_ram_gb = hb.free_ram_gb
             worker.idle_cpus = hb.idle_cpus
+            worker.arch = hb.arch
+            worker.os = hb.os
+            worker.gpu = hb.gpu
+            worker.tags_json = json.dumps(hb.tags)
+            worker.state = "online"
             session.commit()
             return {"ok": True}
 
@@ -262,10 +273,17 @@ def build_app(
             worker_row = session.execute(
                 select(Worker).where(Worker.host == q.host)
             ).scalar_one_or_none()
+            aliases: list[str] = ["any", "any-gpu"] if q.free_vram_gb > 0 else ["any"]
+            arch = q.arch
+            os_ = q.os
+            gpu = q.gpu or q.free_vram_gb > 0
+            tags: list[str] = list(q.tags)
             if worker_row is not None:
                 aliases = json.loads(worker_row.host_aliases_json)
-            else:
-                aliases = ["any", "any-gpu"] if q.free_vram_gb > 0 else ["any"]
+                arch = worker_row.arch
+                os_ = worker_row.os
+                gpu = worker_row.gpu
+                tags = json.loads(worker_row.tags_json)
             w = WorkerSnapshot(
                 host=q.host,
                 host_aliases=aliases,
@@ -273,6 +291,10 @@ def build_app(
                 unregistered_vram_gb=q.unregistered_vram_gb,
                 free_ram_gb=q.free_ram_gb,
                 idle_cpus=q.idle_cpus,
+                arch=arch,
+                os=os_,
+                gpu=gpu,
+                tags=tags,
             )
             pick = pick_next_job(queued, w)
             if pick is None:
@@ -328,6 +350,14 @@ def _persist_projects(state: dict) -> None:
 
 
 def _to_info(job: Job) -> JobInfo:
+    req = None
+    if job.requires_json and job.requires_json != "{}":
+        from jobd.models import JobRequires
+
+        try:
+            req = JobRequires.model_validate_json(job.requires_json)
+        except Exception:
+            req = None
     return JobInfo(
         id=job.id,
         project=job.project,
@@ -346,4 +376,6 @@ def _to_info(job: Job) -> JobInfo:
         vram_gb=job.vram_gb,
         ram_gb=job.ram_gb,
         cpus=job.cpus,
+        requires=req,
+        warning=job.warning,
     )

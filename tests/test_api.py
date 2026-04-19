@@ -1,6 +1,5 @@
 """API tests via FastAPI TestClient (in-process, fast)."""
-import json
-from pathlib import Path
+
 
 import pytest
 from fastapi.testclient import TestClient
@@ -127,24 +126,44 @@ def test_next_job_returns_highest_priority_fitting(client):
     # Submit 2 jobs; desktop worker should get the priority-80 one (phelipanche)
     client.post(
         "/submit",
-        json={"cmd": ["echo", "1"], "cwd": "/tmp", "project": "orchid-sdxl",
-              "profile": "small", "host_pin": "any"},
+        json={
+            "cmd": ["echo", "1"],
+            "cwd": "/tmp",
+            "project": "orchid-sdxl",
+            "profile": "small",
+            "host_pin": "any",
+        },
     )
     client.post(
         "/submit",
-        json={"cmd": ["echo", "2"], "cwd": "/tmp", "project": "phelipanche",
-              "profile": "small", "host_pin": "any"},
+        json={
+            "cmd": ["echo", "2"],
+            "cwd": "/tmp",
+            "project": "phelipanche",
+            "profile": "small",
+            "host_pin": "any",
+        },
     )
     # Heartbeat
     client.post(
         "/heartbeat",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     )
     r = client.post(
         "/next-job",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     )
     assert r.status_code == 200
     body = r.json()
@@ -157,13 +176,23 @@ def test_next_job_returns_highest_priority_fitting(client):
 def test_next_job_empty_queue_returns_null(client):
     client.post(
         "/heartbeat",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     )
     r = client.post(
         "/next-job",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     )
     assert r.status_code == 200
     assert r.json() is None
@@ -172,18 +201,33 @@ def test_next_job_empty_queue_returns_null(client):
 def test_append_log_and_complete(client):
     sub = client.post(
         "/submit",
-        json={"cmd": ["echo", "x"], "cwd": "/tmp", "project": "orchid-sdxl",
-              "profile": "small", "host_pin": "any"},
+        json={
+            "cmd": ["echo", "x"],
+            "cwd": "/tmp",
+            "project": "orchid-sdxl",
+            "profile": "small",
+            "host_pin": "any",
+        },
     ).json()
     client.post(
         "/heartbeat",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     )
     claim = client.post(
         "/next-job",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     ).json()
     assert claim["id"] == sub["id"]
 
@@ -206,18 +250,33 @@ def test_append_log_and_complete(client):
 def test_signal_poll(client):
     sub = client.post(
         "/submit",
-        json={"cmd": ["sleep", "60"], "cwd": "/tmp", "project": "orchid-sdxl",
-              "profile": "small", "host_pin": "any"},
+        json={
+            "cmd": ["sleep", "60"],
+            "cwd": "/tmp",
+            "project": "orchid-sdxl",
+            "profile": "small",
+            "host_pin": "any",
+        },
     ).json()
     client.post(
         "/heartbeat",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     )
     client.post(
         "/next-job",
-        json={"host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-              "free_ram_gb": 28.0, "idle_cpus": 10},
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
     )
 
     r = client.get(f"/jobs/{sub['id']}/signal")
@@ -256,3 +315,107 @@ def test_reload_reloads_projects(client, sample_projects_yaml):
     assert r.status_code == 200
     g = client.get("/projects").json()
     assert g["phelipanche"] == 99
+
+
+def test_submit_with_requires_persists_and_returns(client):
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["echo", "hi"],
+            "cwd": "/tmp",
+            "project": "orchid-sdxl",
+            "requires": {"arch": "x86_64", "gpu": True, "needs": ["cuda"]},
+        },
+    )
+    assert r.status_code == 200
+    job_id = r.json()["id"]
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["requires"] == {
+        "arch": "x86_64",
+        "os": "any",
+        "gpu": True,
+        "needs": ["cuda"],
+        "idempotent": False,
+    }
+
+
+def test_heartbeat_persists_capabilities(client):
+    r = client.post(
+        "/heartbeat",
+        json={
+            "host": "rpi4",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 3.5,
+            "idle_cpus": 4,
+            "arch": "arm64",
+            "os": "linux",
+            "gpu": False,
+            "tags": ["python3", "always-on"],
+            "host_aliases": [],
+        },
+    )
+    assert r.status_code == 200
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["uname", "-m"],
+            "cwd": "/tmp",
+            "project": "orchid-sdxl",
+            "requires": {"arch": "arm64"},
+        },
+    )
+    job_id = r.json()["id"]
+    r = client.post(
+        "/next-job",
+        json={
+            "host": "rpi4",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 3.5,
+            "idle_cpus": 4,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body is not None
+    assert body["id"] == job_id
+
+
+def test_next_job_uses_persisted_worker_capabilities(client):
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "gt76",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 24,
+            "idle_cpus": 12,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": ["R", "python3"],
+            "host_aliases": [],
+        },
+    )
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["Rscript", "x.R"],
+            "cwd": "/tmp",
+            "project": "phelipanche",
+            "requires": {"needs": ["R"]},
+        },
+    )
+    job_id = r.json()["id"]
+    r = client.post(
+        "/next-job",
+        json={
+            "host": "gt76",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 24,
+            "idle_cpus": 12,
+        },
+    )
+    assert r.json()["id"] == job_id

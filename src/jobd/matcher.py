@@ -62,9 +62,10 @@ def fits_on_worker(job: QueuedJob, w: WorkerSnapshot) -> bool:
         return False
     if job.host_pin not in (w.host, "any", *w.host_aliases):
         return False
-    effective_vram = w.free_vram_gb - w.unregistered_vram_gb - SAFETY_MARGIN_VRAM_GB
-    if job.vram_gb > effective_vram:
-        return False
+    if job.vram_gb > 0:
+        effective_vram = w.free_vram_gb - w.unregistered_vram_gb - SAFETY_MARGIN_VRAM_GB
+        if job.vram_gb > effective_vram:
+            return False
     if job.ram_gb > w.free_ram_gb - SAFETY_MARGIN_RAM_GB:
         return False
     if job.cpus > w.idle_cpus + OVERSUBSCRIBE_CPU_ALLOWANCE:
