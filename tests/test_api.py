@@ -485,6 +485,57 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
     assert got["worker"] is None
 
 
+def test_unmatcheable_job_gets_warning(client):
+    """Job requiring arm64 with no arm64 worker advertising gets a warning."""
+    from datetime import UTC, datetime, timedelta
+
+    from jobd import app as app_mod
+    from jobd.db import Job
+    from sqlalchemy import update
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 10,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": True,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/tmp",
+            "project": "project-x",
+            "requires": {"arch": "arm64"},
+        },
+    )
+    job_id = r.json()["id"]
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["warning"] is None
+
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(submitted_at=datetime.now(UTC) - timedelta(seconds=90))
+        )
+
+    app_mod._sweep_once()
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["warning"] is not None
+    assert "no matching worker" in got["warning"].lower()
+
+
 def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
     """A job with requires.idempotent=true reclaims after 90s, not 5min."""
     from datetime import UTC, datetime, timedelta
