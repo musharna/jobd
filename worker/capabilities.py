@@ -58,18 +58,21 @@ def _wsl() -> bool:
 
 
 def _on_battery() -> bool | None:
-    """Return True if a battery reports Discharging, False if no battery is discharging, None if unknown."""
+    """Return True if any battery reports Discharging, False if none are, None if unknown."""
     try:
         if not _POWER_SUPPLY_ROOT.exists():
             return None
+        found_any = False
         for p in _POWER_SUPPLY_ROOT.iterdir():
             type_f = p / "type"
             if type_f.exists() and type_f.read_text().strip() == "Battery":
                 status_f = p / "status"
-                if status_f.exists():
-                    return status_f.read_text().strip() == "Discharging"
-                return None
-        return False
+                if not status_f.exists():
+                    return None
+                if status_f.read_text().strip() == "Discharging":
+                    return True
+                found_any = True
+        return False if found_any else None
     except OSError:
         return None
 
@@ -114,7 +117,7 @@ def _load_config_overrides() -> dict:
         return {}
     try:
         return yaml.safe_load(p.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError, ValueError):
         return {}
 
 
