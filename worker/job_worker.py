@@ -120,6 +120,10 @@ def pick_resource_snapshot_mock():
         "free_ram_gb": 28.0,
         "idle_cpus": 10,
         "host_aliases": ["any"],
+        "arch": "unknown",
+        "os": "unknown",
+        "gpu": False,
+        "tags": [],
     }
 
 
