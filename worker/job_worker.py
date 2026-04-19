@@ -7,6 +7,7 @@ Responsibilities:
 - Poll /jobs/{id}/signal for cancel/preempt requests
 - Report terminal status via /jobs/{id}/complete
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,6 +26,7 @@ import psutil
 
 try:
     import pynvml
+
     pynvml.nvmlInit()
     _NVML_OK = True
 except Exception:
@@ -51,7 +53,9 @@ def nvidia_processes() -> list[tuple[int, int]]:
         try:
             procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
             for p in procs:
-                out.append((p.pid, p.usedGpuMemory // (1024 * 1024) if p.usedGpuMemory else 0))
+                out.append(
+                    (p.pid, p.usedGpuMemory // (1024 * 1024) if p.usedGpuMemory else 0)
+                )
         except pynvml.NVMLError:
             pass
     return out
@@ -76,6 +80,15 @@ def compute_unregistered_vram(
     return round(mib / 1024.0, 2)
 
 
+def _configured_aliases() -> list[str]:
+    base = ["any", "any-gpu"] if _NVML_OK else ["any"]
+    extra = os.environ.get("JOBD_WORKER_ALIASES", "")
+    for name in (n.strip() for n in extra.split(",")):
+        if name and name not in base:
+            base.append(name)
+    return base
+
+
 def resource_snapshot(tracked_pids: set[int]) -> dict:
     vm = psutil.virtual_memory()
     load1 = os.getloadavg()[0]
@@ -83,10 +96,12 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
     return {
         "host": hostname(),
         "free_vram_gb": nvidia_free_vram_gb(),
-        "unregistered_vram_gb": compute_unregistered_vram(nvidia_processes(), tracked_pids),
+        "unregistered_vram_gb": compute_unregistered_vram(
+            nvidia_processes(), tracked_pids
+        ),
         "free_ram_gb": round(vm.available / (1024**3), 2),
         "idle_cpus": idle_cpus,
-        "host_aliases": ["any", "any-gpu"] if _NVML_OK else ["any"],
+        "host_aliases": _configured_aliases(),
     }
 
 
@@ -102,7 +117,9 @@ def pick_resource_snapshot_mock():
     }
 
 
-def heartbeat_loop(client: httpx.Client, tracked_pids: set[int], stop_event: threading.Event):
+def heartbeat_loop(
+    client: httpx.Client, tracked_pids: set[int], stop_event: threading.Event
+):
     while not stop_event.is_set():
         try:
             snap = resource_snapshot(tracked_pids)
@@ -127,9 +144,13 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     print(f"[worker] starting job {job_id}: {full_cmd}", file=sys.stderr)
     try:
         proc = subprocess.Popen(
-            full_cmd, cwd=cwd, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=1, text=False,
+            full_cmd,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            text=False,
         )
     except (OSError, FileNotFoundError) as e:
         print(f"[worker] failed to start job {job_id}: {e}", file=sys.stderr)
@@ -214,7 +235,9 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--jobd-url", default=os.environ.get("JOBD_URL", "http://10.0.0.10:8765"))
+    parser.add_argument(
+        "--jobd-url", default=os.environ.get("JOBD_URL", "http://10.0.0.10:8765")
+    )
     args = parser.parse_args()
 
     tracked_pids: set[int] = set()
