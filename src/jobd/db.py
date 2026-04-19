@@ -49,6 +49,15 @@ class Job(Base):
     warning: Mapped[str | None] = mapped_column(Text, nullable=True)
     warning_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    @property
+    def requires(self):
+        """Parse requires_json to JobRequires | None for matcher Protocol."""
+        from jobd.models import JobRequires
+
+        if not self.requires_json or self.requires_json == "{}":
+            return None
+        return JobRequires.model_validate_json(self.requires_json)
+
 
 class Worker(Base):
     __tablename__ = "workers"
