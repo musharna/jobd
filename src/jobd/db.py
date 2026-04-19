@@ -1,4 +1,5 @@
 """SQLAlchemy models for jobd persistence."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -7,11 +8,12 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
-    ForeignKey,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    inspect as _inspect,
+    text as _text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -43,6 +45,9 @@ class Job(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     signal: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    requires_json: Mapped[str] = mapped_column(Text, default="{}")
+    warning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warning_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Worker(Base):
@@ -57,6 +62,11 @@ class Worker(Base):
     unregistered_vram_gb: Mapped[float] = mapped_column(Float, default=0.0)
     free_ram_gb: Mapped[float] = mapped_column(Float, default=0.0)
     idle_cpus: Mapped[int] = mapped_column(Integer, default=0)
+    arch: Mapped[str] = mapped_column(String(30), default="unknown")
+    os: Mapped[str] = mapped_column(String(30), default="unknown")
+    gpu: Mapped[bool] = mapped_column(Boolean, default=False)
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    state: Mapped[str] = mapped_column(String(20), default="online", index=True)
 
 
 class BypassLog(Base):
@@ -75,3 +85,34 @@ class BypassLog(Base):
 def init_db(engine) -> None:
     """Create all tables if they do not exist."""
     Base.metadata.create_all(engine)
+
+
+_JOB_ADDS = [
+    ("requires_json", "TEXT DEFAULT '{}'"),
+    ("warning", "TEXT"),
+    ("warning_at", "DATETIME"),
+]
+_WORKER_ADDS = [
+    ("arch", "VARCHAR(30) DEFAULT 'unknown'"),
+    ("os", "VARCHAR(30) DEFAULT 'unknown'"),
+    ("gpu", "BOOLEAN DEFAULT 0"),
+    ("tags_json", "TEXT DEFAULT '[]'"),
+    ("state", "VARCHAR(20) DEFAULT 'online'"),
+]
+
+
+def migrate(engine) -> None:
+    """Additive SQLite migration for Phase 2 capability columns. Idempotent."""
+    insp = _inspect(engine)
+    if "jobs" in insp.get_table_names():
+        existing = {c["name"] for c in insp.get_columns("jobs")}
+        with engine.begin() as conn:
+            for col, ddl in _JOB_ADDS:
+                if col not in existing:
+                    conn.execute(_text(f"ALTER TABLE jobs ADD COLUMN {col} {ddl}"))
+    if "workers" in insp.get_table_names():
+        existing = {c["name"] for c in insp.get_columns("workers")}
+        with engine.begin() as conn:
+            for col, ddl in _WORKER_ADDS:
+                if col not in existing:
+                    conn.execute(_text(f"ALTER TABLE workers ADD COLUMN {col} {ddl}"))

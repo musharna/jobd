@@ -26,7 +26,7 @@ from jobd.config import (
     resolve_priority,
     resolve_profile,
 )
-from jobd.db import Job, Worker, init_db
+from jobd.db import Job, Worker, init_db, migrate
 from jobd.models import (
     JobSubmit,
     JobInfo,
@@ -59,13 +59,10 @@ def build_app(
 
     engine = create_engine(db_url, future=True)
     init_db(engine)
+    migrate(engine)
     SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
-    logs_dir = (
-        Path(logs_path)
-        if logs_path
-        else Path(os.environ.get("JOBD_LOGS_DIR", "./logs"))
-    )
+    logs_dir = Path(logs_path) if logs_path else Path(os.environ.get("JOBD_LOGS_DIR", "./logs"))
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     state = {
@@ -92,9 +89,7 @@ def build_app(
         if req.profile:
             profile_spec = resolve_profile(state["profiles"], req.profile)
             if profile_spec is None:
-                raise HTTPException(
-                    status_code=404, detail=f"unknown profile: {req.profile}"
-                )
+                raise HTTPException(status_code=404, detail=f"unknown profile: {req.profile}")
 
         priority = resolve_priority(state["projects"], req.project, req.priority_delta)
         host_pin = req.host_pin
@@ -104,9 +99,7 @@ def build_app(
         vram_gb = profile_spec.vram_gb if profile_spec else 0
         ram_gb = profile_spec.ram_gb if profile_spec else 0
         cpus = profile_spec.cpus if profile_spec else 1
-        preemptible = req.preemptible or (
-            profile_spec.preemptible if profile_spec else False
-        )
+        preemptible = req.preemptible or (profile_spec.preemptible if profile_spec else False)
 
         with SessionLocal() as session:
             job = Job(
@@ -225,9 +218,7 @@ def build_app(
                 if JobState(job.state) in TERMINAL_STATES:
                     yield {
                         "event": "terminal",
-                        "data": json.dumps(
-                            {"state": job.state, "exit_code": job.exit_code}
-                        ),
+                        "data": json.dumps({"state": job.state, "exit_code": job.exit_code}),
                     }
                     return
 
@@ -266,9 +257,7 @@ def build_app(
 
         with SessionLocal() as session:
             queued = (
-                session.execute(select(Job).where(Job.state == JobState.QUEUED))
-                .scalars()
-                .all()
+                session.execute(select(Job).where(Job.state == JobState.QUEUED)).scalars().all()
             )
             worker_row = session.execute(
                 select(Worker).where(Worker.host == q.host)
@@ -292,9 +281,7 @@ def build_app(
             result = session.execute(
                 Job.__table__.update()
                 .where(Job.id == pick.id, Job.state == JobState.QUEUED)
-                .values(
-                    state=JobState.ASSIGNED, worker=q.host, started_at=datetime.now(UTC)
-                )
+                .values(state=JobState.ASSIGNED, worker=q.host, started_at=datetime.now(UTC))
             )
             session.commit()
             if result.rowcount == 0:
@@ -335,9 +322,7 @@ def build_app(
 def _persist_projects(state: dict) -> None:
     """Write the in-memory projects dict back to YAML in the canonical shape."""
     data = {
-        "projects": {
-            name: {"priority": priority} for name, priority in state["projects"].items()
-        }
+        "projects": {name: {"priority": priority} for name, priority in state["projects"].items()}
     }
     state["paths"]["projects"].write_text(yaml.safe_dump(data, sort_keys=False))
 
