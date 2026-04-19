@@ -51,12 +51,22 @@ class Job(Base):
 
     @property
     def requires(self):
-        """Parse requires_json to JobRequires | None for matcher Protocol."""
+        """Parse requires_json to JobRequires | None for matcher Protocol.
+
+        Malformed JSON is treated as null so a corrupt row can't crash the
+        matcher loop; callers that need validation should use JobRequires
+        directly on submit.
+        """
+        from pydantic import ValidationError
+
         from jobd.models import JobRequires
 
         if not self.requires_json or self.requires_json == "{}":
             return None
-        return JobRequires.model_validate_json(self.requires_json)
+        try:
+            return JobRequires.model_validate_json(self.requires_json)
+        except (ValidationError, ValueError):
+            return None
 
 
 class Worker(Base):
