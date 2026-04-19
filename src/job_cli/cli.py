@@ -1,4 +1,5 @@
 """job CLI — thin HTTP client against jobd."""
+
 from __future__ import annotations
 
 import json
@@ -23,31 +24,47 @@ def submit(
     project: str = typer.Option(..., "--project", "-p"),
     profile: str | None = typer.Option(None, "--profile"),
     host: str = typer.Option("any", "--host"),
-    priority: int = typer.Option(0, "--priority"),
+    priority_delta: int = typer.Option(0, "--priority-delta"),
     preemptible: bool = typer.Option(False, "--preemptible"),
-    cwd: str = typer.Option(os.getcwd(), "--cwd"),
+    cwd: str = typer.Option(lambda: os.getcwd(), "--cwd"),
     wait: bool = typer.Option(False, "--wait", "-w"),
+    needs: list[str] = typer.Option(None, "--needs", help="required capability tag (repeatable)"),
+    arch: str = typer.Option("any", "--arch"),
+    os_: str = typer.Option("any", "--os"),
+    gpu: bool | None = typer.Option(None, "--gpu/--no-gpu"),
+    idempotent: bool = typer.Option(False, "--idempotent"),
+    session_id: str | None = typer.Option(None, "--session-id"),
 ):
     """Submit a job. With --wait, stream logs until terminal state."""
-    with _client() as c:
-        r = c.post(
-            "/submit",
-            json={
-                "cmd": cmd,
-                "cwd": cwd,
-                "project": project,
-                "profile": profile,
-                "host_pin": host,
-                "priority_delta": priority,
-                "preemptible": preemptible,
-                "session_id": os.environ.get("CLAUDE_SESSION_ID"),
-            },
-        )
+    if session_id is None:
+        session_id = os.environ.get("CLAUDE_SESSION_ID")
+    requires: dict | None = None
+    if needs or arch != "any" or os_ != "any" or gpu is not None or idempotent:
+        requires = {
+            "arch": arch,
+            "os": os_,
+            "gpu": gpu,
+            "needs": list(needs or []),
+            "idempotent": idempotent,
+        }
+    body: dict = {
+        "cmd": cmd,
+        "cwd": cwd,
+        "project": project,
+        "profile": profile,
+        "host_pin": host,
+        "priority_delta": priority_delta,
+        "preemptible": preemptible,
+        "session_id": session_id,
+    }
+    if requires is not None:
+        body["requires"] = requires
+    r = httpx.post(f"{BASE}/submit", json=body)
+    if r.is_error:
         r.raise_for_status()
-        job = r.json()
-        typer.echo(json.dumps(job, default=str))
-        if not wait:
-            return
+    job = r.json()
+    typer.echo(json.dumps(job, default=str))
+    if wait:
         _stream_wait(job["id"])
 
 
@@ -87,7 +104,11 @@ def list_jobs(
         r = c.get("/jobs", params=params)
         r.raise_for_status()
         for j in r.json():
-            typer.echo(f"{j['id']:>5}  {j['state']:>10}  {j['project']:>20}  {' '.join(j['cmd'])[:80]}")
+            typer.echo(
+                f"{j['id']:>5}  {j['state']:>10}  {j['project']:>20}  {' '.join(j['cmd'])[:80]}"
+            )
+            if j.get("warning"):
+                typer.secho(f"  \u26a0 {j['warning']}", fg="yellow")
 
 
 @app.command()
