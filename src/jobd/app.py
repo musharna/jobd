@@ -444,7 +444,9 @@ def build_app(
                     cpus=j.cpus,
                     requires=req,
                 )
-                matcheable = any(selectors_only_match(shim, ws) for ws in snapshots)
+                # req=None means job matches any worker by definition — an empty
+                # fleet is a queueing delay, not a capability mismatch.
+                matcheable = req is None or any(selectors_only_match(shim, ws) for ws in snapshots)
                 if not matcheable and j.warning is None:
                     j.warning = (
                         f"no matching worker — none of {host_list} advertise required capabilities"

@@ -536,6 +536,97 @@ def test_unmatcheable_job_gets_warning(client):
     assert "no matching worker" in got["warning"].lower()
 
 
+def test_no_requires_job_never_gets_warning_on_empty_fleet(client):
+    """A job with no requires block is matcheable by definition — empty fleet != mismatch."""
+    from datetime import UTC, datetime, timedelta
+
+    from jobd import app as app_mod
+    from jobd.db import Job
+    from sqlalchemy import update
+
+    # No heartbeats — empty fleet
+    r = client.post(
+        "/submit",
+        json={"cmd": ["true"], "cwd": "/tmp", "project": "project-x"},
+    )
+    job_id = r.json()["id"]
+
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(submitted_at=datetime.now(UTC) - timedelta(seconds=90))
+        )
+
+    app_mod._sweep_once()
+    assert client.get(f"/jobs/{job_id}").json()["warning"] is None
+
+
+def test_warning_clears_when_matching_worker_appears(client):
+    """Warning set on unmatcheable job clears once a capable worker heartbeats."""
+    from datetime import UTC, datetime, timedelta
+
+    from jobd import app as app_mod
+    from jobd.db import Job
+    from sqlalchemy import update
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "x86box",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/tmp",
+            "project": "project-x",
+            "requires": {"arch": "arm64"},
+        },
+    )
+    job_id = r.json()["id"]
+
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(submitted_at=datetime.now(UTC) - timedelta(seconds=90))
+        )
+    app_mod._sweep_once()
+    assert client.get(f"/jobs/{job_id}").json()["warning"] is not None
+
+    # arm64 worker joins the fleet
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "pi4",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 3,
+            "idle_cpus": 4,
+            "arch": "arm64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    app_mod._sweep_once()
+    assert client.get(f"/jobs/{job_id}").json()["warning"] is None
+
+
 def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
     """A job with requires.idempotent=true reclaims after 90s, not 5min."""
     from datetime import UTC, datetime, timedelta
