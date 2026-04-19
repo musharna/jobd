@@ -29,11 +29,19 @@ def submit(
     cwd: str = typer.Option(lambda: os.getcwd(), "--cwd"),
     wait: bool = typer.Option(False, "--wait", "-w"),
     needs: list[str] = typer.Option(None, "--needs", help="required capability tag (repeatable)"),
-    arch: str = typer.Option("any", "--arch"),
-    os_: str = typer.Option("any", "--os"),
-    gpu: bool | None = typer.Option(None, "--gpu/--no-gpu"),
-    idempotent: bool = typer.Option(False, "--idempotent"),
-    session_id: str | None = typer.Option(None, "--session-id"),
+    arch: str = typer.Option("any", "--arch", help="required worker arch (any|x86_64|arm64|arm7)"),
+    os_: str = typer.Option("any", "--os", help="required worker OS (any|linux|darwin|windows)"),
+    gpu: bool | None = typer.Option(
+        None,
+        "--gpu/--no-gpu",
+        help="require GPU (--gpu) / forbid GPU (--no-gpu) / don't care (default)",
+    ),
+    idempotent: bool = typer.Option(
+        False, "--idempotent", help="reclaim orphaned run after 90s instead of 5min"
+    ),
+    session_id: str | None = typer.Option(
+        None, "--session-id", help="tag job with a session id (defaults to $CLAUDE_SESSION_ID)"
+    ),
 ):
     """Submit a job. With --wait, stream logs until terminal state."""
     if session_id is None:
