@@ -19,7 +19,11 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Iterable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capabilities import detect as _detect_caps  # noqa: E402
 
 import httpx
 import psutil
@@ -37,6 +41,8 @@ HEARTBEAT_INTERVAL_S = 5.0
 SIGNAL_POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 30.0
 
+_CAPS = _detect_caps()
+
 
 def hostname() -> str:
     h = socket.gethostname()
@@ -53,9 +59,7 @@ def nvidia_processes() -> list[tuple[int, int]]:
         try:
             procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
             for p in procs:
-                out.append(
-                    (p.pid, p.usedGpuMemory // (1024 * 1024) if p.usedGpuMemory else 0)
-                )
+                out.append((p.pid, p.usedGpuMemory // (1024 * 1024) if p.usedGpuMemory else 0))
         except pynvml.NVMLError:
             pass
     return out
@@ -96,12 +100,14 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
     return {
         "host": hostname(),
         "free_vram_gb": nvidia_free_vram_gb(),
-        "unregistered_vram_gb": compute_unregistered_vram(
-            nvidia_processes(), tracked_pids
-        ),
+        "unregistered_vram_gb": compute_unregistered_vram(nvidia_processes(), tracked_pids),
         "free_ram_gb": round(vm.available / (1024**3), 2),
         "idle_cpus": idle_cpus,
         "host_aliases": _configured_aliases(),
+        "arch": _CAPS.arch,
+        "os": _CAPS.os,
+        "gpu": _CAPS.gpu,
+        "tags": list(_CAPS.tags),
     }
 
 
@@ -117,9 +123,7 @@ def pick_resource_snapshot_mock():
     }
 
 
-def heartbeat_loop(
-    client: httpx.Client, tracked_pids: set[int], stop_event: threading.Event
-):
+def heartbeat_loop(client: httpx.Client, tracked_pids: set[int], stop_event: threading.Event):
     while not stop_event.is_set():
         try:
             snap = resource_snapshot(tracked_pids)
