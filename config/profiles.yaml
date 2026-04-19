@@ -6,7 +6,9 @@ profiles:
     expected_runtime: 8h
     preemptible: true
     host_hint: desktop
-    requires: [cuda>=12.8]
+    requires:
+      gpu: true
+      needs: [cuda]
 
   stylegan2-train:
     vram_gb: 18
@@ -15,6 +17,9 @@ profiles:
     expected_runtime: 24h
     preemptible: true
     host_hint: desktop
+    requires:
+      gpu: true
+      needs: [cuda]
 
   jepagame-sim:
     vram_gb: 8
@@ -23,6 +28,8 @@ profiles:
     expected_runtime: 1h
     preemptible: false
     host_hint: desktop
+    requires:
+      gpu: true
 
   clip-audit:
     vram_gb: 6
@@ -31,6 +38,8 @@ profiles:
     expected_runtime: 20m
     preemptible: true
     host_hint: any-gpu
+    requires:
+      gpu: true
 
   rnaseq-3worker:
     vram_gb: 0

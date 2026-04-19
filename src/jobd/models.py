@@ -1,11 +1,12 @@
 """Pydantic request/response models for the jobd HTTP API."""
+
 from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class JobState(StrEnum):
@@ -26,6 +27,16 @@ class ResourceReq(BaseModel):
     cpus: int = 1
 
 
+class JobRequires(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    arch: str = "any"
+    os: str = "any"
+    gpu: bool | None = None
+    needs: list[str] = Field(default_factory=list)
+    idempotent: bool = False
+
+
 class JobSubmit(BaseModel):
     cmd: list[str] = Field(..., min_length=1)
     cwd: str
@@ -36,6 +47,7 @@ class JobSubmit(BaseModel):
     preemptible: bool = False
     env: dict[str, str] = Field(default_factory=dict)
     session_id: str | None = None
+    requires: JobRequires | None = None
 
     @field_validator("priority_delta")
     @classmethod
@@ -61,6 +73,8 @@ class JobInfo(BaseModel):
     vram_gb: float = 0
     ram_gb: float = 0
     cpus: int = 1
+    requires: JobRequires | None = None
+    warning: str | None = None
 
 
 class WorkerHeartbeat(BaseModel):
@@ -70,6 +84,10 @@ class WorkerHeartbeat(BaseModel):
     free_ram_gb: float
     idle_cpus: int
     host_aliases: list[str] = Field(default_factory=list)
+    arch: str = "unknown"
+    os: str = "unknown"
+    gpu: bool = False
+    tags: list[str] = Field(default_factory=list)
 
 
 class NextJobQuery(BaseModel):
@@ -78,6 +96,10 @@ class NextJobQuery(BaseModel):
     unregistered_vram_gb: float
     free_ram_gb: float
     idle_cpus: int
+    arch: str = "unknown"
+    os: str = "unknown"
+    gpu: bool = False
+    tags: list[str] = Field(default_factory=list)
 
 
 class ClassifyRequest(BaseModel):
@@ -107,4 +129,4 @@ class ProfileSpec(BaseModel):
     host_hint: str = "any"
     exclusive: bool = False
     fast_path: bool = False
-    requires: list[str] = Field(default_factory=list)
+    requires: JobRequires | None = None
