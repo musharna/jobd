@@ -150,3 +150,32 @@ def test_malformed_yaml_does_not_crash(tmp_path, monkeypatch):
     ):
         c = detect()
     assert c.arch == "x86_64"  # fell back to auto-detect, no crash
+
+
+def test_on_battery_multi_battery_discharging_found_second(tmp_path, monkeypatch):
+    """Two batteries: first is Full, second is Discharging → True."""
+    import capabilities as caps_mod
+
+    for name, status in [("BAT0", "Full"), ("BAT1", "Discharging")]:
+        bat = tmp_path / name
+        bat.mkdir()
+        (bat / "type").write_text("Battery\n")
+        (bat / "status").write_text(f"{status}\n")
+    monkeypatch.setattr(caps_mod, "_POWER_SUPPLY_ROOT", tmp_path)
+    assert caps_mod._on_battery() is True
+
+
+def test_binary_config_file_does_not_crash(tmp_path, monkeypatch):
+    """Non-UTF-8 bytes in worker.yaml fall back to auto-detect."""
+    cfg = tmp_path / "worker.yaml"
+    cfg.write_bytes(b"\xff\xfe\x00\x01\x02\x03\xc3\x28")  # invalid UTF-8
+    monkeypatch.setenv("JOBD_WORKER_CONFIG", str(cfg))
+    with (
+        patch("capabilities.platform.machine", return_value="x86_64"),
+        patch("capabilities.platform.system", return_value="Linux"),
+        patch("capabilities.shutil.which", return_value=None),
+        patch("capabilities._has_nvidia", return_value=False),
+        patch("capabilities._wsl", return_value=False),
+    ):
+        c = detect()
+    assert c.arch == "x86_64"
