@@ -21,6 +21,8 @@ from pathlib import Path
 import yaml
 
 
+_POWER_SUPPLY_ROOT = Path("/sys/class/power_supply")
+
 _ARCH_MAP = {
     "x86_64": "x86_64",
     "amd64": "x86_64",
@@ -56,15 +58,17 @@ def _wsl() -> bool:
 
 
 def _on_battery() -> bool | None:
-    """Return True if any /sys/class/power_supply reports battery discharging, else None."""
+    """Return True if a battery reports Discharging, False if no battery is discharging, None if unknown."""
     try:
-        base = Path("/sys/class/power_supply")
-        if not base.exists():
+        if not _POWER_SUPPLY_ROOT.exists():
             return None
-        for p in base.iterdir():
+        for p in _POWER_SUPPLY_ROOT.iterdir():
             type_f = p / "type"
             if type_f.exists() and type_f.read_text().strip() == "Battery":
-                return True
+                status_f = p / "status"
+                if status_f.exists():
+                    return status_f.read_text().strip() == "Discharging"
+                return None
         return False
     except OSError:
         return None
@@ -110,7 +114,7 @@ def _load_config_overrides() -> dict:
         return {}
     try:
         return yaml.safe_load(p.read_text()) or {}
-    except OSError:
+    except (OSError, yaml.YAMLError):
         return {}
 
 

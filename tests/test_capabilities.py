@@ -10,7 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker"))
 
-from capabilities import detect  # noqa: E402
+from capabilities import Capabilities, detect  # noqa: E402
 
 
 def test_detect_arch_x86_64():
@@ -26,6 +26,7 @@ def test_detect_arch_x86_64():
     assert c.arch == "x86_64"
     assert c.os == "linux"
     assert c.gpu is False
+    assert isinstance(c, Capabilities)
 
 
 def test_detect_arm64_linux_no_gpu():
@@ -99,3 +100,53 @@ def test_config_file_override_replaces_arch(tmp_path, monkeypatch):
         c = detect()
     assert c.arch == "arm7"
     assert "custom-tag" in c.tags
+
+
+# --- Battery detection tests (Fix 1) ---
+
+
+def test_on_battery_discharging(tmp_path, monkeypatch):
+    bat = tmp_path / "BAT0"
+    bat.mkdir()
+    (bat / "type").write_text("Battery\n")
+    (bat / "status").write_text("Discharging\n")
+    import capabilities as caps_mod
+
+    monkeypatch.setattr(caps_mod, "_POWER_SUPPLY_ROOT", tmp_path)
+    assert caps_mod._on_battery() is True
+
+
+def test_on_battery_not_discharging(tmp_path, monkeypatch):
+    bat = tmp_path / "BAT0"
+    bat.mkdir()
+    (bat / "type").write_text("Battery\n")
+    (bat / "status").write_text("Not charging\n")
+    import capabilities as caps_mod
+
+    monkeypatch.setattr(caps_mod, "_POWER_SUPPLY_ROOT", tmp_path)
+    assert caps_mod._on_battery() is False
+
+
+def test_on_battery_no_battery_dir(tmp_path, monkeypatch):
+    import capabilities as caps_mod
+
+    monkeypatch.setattr(caps_mod, "_POWER_SUPPLY_ROOT", tmp_path / "does-not-exist")
+    assert caps_mod._on_battery() is None
+
+
+# --- Malformed YAML test (Fix 2) ---
+
+
+def test_malformed_yaml_does_not_crash(tmp_path, monkeypatch):
+    cfg = tmp_path / "worker.yaml"
+    cfg.write_text("arch: [unclosed list\nnot valid yaml:\n  - :")
+    monkeypatch.setenv("JOBD_WORKER_CONFIG", str(cfg))
+    with (
+        patch("capabilities.platform.machine", return_value="x86_64"),
+        patch("capabilities.platform.system", return_value="Linux"),
+        patch("capabilities.shutil.which", return_value=None),
+        patch("capabilities._has_nvidia", return_value=False),
+        patch("capabilities._wsl", return_value=False),
+    ):
+        c = detect()
+    assert c.arch == "x86_64"  # fell back to auto-detect, no crash
