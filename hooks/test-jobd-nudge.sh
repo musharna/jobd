@@ -103,6 +103,19 @@ run_case "ssh-desktop-match" \
 	"ssh-desktop" \
 	"ssh-desktop"
 
+# Negative case: path-like substring must NOT match heavy-run-wrap
+# (regression guard for the \b false-positive bug).
+run_case "heavy-run-path-suffix-no-match" \
+	'{"tool_input":{"command":"ls -la /opt/my-heavy-run/bin"},"session_id":"sA"}' \
+	"" ""
+
+# Positive case: modern python version must match python-train
+# (regression guard for python3.11+ support).
+run_case "python311-train-match" \
+	'{"tool_input":{"command":"python3.11 train.py --cfg config.yaml"},"session_id":"sB"}' \
+	"python-train" \
+	"python-train"
+
 echo "----"
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
