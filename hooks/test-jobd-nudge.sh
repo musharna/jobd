@@ -116,6 +116,26 @@ run_case "python311-train-match" \
 	"python-train" \
 	"python-train"
 
+# Multi-line command: the hook must log a single TSV line (no embedded LF).
+# Use jq to safely encode the payload; avoids quoting pain with embedded \n.
+multiline_payload=$(jq -nc --arg cmd $'heavy-run python a.py\nheavy-run python b.py' \
+	'{tool_input:{command:$cmd},session_id:"s9"}')
+
+tmplog=$(mktemp)
+rm -f "$tmplog"
+JOBD_NUDGE_LOG="$tmplog" bash "$HOOK" <<<"$multiline_payload" >/dev/null 2>&1
+log_line_count=$(wc -l <"$tmplog" 2>/dev/null || echo 0)
+log_first_line=$(head -n1 "$tmplog" 2>/dev/null || echo "")
+rm -f "$tmplog"
+
+if [[ "$log_line_count" -eq 1 ]] && echo "$log_first_line" | grep -qF "heavy-run python a.py heavy-run python b.py"; then
+	echo "PASS [multi-line-flattens]"
+	PASS=$((PASS + 1))
+else
+	echo "FAIL [multi-line-flattens]: lines=$log_line_count first='$log_first_line'"
+	FAIL=$((FAIL + 1))
+fi
+
 echo "----"
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
