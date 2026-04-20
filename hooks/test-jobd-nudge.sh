@@ -116,6 +116,14 @@ run_case "python311-train-match" \
 	"python-train" \
 	"python-train"
 
+# Positive case: anaconda absolute-path python must match python-train.
+# Covers real invocations like those emitted by `conda run` or scripts that
+# invoke the env's python directly without prior activation.
+run_case "anaconda-path-python-train-match" \
+	'{"tool_input":{"command":"~/anaconda3/envs/stylegan2/bin/python train.py --cfg c.yaml"},"session_id":"sC"}' \
+	"python-train" \
+	"python-train"
+
 # Multi-line command: the hook must log a single TSV line (no embedded LF).
 # Use jq to safely encode the payload; avoids quoting pain with embedded \n.
 multiline_payload=$(jq -nc --arg cmd $'heavy-run python a.py\nheavy-run python b.py' \
