@@ -179,3 +179,40 @@ def test_binary_config_file_does_not_crash(tmp_path, monkeypatch):
     ):
         c = detect()
     assert c.arch == "x86_64"
+
+
+def test_has_nvidia_detects_wsl_stub_path():
+    """_has_nvidia returns True when /usr/lib/wsl/lib/nvidia-smi exists even if PATH lookup fails."""
+    import capabilities as caps_mod
+
+    real_exists = Path.exists
+
+    def fake_exists(self):
+        if str(self) == "/usr/lib/wsl/lib/nvidia-smi":
+            return True
+        return real_exists(self)
+
+    with (
+        patch("capabilities.shutil.which", return_value=None),
+        patch("pathlib.Path.exists", fake_exists),
+    ):
+        assert caps_mod._has_nvidia() is True
+
+
+def test_has_nvidia_falls_back_to_pynvml():
+    """When no filesystem signal is present, a successful pynvml.nvmlInit is enough."""
+    import sys
+    import types
+
+    import capabilities as caps_mod
+
+    fake_pynvml = types.SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: None,
+    )
+    with (
+        patch("capabilities.shutil.which", return_value=None),
+        patch("pathlib.Path.exists", lambda self: False),
+        patch.dict(sys.modules, {"pynvml": fake_pynvml}),
+    ):
+        assert caps_mod._has_nvidia() is True
