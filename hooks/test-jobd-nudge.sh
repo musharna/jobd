@@ -68,6 +68,11 @@ run_case "missing-command-field" \
 	'{"session_id":"s1"}' \
 	"" ""
 
+run_case "r-pipeline-match" \
+	'{"tool_input":{"command":"Rscript phelipanche/run_pipeline.R --cfg a.yaml"},"session_id":"s2"}' \
+	"r-pipeline" \
+	"r-pipeline"
+
 echo "----"
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
