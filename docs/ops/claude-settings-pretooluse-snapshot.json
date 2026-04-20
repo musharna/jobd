@@ -1,0 +1,32 @@
+[
+  {
+    "matcher": "Edit|Write",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "bash -c 'INPUT=$(cat); FILE=$(echo \"$INPUT\" | jq -r \".tool_input.file_path // empty\"); for p in .env .env.local secrets/ .git/ credentials package-lock.json pnpm-lock.yaml; do if [[ \"$FILE\" == *\"$p\"* ]]; then echo \"Blocked: $FILE matches protected pattern $p\" >&2; exit 2; fi; done; exit 0'",
+        "timeout": 5
+      }
+    ]
+  },
+  {
+    "matcher": "Bash",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "bash -c 'CMD=$(jq -r \".tool_input.command\" <<< \"$(cat)\"); for p in \"rm -rf /$\" \"rm -rf ~$\" \"rm -rf \\\\.$\" \"drop table\" \"DROP TABLE\" \"truncate table\" \"TRUNCATE TABLE\" \"git push.*--force\" \"git reset --hard\"; do if echo \"$CMD\" | grep -qiE \"$p\"; then echo \"Blocked: destructive pattern \\\"$p\\\" detected in: $CMD\" >&2; exit 2; fi; done; exit 0'",
+        "timeout": 5
+      }
+    ]
+  },
+  {
+    "matcher": "Bash",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "bash ~/.claude/hooks/jobd-nudge.sh",
+        "timeout": 5
+      }
+    ]
+  }
+]
