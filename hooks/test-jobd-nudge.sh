@@ -73,6 +73,36 @@ run_case "r-pipeline-match" \
 	"r-pipeline" \
 	"r-pipeline"
 
+run_case "heavy-run-wrap-match" \
+	'{"tool_input":{"command":"heavy-run python eval.py"},"session_id":"s3"}' \
+	"heavy-run-wrap" \
+	"heavy-run-wrap"
+
+run_case "python-train-match" \
+	'{"tool_input":{"command":"python train.py --cfg config.yaml"},"session_id":"s4"}' \
+	"python-train" \
+	"python-train"
+
+run_case "accelerate-match" \
+	'{"tool_input":{"command":"accelerate launch --num_processes 1 run.py"},"session_id":"s5"}' \
+	"accelerate" \
+	"accelerate"
+
+run_case "dvc-repro-match" \
+	'{"tool_input":{"command":"dvc repro"},"session_id":"s6"}' \
+	"dvc-repro" \
+	"dvc-repro"
+
+run_case "snakemake-match" \
+	'{"tool_input":{"command":"snakemake --cores 4 all"},"session_id":"s7"}' \
+	"snakemake" \
+	"snakemake"
+
+run_case "ssh-desktop-match" \
+	'{"tool_input":{"command":"ssh desktop-wsl cd ~/orchid && python train.py"},"session_id":"s8"}' \
+	"ssh-desktop" \
+	"ssh-desktop"
+
 echo "----"
 echo "PASS: $PASS  FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

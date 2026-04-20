@@ -35,11 +35,26 @@ fi
 # Evaluated in order; first match wins. Add new rules by appending to both
 # arrays. Keep regexes as ERE (grep -E) syntax.
 RULE_IDS=(
+	"heavy-run-wrap"
+	"ssh-desktop"
 	"r-pipeline"
+	"python-train"
+	"accelerate"
+	"dvc-repro"
+	"snakemake"
 )
 RULE_REGEXES=(
+	'\bheavy-run\b'
+	'(^|[[:space:]])ssh[[:space:]]+desktop(-wsl)?[[:space:]]+.*(train|pipeline|run_)'
 	'(^|[[:space:]])Rscript[[:space:]]+.*(pipeline|run_[a-zA-Z_]+)\.R\b'
+	'(^|[[:space:]])python[0-9]?[[:space:]]+.*train\.py\b'
+	'(^|[[:space:]])accelerate[[:space:]]+launch\b'
+	'(^|[[:space:]])dvc[[:space:]]+repro\b'
+	'(^|[[:space:]])snakemake\b'
 )
+if ((${#RULE_IDS[@]} != ${#RULE_REGEXES[@]})); then
+	exit 0 # misconfigured hook; fail safe
+fi
 
 MATCHED_ID=""
 for i in "${!RULE_IDS[@]}"; do
@@ -57,11 +72,12 @@ fi
 # Log the event. Replace newlines with spaces so each event is one line.
 # Failure to write the log must not prevent the stderr nudge.
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-CMD_ONELINE=$(printf '%s' "$CMD" | tr '\n\r' '  ')
+CMD_ONELINE=$(printf '%s' "$CMD" | tr '\n\r\t' '   ')
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 printf '%s\t%s\t%s\t%s\n' "$TS" "$SESSION_ID" "$MATCHED_ID" "$CMD_ONELINE" >>"$LOG" 2>/dev/null || true
 
 # Emit the nudge on stderr. Claude reads this in the tool result.
+# Unquoted <<EOF: $MATCHED_ID expands; \$(pwd) stays literal in the output.
 cat >&2 <<EOF
 ⚠ jobd: this looks like a $MATCHED_ID job. Prefer:
     job submit --project <your-project> --cwd \$(pwd) [--gpu] [--needs R|python3] --wait -- <cmd>

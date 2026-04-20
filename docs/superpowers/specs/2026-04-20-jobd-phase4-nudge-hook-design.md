@@ -105,12 +105,12 @@ Hardcoded in the script. Each rule has a stable `rule_id` for log analysis.
 | rule_id          | regex (ERE)                                                                          | covers                               |
 | ---------------- | ------------------------------------------------------------------------------------ | ------------------------------------ |
 | `heavy-run-wrap` | `\bheavy-run\b`                                                                      | legacy `heavy-run <cmd>` invocations |
+| `ssh-desktop`    | `(^\|[[:space:]])ssh[[:space:]]+desktop(-wsl)?[[:space:]]+.*(train\|pipeline\|run_)` | ssh-wrapped heavy                    |
 | `r-pipeline`     | `(^\|[[:space:]])Rscript[[:space:]]+.*(pipeline\|run_[a-zA-Z_]+)\.R\b`               | R pipelines                          |
 | `python-train`   | `(^\|[[:space:]])python[0-9]?[[:space:]]+.*train\.py\b`                              | python training scripts              |
 | `accelerate`     | `(^\|[[:space:]])accelerate[[:space:]]+launch\b`                                     | HF Accelerate training               |
 | `dvc-repro`      | `(^\|[[:space:]])dvc[[:space:]]+repro\b`                                             | DVC pipeline repro                   |
 | `snakemake`      | `(^\|[[:space:]])snakemake\b`                                                        | Snakemake runs                       |
-| `ssh-desktop`    | `(^\|[[:space:]])ssh[[:space:]]+desktop(-wsl)?[[:space:]]+.*(train\|pipeline\|run_)` | ssh-wrapped heavy                    |
 
 **Deliberately omitted** (to avoid noise in the trial):
 
@@ -119,7 +119,7 @@ Hardcoded in the script. Each rule has a stable `rule_id` for log analysis.
 - Bare `python <script>.py` — too broad, false-positives
 - Model-name substrings (sdxl, stylegan) — already covered by training-script rules
 
-Rules are evaluated in the order listed; first match wins.
+Rules are evaluated in the order listed; first match wins. **Wrapper rules (`heavy-run-wrap`, `ssh-desktop`) come before the underlying-command rules they can shadow** — if a user runs `ssh desktop-wsl ... python train.py`, the more actionable nudge is "submit via jobd instead of ssh-wrapping," not "this is python training."
 
 ## Nudge message format
 
@@ -132,7 +132,7 @@ Emitted to stderr on match:
   (Nudge is non-blocking — proceeding.)
 ```
 
-Claude reads stderr in the same tool result. The message is specific about _why_ (the rule_id), _what to do_ (the `job submit` template), and _that it wasn't blocked_ (so Claude doesn't think it has to re-invoke).
+Claude reads stderr in the same tool result. The message is specific about _why_ (the rule*id), \_what to do* (the `job submit` template), and _that it wasn't blocked_ (so Claude doesn't think it has to re-invoke).
 
 ## Data flow
 
