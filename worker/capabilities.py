@@ -44,9 +44,20 @@ class Capabilities:
 def _has_nvidia() -> bool:
     if shutil.which("nvidia-smi"):
         return True
+    if Path("/usr/lib/wsl/lib/nvidia-smi").exists():
+        return True
     try:
-        return Path("/proc/driver/nvidia/version").exists()
+        if Path("/proc/driver/nvidia/version").exists():
+            return True
     except OSError:
+        pass
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        pynvml.nvmlShutdown()
+        return True
+    except Exception:
         return False
 
 
