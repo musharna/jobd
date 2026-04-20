@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Unit tests for jobd-nudge.sh. Pipes JSON payloads in and asserts on
+# exit code, stderr, and log contents. Each case uses its own temp log.
+set -u
+
+HOOK="$(cd "$(dirname "$0")" && pwd)/jobd-nudge.sh"
+PASS=0
+FAIL=0
+
+run_case() {
+	# run_case NAME PAYLOAD EXPECT_STDERR_SUBSTR EXPECT_LOG_SUBSTR
+	local name="$1" payload="$2" expect_stderr="$3" expect_log="$4"
+	local tmplog stderr exit_code actual_log
+	tmplog=$(mktemp)
+	rm -f "$tmplog"
+	stderr=$(JOBD_NUDGE_LOG="$tmplog" bash "$HOOK" <<<"$payload" 2>&1 >/dev/null)
+	exit_code=$?
+	actual_log=""
+	[[ -f "$tmplog" ]] && actual_log=$(cat "$tmplog")
+	rm -f "$tmplog"
+
+	if [[ $exit_code -ne 0 ]]; then
+		echo "FAIL [$name]: exit $exit_code (want 0)"
+		FAIL=$((FAIL + 1))
+		return
+	fi
+	if [[ -n "$expect_stderr" ]]; then
+		if ! echo "$stderr" | grep -qF "$expect_stderr"; then
+			echo "FAIL [$name]: stderr missing '$expect_stderr' — got: $stderr"
+			FAIL=$((FAIL + 1))
+			return
+		fi
+	else
+		if [[ -n "$stderr" ]]; then
+			echo "FAIL [$name]: expected empty stderr, got: $stderr"
+			FAIL=$((FAIL + 1))
+			return
+		fi
+	fi
+	if [[ -n "$expect_log" ]]; then
+		if ! echo "$actual_log" | grep -qF "$expect_log"; then
+			echo "FAIL [$name]: log missing '$expect_log' — got: $actual_log"
+			FAIL=$((FAIL + 1))
+			return
+		fi
+	else
+		if [[ -n "$actual_log" ]]; then
+			echo "FAIL [$name]: expected empty log, got: $actual_log"
+			FAIL=$((FAIL + 1))
+			return
+		fi
+	fi
+	echo "PASS [$name]"
+	PASS=$((PASS + 1))
+}
+
+# --- fixtures ---
+
+run_case "non-match-ls" \
+	'{"tool_input":{"command":"ls -la"},"session_id":"s1"}' \
+	"" ""
+
+run_case "malformed-json" \
+	'{not valid}' \
+	"" ""
+
+run_case "missing-command-field" \
+	'{"session_id":"s1"}' \
+	"" ""
+
+echo "----"
+echo "PASS: $PASS  FAIL: $FAIL"
+[[ $FAIL -eq 0 ]]
