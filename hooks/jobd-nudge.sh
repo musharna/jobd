@@ -47,7 +47,7 @@ RULE_REGEXES=(
 	'(^|[[:space:]])heavy-run([[:space:]]|$)'
 	'(^|[[:space:]])ssh[[:space:]]+desktop(-wsl)?[[:space:]]+.*(train|pipeline|run_)'
 	'(^|[[:space:]])Rscript[[:space:]]+.*(pipeline|run_[a-zA-Z_]+)\.R\b'
-	'(^|[[:space:]])python[0-9]*(\.[0-9]+)?[[:space:]]+.*train\.py\b'
+	'(^|[[:space:]]|/)python[0-9]*(\.[0-9]+)?[[:space:]]+.*train\.py\b'
 	'(^|[[:space:]])accelerate[[:space:]]+launch\b'
 	'(^|[[:space:]])dvc[[:space:]]+repro\b'
 	'(^|[[:space:]])snakemake\b'
