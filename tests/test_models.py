@@ -92,3 +92,60 @@ def test_worker_heartbeat_capability_defaults():
     assert h.os == "unknown"
     assert h.gpu is False
     assert h.tags == []
+
+
+def test_jobinfo_naive_datetime_serialized_as_utc():
+    """Naive datetimes (as round-tripped through the plain DateTime column)
+    must serialize with explicit UTC offset, not as bare strings."""
+    from datetime import datetime
+
+    from jobd.models import JobInfo
+
+    info = JobInfo(
+        id=1,
+        project="p",
+        profile=None,
+        host_pin="any",
+        priority=50,
+        state=JobState.QUEUED,
+        cmd=["echo", "hi"],
+        cwd="/tmp",
+        preemptible=False,
+        worker=None,
+        submitted_at=datetime(2026, 4, 21, 14, 3, 13),  # naive → treat as UTC
+        started_at=None,
+        finished_at=None,
+        exit_code=None,
+    )
+    data = info.model_dump(mode="json")
+    assert data["submitted_at"] == "2026-04-21T14:03:13+00:00"
+    assert data["started_at"] is None
+    assert data["finished_at"] is None
+
+
+def test_jobinfo_aware_datetime_preserves_offset():
+    """Already-aware UTC datetimes serialize with +00:00 intact."""
+    from datetime import UTC, datetime
+
+    from jobd.models import JobInfo
+
+    info = JobInfo(
+        id=1,
+        project="p",
+        profile=None,
+        host_pin="any",
+        priority=50,
+        state=JobState.COMPLETED,
+        cmd=["echo", "hi"],
+        cwd="/tmp",
+        preemptible=False,
+        worker="desktop",
+        submitted_at=datetime(2026, 4, 21, 14, 3, 13, tzinfo=UTC),
+        started_at=datetime(2026, 4, 21, 14, 3, 14, tzinfo=UTC),
+        finished_at=datetime(2026, 4, 21, 15, 0, 0, tzinfo=UTC),
+        exit_code=0,
+    )
+    data = info.model_dump(mode="json")
+    assert data["submitted_at"].endswith("+00:00")
+    assert data["started_at"].endswith("+00:00")
+    assert data["finished_at"].endswith("+00:00")

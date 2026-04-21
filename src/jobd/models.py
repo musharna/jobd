@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+
+
+def _as_utc_iso(v: datetime | None) -> str | None:
+    """Serialize a datetime as ISO-8601 with explicit UTC offset.
+
+    jobd stores timestamps via datetime.now(UTC) but the SQLite column is
+    plain DateTime, so tzinfo is stripped on persistence and values come
+    back naive. Treat naive reads as UTC (which they are) so API consumers
+    get unambiguous offsets instead of a bare local-looking timestamp.
+    """
+    if v is None:
+        return None
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=UTC)
+    return v.isoformat()
 
 
 class JobState(StrEnum):
@@ -75,6 +90,10 @@ class JobInfo(BaseModel):
     cpus: int = 1
     requires: JobRequires | None = None
     warning: str | None = None
+
+    @field_serializer("submitted_at", "started_at", "finished_at", when_used="always")
+    def _ser_dt(self, v: datetime | None) -> str | None:
+        return _as_utc_iso(v)
 
 
 class WorkerHeartbeat(BaseModel):
