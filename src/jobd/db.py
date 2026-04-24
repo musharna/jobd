@@ -50,6 +50,7 @@ class Job(Base):
     warning_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     depends_on_json: Mapped[str] = mapped_column(Text, default="[]")
     depends_on_any_exit: Mapped[bool] = mapped_column(Boolean, default=False)
+    fast_path: Mapped[bool] = mapped_column(Boolean, default=False)
 
     @property
     def requires(self):
@@ -88,6 +89,7 @@ class Worker(Base):
     gpu: Mapped[bool] = mapped_column(Boolean, default=False)
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
     state: Mapped[str] = mapped_column(String(20), default="online", index=True)
+    mount_roots_json: Mapped[str] = mapped_column(Text, default="[]")
 
 
 class BypassLog(Base):
@@ -114,6 +116,7 @@ _JOB_ADDS = [
     ("warning_at", "DATETIME"),
     ("depends_on_json", "TEXT DEFAULT '[]'"),
     ("depends_on_any_exit", "BOOLEAN DEFAULT 0"),
+    ("fast_path", "BOOLEAN DEFAULT 0"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),
@@ -121,6 +124,7 @@ _WORKER_ADDS = [
     ("gpu", "BOOLEAN DEFAULT 0"),
     ("tags_json", "TEXT DEFAULT '[]'"),
     ("state", "VARCHAR(20) DEFAULT 'online'"),
+    ("mount_roots_json", "TEXT DEFAULT '[]'"),
 ]
 
 

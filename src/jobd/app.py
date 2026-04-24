@@ -125,6 +125,7 @@ def build_app(
         ram_gb = profile_spec.ram_gb if profile_spec else 0
         cpus = profile_spec.cpus if profile_spec else 1
         preemptible = req.preemptible or (profile_spec.preemptible if profile_spec else False)
+        fast_path = profile_spec.fast_path if profile_spec else False
 
         requires = req.requires
         if requires is None and profile_spec and profile_spec.requires:
@@ -169,6 +170,7 @@ def build_app(
                 requires_json=requires_json,
                 depends_on_json=json.dumps(req.depends_on),
                 depends_on_any_exit=req.depends_on_any_exit,
+                fast_path=fast_path,
             )
             session.add(job)
             session.commit()
@@ -344,6 +346,7 @@ def build_app(
             worker.os = hb.os
             worker.gpu = hb.gpu
             worker.tags_json = json.dumps(hb.tags)
+            worker.mount_roots_json = json.dumps(hb.mount_roots)
             worker.state = "online"
             session.commit()
             return {"ok": True}
@@ -365,6 +368,7 @@ def build_app(
                     os=w.os,
                     gpu=w.gpu,
                     tags=json.loads(w.tags_json or "[]"),
+                    mount_roots=json.loads(w.mount_roots_json or "[]"),
                 )
                 for w in workers
             ]
@@ -386,12 +390,20 @@ def build_app(
             os_ = q.os
             gpu = q.gpu or q.free_vram_gb > 0
             tags: list[str] = list(q.tags)
+            mount_roots: list[str] = list(q.mount_roots)
             if worker_row is not None:
                 aliases = json.loads(worker_row.host_aliases_json)
                 arch = worker_row.arch
                 os_ = worker_row.os
                 gpu = worker_row.gpu
                 tags = json.loads(worker_row.tags_json)
+                mount_roots = json.loads(worker_row.mount_roots_json or "[]")
+            # Filter out jobs whose cwd can't exist on this worker. Non-empty
+            # mount_roots is the signal that the worker reported — older
+            # workers that don't advertise roots get the old behavior (all
+            # jobs eligible).
+            if mount_roots:
+                queued = [j for j in queued if any(j.cwd.startswith(r) for r in mount_roots)]
             w = WorkerSnapshot(
                 host=q.host,
                 host_aliases=aliases,
@@ -650,4 +662,5 @@ def _to_info(job: Job) -> JobInfo:
         depends_on=json.loads(job.depends_on_json or "[]"),
         depends_on_any_exit=job.depends_on_any_exit,
         session_id=job.session_id,
+        fast_path=bool(job.fast_path),
     )

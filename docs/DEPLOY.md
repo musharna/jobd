@@ -16,14 +16,25 @@ Phase-0 Task 2 (needs loginctl enable-linger, sudo).
 
 ## Worker (desktop-worker) — target systemd deploy (requires Task 2)
 
-    # One-time (sudo required):
-    sudo loginctl enable-linger mjarnold
+One-time install (needs sudo on desktop-worker; cannot be done via SSH key login
+without sudoers tweaks — log in interactively):
 
-    # Then:
+    ssh desktop-worker
+    sudo loginctl enable-linger mjarnold
     mkdir -p ~/.config/systemd/user
-    ssh homelab "cat ~/jobd/worker/job-worker.service" > ~/.config/systemd/user/job-worker.service
+    scp homelab:~/jobd/worker/job-worker.service ~/.config/systemd/user/
     systemctl --user daemon-reload
     systemctl --user enable --now job-worker.service
+
+Verify:
+
+    systemctl --user status job-worker.service
+    journalctl --user -u job-worker.service -f
+
+Redeploy after code changes (systemd mode):
+
+    ssh homelab "cat ~/jobd/worker/job_worker.py" | ssh desktop-worker "cat > ~/jobd-worker/job_worker.py"
+    ssh desktop-worker "systemctl --user restart job-worker.service"
 
 ## Worker status + logs
 
