@@ -103,6 +103,81 @@ def test_status_terminal_propagates_exit_code(monkeypatch):
     assert r.exit_code == 3
 
 
+def test_list_banner_silent_when_all_fresh(monkeypatch):
+    """`job list` with only fresh workers → no banner."""
+    import job_cli.cli as cli_mod
+    from datetime import datetime, timezone
+
+    recent = datetime.now(timezone.utc).isoformat()
+    workers = [{"host": "desktop", "last_heartbeat": recent, "state": "online"}]
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path, params=None):
+            if path == "/workers":
+                return _FakeResp(workers)
+            return _FakeResp([])
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["list"])
+    assert r.exit_code == 0
+    assert "⚠" not in r.stdout
+
+
+def test_list_banner_warns_on_stale_worker(monkeypatch):
+    """`job list` with a 120s-stale heartbeat → banner."""
+    import job_cli.cli as cli_mod
+    from datetime import datetime, timedelta, timezone
+
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    workers = [{"host": "laptop", "last_heartbeat": stale, "state": "online"}]
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path, params=None):
+            if path == "/workers":
+                return _FakeResp(workers)
+            return _FakeResp([])
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["list"])
+    assert r.exit_code == 0
+    assert "worker health" in r.stdout
+    assert "laptop" in r.stdout
+
+
+def test_list_banner_warns_on_no_workers(monkeypatch):
+    """`job list` with empty fleet → 'no workers registered' banner."""
+    import job_cli.cli as cli_mod
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path, params=None):
+            if path == "/workers":
+                return _FakeResp([])
+            return _FakeResp([])
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["list"])
+    assert r.exit_code == 0
+    assert "no workers registered" in r.stdout
+
+
 def test_submit_builds_requires_from_flags(monkeypatch):
     """--needs / --arch / --os / --gpu should populate the requires block."""
     from typer.testing import CliRunner
