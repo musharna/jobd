@@ -5,6 +5,8 @@ closed items to the bottom under `## Done`.
 
 ## Open
 
+## Done
+
 ### --depends-on flag for job chaining
 
 **Filed:** 2026-04-23
@@ -52,4 +54,5 @@ Non-goals:
 Unblocks: letting Claude Code sessions queue eval / post-processing jobs behind
 a long training job without a PID-wait wrapper.
 
-## Done
+**Closed:** 2026-04-24 (commit 9543f27)
+
