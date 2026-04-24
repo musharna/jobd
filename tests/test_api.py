@@ -981,6 +981,186 @@ def test_cancel_running_sets_signal_not_state(client):
     assert row["exit_code"] == -15
 
 
+def test_submit_fast_path_profile_stamps_flag(client):
+    """Profiles declaring fast_path: true must propagate to the job so the
+    worker can skip heavy-run wrapping. Without this, the flag lives only
+    in profiles.yaml and nobody reads it."""
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["echo", "hi"],
+            "cwd": "/tmp",
+            "project": "orchid-sdxl",
+            "profile": "small",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["fast_path"] is True
+
+
+def test_submit_non_fast_path_profile_leaves_flag_false(client):
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["bash", "train.sh"],
+            "cwd": "/tmp",
+            "project": "orchid-sdxl",
+            "profile": "gpu-heavy",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["fast_path"] is False
+
+
+def test_submit_no_profile_defaults_fast_path_false(client):
+    r = client.post(
+        "/submit",
+        json={"cmd": ["true"], "cwd": "/tmp", "project": "orchid-sdxl"},
+    )
+    assert r.json()["fast_path"] is False
+
+
+def test_heartbeat_persists_mount_roots_and_workers_returns_them(client):
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop-wsl",
+            "free_vram_gb": 20,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 30,
+            "idle_cpus": 8,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": True,
+            "tags": [],
+            "host_aliases": [],
+            "mount_roots": ["/home", "/mnt/d", "/tmp"],
+        },
+    )
+    r = client.get("/workers")
+    assert r.status_code == 200
+    rows = [w for w in r.json() if w["host"] == "desktop-wsl"]
+    assert rows and rows[0]["mount_roots"] == ["/home", "/mnt/d", "/tmp"]
+
+
+def test_next_job_skips_job_with_cwd_outside_worker_mount_roots(client):
+    """Worker that advertises mount_roots must not receive jobs whose cwd
+    isn't under any of them — otherwise the job fails at subprocess spawn
+    with cwd-does-not-exist."""
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop-wsl",
+            "free_vram_gb": 20,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 30,
+            "idle_cpus": 8,
+            "host_aliases": [],
+            "mount_roots": ["/home", "/tmp"],
+        },
+    )
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["ls"],
+            "cwd": "/mnt/d/some/project",
+            "project": "orchid-sdxl",
+            "host_pin": "any",
+        },
+    )
+    assert r.status_code == 200
+    got = client.post(
+        "/next-job",
+        json={
+            "host": "desktop-wsl",
+            "free_vram_gb": 20,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 30,
+            "idle_cpus": 8,
+        },
+    ).json()
+    assert got is None or got == {}
+
+
+def test_next_job_empty_mount_roots_disables_filter(client):
+    """A worker that doesn't advertise mount_roots (older binary) gets the
+    old behavior: no filtering. Backwards-compat guard — don't starve the
+    pre-2026-04-24 fleet."""
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "legacy-worker",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "host_aliases": [],
+        },
+    )
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["ls"],
+            "cwd": "/some/unusual/path",
+            "project": "orchid-sdxl",
+        },
+    )
+    job_id = r.json()["id"]
+    got = client.post(
+        "/next-job",
+        json={
+            "host": "legacy-worker",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    ).json()
+    assert got is not None and got["id"] == job_id
+
+
+def test_next_job_mixed_fleet_routes_by_mount_root(client):
+    """Two workers with disjoint roots; each only claims jobs under its own root."""
+    for host, roots in (("host-a", ["/home"]), ("host-b", ["/mnt/d"])):
+        client.post(
+            "/heartbeat",
+            json={
+                "host": host,
+                "free_vram_gb": 0,
+                "unregistered_vram_gb": 0,
+                "free_ram_gb": 8,
+                "idle_cpus": 4,
+                "host_aliases": [],
+                "mount_roots": roots,
+            },
+        )
+    job_home = client.post(
+        "/submit",
+        json={"cmd": ["ls"], "cwd": "/home/mjarnold/proj", "project": "orchid-sdxl"},
+    ).json()
+    job_d = client.post(
+        "/submit",
+        json={"cmd": ["ls"], "cwd": "/mnt/d/data", "project": "orchid-sdxl"},
+    ).json()
+
+    def _poll(host):
+        return client.post(
+            "/next-job",
+            json={
+                "host": host,
+                "free_vram_gb": 0,
+                "unregistered_vram_gb": 0,
+                "free_ram_gb": 8,
+                "idle_cpus": 4,
+            },
+        ).json()
+
+    got_a = _poll("host-a")
+    assert got_a is not None and got_a["id"] == job_home["id"]
+    got_b = _poll("host-b")
+    assert got_b is not None and got_b["id"] == job_d["id"]
+
+
 def test_fanin_requires_all_parents_complete(client):
     p1 = _submit(client).json()
     p2 = _submit(client).json()

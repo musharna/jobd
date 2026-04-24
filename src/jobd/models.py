@@ -95,6 +95,7 @@ class JobInfo(BaseModel):
     depends_on: list[int] = Field(default_factory=list)
     depends_on_any_exit: bool = False
     session_id: str | None = None
+    fast_path: bool = False
 
     @field_serializer("submitted_at", "started_at", "finished_at", when_used="always")
     def _ser_dt(self, v: datetime | None) -> str | None:
@@ -113,6 +114,7 @@ class WorkerInfo(BaseModel):
     os: str
     gpu: bool
     tags: list[str]
+    mount_roots: list[str] = Field(default_factory=list)
 
     @field_serializer("last_heartbeat", when_used="always")
     def _ser_dt(self, v: datetime) -> str | None:
@@ -130,6 +132,7 @@ class WorkerHeartbeat(BaseModel):
     os: str = "unknown"
     gpu: bool = False
     tags: list[str] = Field(default_factory=list)
+    mount_roots: list[str] = Field(default_factory=list)
 
 
 class NextJobQuery(BaseModel):
@@ -142,6 +145,7 @@ class NextJobQuery(BaseModel):
     os: str = "unknown"
     gpu: bool = False
     tags: list[str] = Field(default_factory=list)
+    mount_roots: list[str] = Field(default_factory=list)
 
 
 class ClassifyRequest(BaseModel):

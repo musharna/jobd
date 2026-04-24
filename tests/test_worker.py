@@ -110,3 +110,81 @@ def test_run_job_cancel_signal_terminates_child(tmp_path, monkeypatch):
     body = completes[0][1]
     assert body["final_state"] == "cancelled"
     assert body["exit_code"] != 0, f"cancelled process should have nonzero rc, got {body}"
+
+
+def test_run_job_fast_path_skips_heavy_run_wrap(tmp_path, monkeypatch):
+    """fast_path=true must bypass heavy-run even when the wrapper exists on
+    the worker. Regression guard: a fast-path job wrapped in systemd-run
+    pays a ~300ms startup tax per invocation and defeats the whole point."""
+    import subprocess
+
+    import job_worker
+
+    monkeypatch.setattr(
+        job_worker.shutil,
+        "which",
+        lambda name: f"/fake/bin/{name}" if name == "heavy-run" else None,
+    )
+    captured: dict[str, list[str]] = {}
+
+    orig_popen = subprocess.Popen
+
+    class _StubProc:
+        def __init__(self, cmd, **kw):
+            captured["cmd"] = cmd
+            self.pid = 12345
+            self.stdout = type("F", (), {"read": lambda _s, _n: b"", "close": lambda _s: None})()
+
+        def send_signal(self, _sig):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", _StubProc)
+
+    job = {"id": 9100, "cmd": ["echo", "hi"], "cwd": str(tmp_path), "fast_path": True}
+    run_job(_FakeClient(cancel_after_s=999.0), job, set())
+
+    assert captured["cmd"] == ["echo", "hi"], (
+        f"fast_path should skip heavy-run wrap, got {captured['cmd']}"
+    )
+    # sanity: suppress unused warning
+    _ = orig_popen
+
+
+def test_run_job_non_fast_path_keeps_heavy_run_wrap(tmp_path, monkeypatch):
+    import subprocess
+
+    import job_worker
+
+    monkeypatch.setattr(
+        job_worker.shutil,
+        "which",
+        lambda name: f"/fake/bin/{name}" if name == "heavy-run" else None,
+    )
+    captured: dict[str, list[str]] = {}
+
+    class _StubProc:
+        def __init__(self, cmd, **kw):
+            captured["cmd"] = cmd
+            self.pid = 12346
+            self.stdout = type("F", (), {"read": lambda _s, _n: b"", "close": lambda _s: None})()
+
+        def send_signal(self, _sig):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", _StubProc)
+    job = {"id": 9101, "cmd": ["python", "train.py"], "cwd": str(tmp_path), "fast_path": False}
+    run_job(_FakeClient(cancel_after_s=999.0), job, set())
+    assert captured["cmd"][0] == "/fake/bin/heavy-run"
+    assert captured["cmd"][-2:] == ["python", "train.py"]

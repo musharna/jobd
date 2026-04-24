@@ -93,6 +93,28 @@ def _configured_aliases() -> list[str]:
     return base
 
 
+_ROOT_CANDIDATES = ["/home", "/tmp", "/mnt/c", "/mnt/d", "/opt", "/var", "/data", "/scratch"]
+
+
+def _detect_mount_roots() -> list[str]:
+    """Return the subset of candidate root dirs that actually exist on this host.
+
+    Override via JOBD_WORKER_MOUNT_ROOTS=/foo,/bar to pin the list explicitly
+    (useful for test workers or hosts with non-standard mounts).
+    """
+    override = os.environ.get("JOBD_WORKER_MOUNT_ROOTS", "").strip()
+    if override:
+        return [p.strip() for p in override.split(",") if p.strip()]
+    found: list[str] = []
+    for r in _ROOT_CANDIDATES:
+        try:
+            if os.path.isdir(r):
+                found.append(r)
+        except OSError:
+            pass
+    return found
+
+
 def resource_snapshot(tracked_pids: set[int]) -> dict:
     vm = psutil.virtual_memory()
     load1 = os.getloadavg()[0]
@@ -108,6 +130,7 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
         "os": _CAPS.os,
         "gpu": _CAPS.gpu,
         "tags": list(_CAPS.tags),
+        "mount_roots": _detect_mount_roots(),
     }
 
 
@@ -124,6 +147,7 @@ def pick_resource_snapshot_mock():
         "os": "unknown",
         "gpu": False,
         "tags": [],
+        "mount_roots": [],
     }
 
 
@@ -143,8 +167,14 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     cwd = job["cwd"]
     env = os.environ.copy()
 
+    # fast_path jobs opt out of the heavy-run memory cgroup wrap: they're the
+    # short/cheap work (under a second, tiny RAM) that doesn't need isolation
+    # and pays a systemd-run startup tax per invocation. Anything heavy keeps
+    # the wrap.
     heavy_run = shutil.which("heavy-run")
-    if heavy_run and not cmd[0].endswith("heavy-run"):
+    if job.get("fast_path"):
+        full_cmd = cmd
+    elif heavy_run and not cmd[0].endswith("heavy-run"):
         full_cmd = [heavy_run, "--"] + cmd
     else:
         full_cmd = cmd
