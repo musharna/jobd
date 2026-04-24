@@ -131,6 +131,20 @@ def build_app(
             requires = profile_spec.requires
         requires_json = requires.model_dump_json() if requires is not None else "{}"
 
+        # cwd sanity: Windows-mount paths only exist on the laptop (WSL). If
+        # someone submits --cwd /mnt/c/... without pinning the laptop, the
+        # worker will fail cd and every process will rc=127. Root cause of the
+        # 2026-04-22 phelipanche storm.
+        if req.cwd.startswith("/mnt/c/") and host_pin not in ("laptop", "MSI", "any-laptop"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"cwd {req.cwd!r} is under /mnt/c/ (Windows mount, laptop-only) "
+                    f"but host_pin={host_pin!r}. Pass --host laptop, or stage data "
+                    f"under a cross-host path like /tmp or a project-scoped dir."
+                ),
+            )
+
         with SessionLocal() as session:
             for dep_id in req.depends_on:
                 if session.get(Job, dep_id) is None:
@@ -191,7 +205,12 @@ def build_app(
     @app.post("/jobs/{job_id}/complete", response_model=JobInfo)
     def complete_job(job_id: int, payload: dict):
         exit_code = payload.get("exit_code")
-        final_state = payload.get("final_state", "completed")
+        final_state = payload.get("final_state")
+        if final_state is None:
+            # Worker didn't specify — derive from exit code. This keeps the
+            # depends_on cascade honest: nonzero rc must land in a failed-side
+            # terminal so children that didn't opt into any_exit get cancelled.
+            final_state = "completed" if exit_code in (0, None) else "failed"
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if job is None:
@@ -199,6 +218,10 @@ def build_app(
             job.state = final_state
             job.exit_code = exit_code
             job.finished_at = datetime.now(UTC)
+            # Clear any pending signal — it's been honored (or irrelevant now
+            # that the job is terminal). Otherwise a future reclaim/retry would
+            # see a stale cancel signal and die on startup.
+            job.signal = None
             _cascade_on_parent_terminal(session, job)
             session.commit()
             session.refresh(job)
@@ -597,4 +620,5 @@ def _to_info(job: Job) -> JobInfo:
         warning=job.warning,
         depends_on=json.loads(job.depends_on_json or "[]"),
         depends_on_any_exit=job.depends_on_any_exit,
+        session_id=job.session_id,
     )

@@ -94,6 +94,7 @@ class JobInfo(BaseModel):
     warning: str | None = None
     depends_on: list[int] = Field(default_factory=list)
     depends_on_any_exit: bool = False
+    session_id: str | None = None
 
     @field_serializer("submitted_at", "started_at", "finished_at", when_used="always")
     def _ser_dt(self, v: datetime | None) -> str | None:
