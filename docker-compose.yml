@@ -5,7 +5,8 @@ services:
     container_name: jobd
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "10.0.0.10:8765:8765"
+      - "127.0.0.1:8765:8765"
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
