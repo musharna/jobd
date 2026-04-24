@@ -99,6 +99,41 @@ def _stream_wait(job_id: int) -> None:
         sys.exit(exit_code)
 
 
+STALE_HEARTBEAT_SECONDS = 60
+
+
+def _worker_health_banner(client: httpx.Client) -> None:
+    """Emit a one-line banner if any worker is offline or stale. Silent when healthy."""
+    from datetime import datetime, timezone
+
+    try:
+        r = client.get("/workers")
+        r.raise_for_status()
+    except (httpx.HTTPError, httpx.ConnectError):
+        return
+    workers = r.json()
+    if not workers:
+        typer.secho("\u26a0 no workers registered \u2014 nothing will dispatch", fg="yellow")
+        return
+    now = datetime.now(timezone.utc)
+    bad: list[str] = []
+    for w in workers:
+        hb = w.get("last_heartbeat")
+        if w.get("state") == "offline":
+            bad.append(f"{w['host']} (offline)")
+            continue
+        if not hb:
+            continue
+        try:
+            age = (now - datetime.fromisoformat(hb)).total_seconds()
+        except ValueError:
+            continue
+        if age > STALE_HEARTBEAT_SECONDS:
+            bad.append(f"{w['host']} (stale {int(age)}s)")
+    if bad:
+        typer.secho(f"\u26a0 worker health: {', '.join(bad)}", fg="yellow")
+
+
 @app.command(name="list")
 def list_jobs(
     state: str | None = typer.Option(None),
@@ -106,6 +141,7 @@ def list_jobs(
 ):
     """List jobs."""
     with _client() as c:
+        _worker_health_banner(c)
         params = {}
         if state:
             params["state_filter"] = state
