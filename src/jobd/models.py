@@ -63,6 +63,8 @@ class JobSubmit(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     session_id: str | None = None
     requires: JobRequires | None = None
+    depends_on: list[int] = Field(default_factory=list)
+    depends_on_any_exit: bool = False
 
     @field_validator("priority_delta")
     @classmethod
@@ -90,6 +92,8 @@ class JobInfo(BaseModel):
     cpus: int = 1
     requires: JobRequires | None = None
     warning: str | None = None
+    depends_on: list[int] = Field(default_factory=list)
+    depends_on_any_exit: bool = False
 
     @field_serializer("submitted_at", "started_at", "finished_at", when_used="always")
     def _ser_dt(self, v: datetime | None) -> str | None:

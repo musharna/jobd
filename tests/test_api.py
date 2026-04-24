@@ -721,3 +721,131 @@ def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued"
     assert got["worker"] is None
+
+
+# ---------- depends_on job chaining ----------
+
+
+def _submit(client, project="project-x", cmd=None, depends_on=None, any_exit=False):
+    body = {
+        "cmd": cmd or ["true"],
+        "cwd": "/tmp",
+        "project": project,
+    }
+    if depends_on is not None:
+        body["depends_on"] = depends_on
+    if any_exit:
+        body["depends_on_any_exit"] = True
+    r = client.post("/submit", json=body)
+    return r
+
+
+def _heartbeat(client, host="w1"):
+    client.post(
+        "/heartbeat",
+        json={
+            "host": host,
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+
+
+def _next_job(client, host="w1"):
+    return client.post(
+        "/next-job",
+        json={
+            "host": host,
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+
+
+def test_submit_unknown_parent_rejected(client):
+    r = _submit(client, depends_on=[9999])
+    assert r.status_code == 400
+    assert "parent" in r.text.lower() or "depends_on" in r.text.lower()
+
+
+def test_child_not_dispatched_while_parent_queued(client):
+    parent = _submit(client).json()
+    child = _submit(client, depends_on=[parent["id"]]).json()
+    _heartbeat(client)
+    got = _next_job(client).json()
+    assert got["id"] == parent["id"]
+    got2 = _next_job(client).json()
+    assert got2 is None or got2 == {}
+    row = client.get(f"/jobs/{child['id']}").json()
+    assert row["state"] == "queued"
+
+
+def test_child_dispatchable_after_parent_completes(client):
+    parent = _submit(client).json()
+    child = _submit(client, depends_on=[parent["id"]]).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{parent['id']}/complete", json={"exit_code": 0})
+    claim = _next_job(client).json()
+    assert claim["id"] == child["id"]
+
+
+def test_parent_failure_cancels_child(client):
+    parent = _submit(client).json()
+    child = _submit(client, depends_on=[parent["id"]]).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(
+        f"/jobs/{parent['id']}/complete",
+        json={"exit_code": 1, "final_state": "failed"},
+    )
+    row = client.get(f"/jobs/{child['id']}").json()
+    assert row["state"] == "cancelled"
+    assert row.get("warning")
+
+
+def test_parent_cancelled_queued_cancels_child(client):
+    parent = _submit(client).json()
+    child = _submit(client, depends_on=[parent["id"]]).json()
+    client.post(f"/jobs/{parent['id']}/cancel")
+    row = client.get(f"/jobs/{child['id']}").json()
+    assert row["state"] == "cancelled"
+
+
+def test_depends_on_any_exit_allows_failed_parent(client):
+    parent = _submit(client).json()
+    child = _submit(client, depends_on=[parent["id"]], any_exit=True).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(
+        f"/jobs/{parent['id']}/complete",
+        json={"exit_code": 2, "final_state": "failed"},
+    )
+    row = client.get(f"/jobs/{child['id']}").json()
+    assert row["state"] == "queued"
+    claim = _next_job(client).json()
+    assert claim["id"] == child["id"]
+
+
+def test_fanin_requires_all_parents_complete(client):
+    p1 = _submit(client).json()
+    p2 = _submit(client).json()
+    child = _submit(client, depends_on=[p1["id"], p2["id"]]).json()
+    _heartbeat(client)
+    first = _next_job(client).json()
+    client.post(f"/jobs/{first['id']}/complete", json={"exit_code": 0})
+    second = _next_job(client).json()
+    assert second["id"] in (p1["id"], p2["id"])
+    assert second["id"] != child["id"]
+    client.post(f"/jobs/{second['id']}/complete", json={"exit_code": 0})
+    third = _next_job(client).json()
+    assert third["id"] == child["id"]

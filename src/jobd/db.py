@@ -48,6 +48,8 @@ class Job(Base):
     requires_json: Mapped[str] = mapped_column(Text, default="{}")
     warning: Mapped[str | None] = mapped_column(Text, nullable=True)
     warning_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    depends_on_json: Mapped[str] = mapped_column(Text, default="[]")
+    depends_on_any_exit: Mapped[bool] = mapped_column(Boolean, default=False)
 
     @property
     def requires(self):
@@ -110,6 +112,8 @@ _JOB_ADDS = [
     ("requires_json", "TEXT DEFAULT '{}'"),
     ("warning", "TEXT"),
     ("warning_at", "DATETIME"),
+    ("depends_on_json", "TEXT DEFAULT '[]'"),
+    ("depends_on_any_exit", "BOOLEAN DEFAULT 0"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),
