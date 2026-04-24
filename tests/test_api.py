@@ -836,6 +836,80 @@ def test_depends_on_any_exit_allows_failed_parent(client):
     assert claim["id"] == child["id"]
 
 
+def test_complete_auto_derives_failed_from_nonzero_rc(client):
+    """If the worker omits final_state, nonzero rc → failed, zero → completed.
+    Matters for the depends_on cascade, which keys off terminal state."""
+    job_ok = _submit(client).json()
+    job_bad = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    _next_job(client)
+    # worker omits final_state
+    client.post(f"/jobs/{job_ok['id']}/complete", json={"exit_code": 0})
+    client.post(f"/jobs/{job_bad['id']}/complete", json={"exit_code": 1})
+    assert client.get(f"/jobs/{job_ok['id']}").json()["state"] == "completed"
+    assert client.get(f"/jobs/{job_bad['id']}").json()["state"] == "failed"
+
+
+def test_complete_clears_pending_signal(client):
+    """After worker posts /complete, job.signal must be None so a future
+    reclaim/retry doesn't see a stale cancel signal."""
+    job = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{job['id']}/cancel")
+    assert client.get(f"/jobs/{job['id']}/signal").json()["signal"] == "cancel"
+    client.post(
+        f"/jobs/{job['id']}/complete",
+        json={"exit_code": -15, "final_state": "cancelled"},
+    )
+    assert client.get(f"/jobs/{job['id']}/signal").json()["signal"] is None
+
+
+def test_job_info_exposes_session_id(client):
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/tmp",
+            "project": "project-x",
+            "session_id": "sess-abc-123",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["session_id"] == "sess-abc-123"
+    got = client.get(f"/jobs/{r.json()['id']}").json()
+    assert got["session_id"] == "sess-abc-123"
+
+
+def test_submit_rejects_mnt_c_cwd_for_non_laptop(client):
+    """Windows-mount paths routed to a non-laptop host → 400, not queued."""
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "~/some/project",
+            "project": "project-x",
+            "host_pin": "desktop-worker",
+        },
+    )
+    assert r.status_code == 400
+    assert "/mnt/c/" in r.text
+
+
+def test_submit_allows_mnt_c_cwd_when_pinned_to_laptop(client):
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "~/some/project",
+            "project": "project-x",
+            "host_pin": "laptop",
+        },
+    )
+    assert r.status_code == 200
+
+
 def test_cancel_running_sets_signal_not_state(client):
     """POST /cancel on a claimed job must set job.signal='cancel' and
     leave state=assigned — the worker completes the transition after
