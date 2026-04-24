@@ -132,6 +132,11 @@ def build_app(
         requires_json = requires.model_dump_json() if requires is not None else "{}"
 
         with SessionLocal() as session:
+            for dep_id in req.depends_on:
+                if session.get(Job, dep_id) is None:
+                    raise HTTPException(
+                        status_code=400, detail=f"depends_on refers to missing job: {dep_id}"
+                    )
             job = Job(
                 project=req.project,
                 profile=req.profile,
@@ -148,6 +153,8 @@ def build_app(
                 session_id=req.session_id,
                 submitted_at=datetime.now(UTC),
                 requires_json=requires_json,
+                depends_on_json=json.dumps(req.depends_on),
+                depends_on_any_exit=req.depends_on_any_exit,
             )
             session.add(job)
             session.commit()
@@ -192,6 +199,7 @@ def build_app(
             job.state = final_state
             job.exit_code = exit_code
             job.finished_at = datetime.now(UTC)
+            _cascade_on_parent_terminal(session, job)
             session.commit()
             session.refresh(job)
             return _to_info(job)
@@ -207,6 +215,7 @@ def build_app(
             elif job.state == JobState.QUEUED:
                 job.state = JobState.CANCELLED
                 job.finished_at = datetime.now(UTC)
+                _cascade_on_parent_terminal(session, job)
             session.commit()
             session.refresh(job)
             return _to_info(job)
@@ -313,9 +322,10 @@ def build_app(
         from jobd.matcher import pick_next_job
 
         with SessionLocal() as session:
-            queued = (
+            all_queued = (
                 session.execute(select(Job).where(Job.state == JobState.QUEUED)).scalars().all()
             )
+            queued = [j for j in all_queued if _deps_satisfied(j, session)]
             worker_row = session.execute(
                 select(Worker).where(Worker.host == q.host)
             ).scalar_one_or_none()
@@ -494,6 +504,70 @@ def _persist_projects(state: dict) -> None:
     state["paths"]["projects"].write_text(yaml.safe_dump(data, sort_keys=False))
 
 
+_DEPENDS_TERMINAL = {JobState.COMPLETED.value}
+_DEPENDS_TERMINAL_ANY = {
+    JobState.COMPLETED.value,
+    JobState.FAILED.value,
+    JobState.CANCELLED.value,
+    JobState.PREEMPTED.value,
+    JobState.ORPHANED.value,
+}
+
+
+def _deps_satisfied(job: Job, session) -> bool:
+    """True iff job's depends_on list is empty OR every parent has reached a
+    terminal state that matches the child's policy.
+
+    Policy:
+      - depends_on_any_exit=False (default): parents must reach COMPLETED.
+        If any parent is FAILED/CANCELLED/ORPHANED/PREEMPTED, the child will
+        be cascade-cancelled elsewhere — return False here so the matcher
+        doesn't dispatch it while the cascade is still pending.
+      - depends_on_any_exit=True: any terminal state unblocks.
+    """
+    deps = json.loads(job.depends_on_json or "[]")
+    if not deps:
+        return True
+    terminal = _DEPENDS_TERMINAL_ANY if job.depends_on_any_exit else _DEPENDS_TERMINAL
+    for dep_id in deps:
+        parent = session.get(Job, dep_id)
+        if parent is None:
+            # Pruned parent — treat as satisfied (generous default).
+            continue
+        if parent.state not in terminal:
+            return False
+    return True
+
+
+def _cascade_on_parent_terminal(session, parent: Job) -> list[int]:
+    """When parent reaches a failed-side terminal state, cancel children that
+    did not opt into depends_on_any_exit. Returns the list of cancelled ids."""
+    if parent.state not in {
+        JobState.FAILED.value,
+        JobState.CANCELLED.value,
+        JobState.ORPHANED.value,
+        JobState.PREEMPTED.value,
+    }:
+        return []
+    now = datetime.now(UTC)
+    cancelled: list[int] = []
+    candidates = (
+        session.execute(select(Job).where(Job.state == JobState.QUEUED.value)).scalars().all()
+    )
+    for child in candidates:
+        if child.depends_on_any_exit:
+            continue
+        deps = json.loads(child.depends_on_json or "[]")
+        if parent.id not in deps:
+            continue
+        child.state = JobState.CANCELLED.value
+        child.finished_at = now
+        child.warning = f"parent_failed: {parent.id} → {parent.state}"
+        child.warning_at = now
+        cancelled.append(child.id)
+    return cancelled
+
+
 def _to_info(job: Job) -> JobInfo:
     req = None
     if job.requires_json and job.requires_json != "{}":
@@ -521,4 +595,6 @@ def _to_info(job: Job) -> JobInfo:
         cpus=job.cpus,
         requires=req,
         warning=job.warning,
+        depends_on=json.loads(job.depends_on_json or "[]"),
+        depends_on_any_exit=job.depends_on_any_exit,
     )

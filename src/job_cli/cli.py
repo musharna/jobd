@@ -44,6 +44,14 @@ def submit(
     session_id: str | None = typer.Option(
         None, "--session-id", help="tag job with a session id (defaults to $CLAUDE_SESSION_ID)"
     ),
+    depends_on: list[int] = typer.Option(
+        None, "--depends-on", help="parent job id that must complete first (repeatable)"
+    ),
+    depends_on_any_exit: bool = typer.Option(
+        False,
+        "--depends-on-any-exit",
+        help="unblock when parent reaches any terminal state, not just completed",
+    ),
 ):
     """Submit a job. With --wait, stream logs until terminal state."""
     if session_id is None:
@@ -69,6 +77,10 @@ def submit(
     }
     if requires is not None:
         body["requires"] = requires
+    if depends_on:
+        body["depends_on"] = list(depends_on)
+    if depends_on_any_exit:
+        body["depends_on_any_exit"] = True
     r = httpx.post(f"{BASE}/submit", json=body)
     if r.is_error:
         r.raise_for_status()
@@ -149,10 +161,28 @@ def list_jobs(
             params["project"] = project
         r = c.get("/jobs", params=params)
         r.raise_for_status()
-        for j in r.json():
+        jobs = r.json()
+        state_by_id = {j["id"]: j["state"] for j in jobs}
+        for j in jobs:
             typer.echo(
                 f"{j['id']:>5}  {j['state']:>10}  {j['project']:>20}  {' '.join(j['cmd'])[:80]}"
             )
+            deps = j.get("depends_on") or []
+            if deps:
+                parts = []
+                for d in deps:
+                    st = state_by_id.get(d)
+                    mark = (
+                        "\u2713"
+                        if st == "completed"
+                        else (
+                            "\u2717"
+                            if st in {"failed", "cancelled", "preempted", "orphaned"}
+                            else "\u29d6"
+                        )
+                    )
+                    parts.append(f"{d}{mark}")
+                typer.echo(f"  deps: {' '.join(parts)}")
             if j.get("warning"):
                 typer.secho(f"  \u26a0 {j['warning']}", fg="yellow")
 

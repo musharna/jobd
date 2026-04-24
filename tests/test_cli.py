@@ -225,3 +225,98 @@ def test_submit_builds_requires_from_flags(monkeypatch):
         "needs": ["R", "python3"],
         "idempotent": True,
     }
+
+
+def test_submit_passes_depends_on_flags(monkeypatch):
+    """--depends-on (repeatable) + --depends-on-any-exit populate body."""
+    import httpx
+    import job_cli.cli as cli_mod
+
+    captured = {}
+
+    def fake_post(url, json, **kw):
+        captured["body"] = json
+        return httpx.Response(200, json={"id": 1})
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    monkeypatch.setattr(cli_mod, "BASE", "http://fake")
+
+    r = CliRunner().invoke(
+        cli_mod.app,
+        [
+            "submit",
+            "--project",
+            "p",
+            "--cwd",
+            "/tmp",
+            "--depends-on",
+            "10",
+            "--depends-on",
+            "11",
+            "--depends-on-any-exit",
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert captured["body"]["depends_on"] == [10, 11]
+    assert captured["body"]["depends_on_any_exit"] is True
+
+
+def test_list_renders_deps_markers(monkeypatch):
+    """`job list` prints `deps: 10✓ 11⧖` under a child row."""
+    import job_cli.cli as cli_mod
+
+    jobs = [
+        {
+            "id": 10,
+            "state": "completed",
+            "project": "p",
+            "cmd": ["true"],
+            "depends_on": [],
+        },
+        {
+            "id": 11,
+            "state": "queued",
+            "project": "p",
+            "cmd": ["true"],
+            "depends_on": [],
+        },
+        {
+            "id": 12,
+            "state": "queued",
+            "project": "p",
+            "cmd": ["true"],
+            "depends_on": [10, 11],
+        },
+    ]
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path, params=None):
+            if path == "/workers":
+                return _FakeResp(
+                    [
+                        {
+                            "host": "w1",
+                            "last_heartbeat": __import__("datetime")
+                            .datetime.now(__import__("datetime").timezone.utc)
+                            .isoformat(),
+                            "state": "online",
+                        }
+                    ]
+                )
+            return _FakeResp(jobs)
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["list"])
+    assert r.exit_code == 0, r.output
+    assert "deps:" in r.stdout
+    assert "10✓" in r.stdout
+    assert "11⧖" in r.stdout
