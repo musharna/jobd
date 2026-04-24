@@ -7,10 +7,100 @@ from job_cli.cli import app
 runner = CliRunner()
 
 
+class _FakeResp:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
 def test_cli_help():
     r = runner.invoke(app, ["--help"])
     assert r.exit_code == 0
     assert "submit" in r.stdout
+
+
+def test_status_oneshot_renders_and_exits(monkeypatch):
+    """`job status <id>` prints rendered state and exits 0 for running job."""
+
+    import job_cli.cli as cli_mod
+
+    fake_job = {
+        "id": 42,
+        "state": "running",
+        "project": "p",
+        "priority": 55,
+        "host_pin": "any",
+        "worker": "desktop",
+        "preemptible": False,
+        "submitted_at": "2026-04-24T00:00:00+00:00",
+        "started_at": "2026-04-24T00:01:00+00:00",
+        "finished_at": None,
+        "exit_code": None,
+        "cmd": ["echo", "hi"],
+        "warning": None,
+    }
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path):
+            assert path == "/jobs/42"
+            return _FakeResp(fake_job)
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["status", "42"])
+    assert r.exit_code == 0
+    assert "state=running" in r.stdout
+    assert "project=p" in r.stdout
+    assert "worker=desktop" in r.stdout
+
+
+def test_status_terminal_propagates_exit_code(monkeypatch):
+    """Terminal job with exit_code=3 should exit 3."""
+
+    import job_cli.cli as cli_mod
+
+    fake_job = {
+        "id": 7,
+        "state": "failed",
+        "project": "p",
+        "priority": 55,
+        "host_pin": "any",
+        "worker": "desktop",
+        "preemptible": False,
+        "submitted_at": "2026-04-24T00:00:00+00:00",
+        "started_at": "2026-04-24T00:01:00+00:00",
+        "finished_at": "2026-04-24T00:02:00+00:00",
+        "exit_code": 3,
+        "cmd": ["false"],
+        "warning": None,
+    }
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path):
+            return _FakeResp(fake_job)
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["status", "7"])
+    assert r.exit_code == 3
 
 
 def test_submit_builds_requires_from_flags(monkeypatch):

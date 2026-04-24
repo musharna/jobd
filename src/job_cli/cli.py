@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 import httpx
 import typer
@@ -12,6 +13,7 @@ import typer
 app = typer.Typer(help="Submit and monitor jobs on jobd.")
 
 BASE = os.environ.get("JOBD_URL", "http://100.113.204.41:8765")
+TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
 
 def _client() -> httpx.Client:
@@ -117,6 +119,50 @@ def list_jobs(
             )
             if j.get("warning"):
                 typer.secho(f"  \u26a0 {j['warning']}", fg="yellow")
+
+
+def _render_status(j: dict) -> str:
+    lines = [
+        f"job {j['id']}  state={j['state']}  project={j['project']}  priority={j['priority']}",
+        f"  host_pin={j['host_pin']}  worker={j.get('worker') or '-'}  preemptible={j.get('preemptible', False)}",
+        f"  submitted={j.get('submitted_at') or '-'}",
+        f"  started  ={j.get('started_at') or '-'}",
+        f"  finished ={j.get('finished_at') or '-'}",
+        f"  exit_code={j.get('exit_code')}",
+        f"  cmd: {' '.join(j['cmd'])[:100]}",
+    ]
+    if j.get("warning"):
+        lines.append(f"  ⚠ {j['warning']}")
+    return "\n".join(lines)
+
+
+@app.command()
+def status(
+    job_id: int,
+    watch: bool = typer.Option(False, "--watch", "-w", help="poll until terminal"),
+    interval: float = typer.Option(2.0, "--interval", help="poll interval seconds (with --watch)"),
+):
+    """Print one job's state. With --watch, redraw until terminal."""
+    with _client() as c:
+        if not watch:
+            r = c.get(f"/jobs/{job_id}")
+            r.raise_for_status()
+            j = r.json()
+            typer.echo(_render_status(j))
+            sys.exit(j.get("exit_code") or 0 if j["state"] in TERMINAL_STATES else 0)
+        try:
+            while True:
+                r = c.get(f"/jobs/{job_id}")
+                r.raise_for_status()
+                j = r.json()
+                sys.stdout.write("\x1b[2J\x1b[H")
+                sys.stdout.write(_render_status(j) + "\n")
+                sys.stdout.flush()
+                if j["state"] in TERMINAL_STATES:
+                    sys.exit(j.get("exit_code") or 0)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            sys.exit(130)
 
 
 @app.command()
