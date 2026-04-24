@@ -836,6 +836,34 @@ def test_depends_on_any_exit_allows_failed_parent(client):
     assert claim["id"] == child["id"]
 
 
+def test_cancel_running_sets_signal_not_state(client):
+    """POST /cancel on a claimed job must set job.signal='cancel' and
+    leave state=assigned — the worker completes the transition after
+    SIGTERMing the child."""
+    job = _submit(client).json()
+    _heartbeat(client)
+    claim = _next_job(client).json()
+    assert claim["id"] == job["id"]
+
+    r = client.post(f"/jobs/{job['id']}/cancel")
+    assert r.status_code == 200
+    row = r.json()
+    # state unchanged — worker must finish the job before it flips
+    assert row["state"] in ("assigned", "running")
+
+    sig = client.get(f"/jobs/{job['id']}/signal").json()
+    assert sig["signal"] == "cancel"
+
+    # worker reports the terminal state once the child has exited
+    client.post(
+        f"/jobs/{job['id']}/complete",
+        json={"exit_code": -15, "final_state": "cancelled"},
+    )
+    row = client.get(f"/jobs/{job['id']}").json()
+    assert row["state"] == "cancelled"
+    assert row["exit_code"] == -15
+
+
 def test_fanin_requires_all_parents_complete(client):
     p1 = _submit(client).json()
     p2 = _submit(client).json()
