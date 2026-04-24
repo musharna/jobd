@@ -251,6 +251,35 @@ def build_app(
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
             return {"signal": job.signal}
 
+    @app.get("/jobs/{job_id}/output")
+    def get_output(job_id: int, tail: int = 8192):
+        """Return the last `tail` bytes of the job's captured stdout+stderr.
+
+        The worker streams log chunks to /log, which the broker appends to
+        logs_dir/<id>.log. This endpoint returns a tail of that file so
+        callers can diagnose a failed job without SSHing to the worker.
+        Returns 404 if the job doesn't exist, empty string if the file
+        hasn't been created yet (worker crashed before any output).
+        """
+        with SessionLocal() as session:
+            if session.get(Job, job_id) is None:
+                raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+        log_file = logs_dir / f"{job_id}.log"
+        if not log_file.exists():
+            return {"tail": "", "size_bytes": 0, "returned_bytes": 0, "truncated": False}
+        size = log_file.stat().st_size
+        tail = max(0, min(tail, 1_048_576))  # clamp to 1 MiB
+        with log_file.open("rb") as f:
+            if size > tail:
+                f.seek(size - tail)
+            data = f.read()
+        return {
+            "tail": data.decode("utf-8", errors="replace"),
+            "size_bytes": size,
+            "returned_bytes": len(data),
+            "truncated": size > len(data),
+        }
+
     @app.get("/wait/{job_id}")
     async def wait_job(job_id: int):
         log_file = logs_dir / f"{job_id}.log"

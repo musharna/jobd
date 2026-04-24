@@ -245,6 +245,29 @@ def wait(job_id: int):
 
 
 @app.command()
+def logs(
+    job_id: int,
+    tail: int = typer.Option(8192, "--tail", "-n", help="bytes to show from end of log"),
+):
+    """Print the tail of a job's captured stdout+stderr. Handy for post-mortem
+    on a finished job without SSHing to the worker."""
+    with _client() as c:
+        r = c.get(f"/jobs/{job_id}/output", params={"tail": tail})
+        r.raise_for_status()
+        body = r.json()
+        if body["size_bytes"] == 0:
+            typer.secho(f"[no log captured for job {job_id}]", fg="yellow")
+            return
+        if body["truncated"]:
+            typer.secho(
+                f"[truncated: showing last {body['returned_bytes']} of {body['size_bytes']} bytes]",
+                fg="yellow",
+                err=True,
+            )
+        typer.echo(body["tail"], nl=False)
+
+
+@app.command()
 def classify(cmd: str):
     with _client() as c:
         r = c.post("/classify", json={"cmd": cmd})

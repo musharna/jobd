@@ -836,6 +836,49 @@ def test_depends_on_any_exit_allows_failed_parent(client):
     assert claim["id"] == child["id"]
 
 
+def test_output_endpoint_returns_tail(client):
+    """Streaming logs via /log should be retrievable via /output."""
+    job = _submit(client).json()
+    # Simulate worker streaming chunks
+    client.post(f"/jobs/{job['id']}/log", content=b"line 1\n")
+    client.post(f"/jobs/{job['id']}/log", content=b"line 2\n")
+    client.post(f"/jobs/{job['id']}/log", content=b"line 3\n")
+    r = client.get(f"/jobs/{job['id']}/output")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tail"] == "line 1\nline 2\nline 3\n"
+    assert body["size_bytes"] == 21
+    assert body["truncated"] is False
+
+
+def test_output_endpoint_truncates_to_tail_window(client):
+    """tail=5 on a 21-byte file returns the last 5 bytes + truncated=True."""
+    job = _submit(client).json()
+    client.post(f"/jobs/{job['id']}/log", content=b"line 1\nline 2\nline 3\n")
+    r = client.get(f"/jobs/{job['id']}/output", params={"tail": 5})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tail"] == "ine 3\n"[-5:]
+    assert body["size_bytes"] == 21
+    assert body["returned_bytes"] == 5
+    assert body["truncated"] is True
+
+
+def test_output_endpoint_empty_when_no_log(client):
+    """Job exists but worker never streamed → size_bytes=0, empty tail."""
+    job = _submit(client).json()
+    r = client.get(f"/jobs/{job['id']}/output")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["size_bytes"] == 0
+    assert body["tail"] == ""
+
+
+def test_output_endpoint_404_on_unknown_job(client):
+    r = client.get("/jobs/99999/output")
+    assert r.status_code == 404
+
+
 def test_complete_auto_derives_failed_from_nonzero_rc(client):
     """If the worker omits final_state, nonzero rc → failed, zero → completed.
     Matters for the depends_on cascade, which keys off terminal state."""
