@@ -264,6 +264,55 @@ def test_submit_passes_depends_on_flags(monkeypatch):
     assert captured["body"]["depends_on_any_exit"] is True
 
 
+def test_logs_prints_tail(monkeypatch):
+    """`job logs <id>` hits /output and echoes the tail verbatim."""
+    import job_cli.cli as cli_mod
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path, params=None):
+            assert path == "/jobs/7/output"
+            assert params == {"tail": 8192}
+            return _FakeResp(
+                {
+                    "tail": "hello world\n",
+                    "size_bytes": 12,
+                    "returned_bytes": 12,
+                    "truncated": False,
+                }
+            )
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["logs", "7"])
+    assert r.exit_code == 0
+    assert "hello world" in r.stdout
+
+
+def test_logs_no_capture_prints_marker(monkeypatch):
+    """Empty log → friendly marker, not silent success."""
+    import job_cli.cli as cli_mod
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, path, params=None):
+            return _FakeResp({"tail": "", "size_bytes": 0, "returned_bytes": 0, "truncated": False})
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["logs", "7"])
+    assert r.exit_code == 0
+    assert "no log captured" in r.stdout
+
+
 def test_list_renders_deps_markers(monkeypatch):
     """`job list` prints `deps: 10✓ 11⧖` under a child row."""
     import job_cli.cli as cli_mod
