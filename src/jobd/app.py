@@ -39,6 +39,7 @@ from jobd.models import (
     JobSubmit,
     NextJobQuery,
     WorkerHeartbeat,
+    WorkerInfo,
 )
 
 log = logging.getLogger("jobd")
@@ -285,6 +286,27 @@ def build_app(
             worker.state = "online"
             session.commit()
             return {"ok": True}
+
+    @app.get("/workers", response_model=list[WorkerInfo])
+    def list_workers():
+        with SessionLocal() as session:
+            workers = session.execute(select(Worker)).scalars().all()
+            return [
+                WorkerInfo(
+                    host=w.host,
+                    host_aliases=json.loads(w.host_aliases_json or "[]"),
+                    last_heartbeat=w.last_heartbeat,
+                    state=w.state,
+                    free_vram_gb=w.free_vram_gb,
+                    free_ram_gb=w.free_ram_gb,
+                    idle_cpus=w.idle_cpus,
+                    arch=w.arch,
+                    os=w.os,
+                    gpu=w.gpu,
+                    tags=json.loads(w.tags_json or "[]"),
+                )
+                for w in workers
+            ]
 
     @app.post("/next-job", response_model=JobInfo | None)
     def next_job(q: NextJobQuery):

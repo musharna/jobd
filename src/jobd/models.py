@@ -96,6 +96,24 @@ class JobInfo(BaseModel):
         return _as_utc_iso(v)
 
 
+class WorkerInfo(BaseModel):
+    host: str
+    host_aliases: list[str]
+    last_heartbeat: datetime
+    state: str
+    free_vram_gb: float
+    free_ram_gb: float
+    idle_cpus: int
+    arch: str
+    os: str
+    gpu: bool
+    tags: list[str]
+
+    @field_serializer("last_heartbeat", when_used="always")
+    def _ser_dt(self, v: datetime) -> str | None:
+        return _as_utc_iso(v)
+
+
 class WorkerHeartbeat(BaseModel):
     host: str
     free_vram_gb: float

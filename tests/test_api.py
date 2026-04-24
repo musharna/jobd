@@ -107,6 +107,41 @@ def test_classify_known_heavy_cmd(client):
     assert body["suggest_profile"] == "gpu-heavy"
 
 
+def test_list_workers_empty_before_any_heartbeat(client):
+    r = client.get("/workers")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_list_workers_returns_registered_worker(client):
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "host_aliases": ["desktop-wsl"],
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": True,
+            "tags": ["python3", "R", "cuda", "wsl"],
+        },
+    )
+    r = client.get("/workers")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 1
+    w = body[0]
+    assert w["host"] == "desktop"
+    assert w["host_aliases"] == ["desktop-wsl"]
+    assert w["state"] == "online"
+    assert w["gpu"] is True
+    assert "R" in w["tags"]
+    assert w["last_heartbeat"].endswith("+00:00")
+
+
 def test_heartbeat_registers_worker(client):
     r = client.post(
         "/heartbeat",
