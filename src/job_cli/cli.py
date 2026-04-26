@@ -9,7 +9,7 @@ import time
 
 import httpx
 import typer
-from jobd.client import JobdClient
+from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
 
 app = typer.Typer(help="Submit and monitor jobs on jobd.")
 
@@ -115,18 +115,17 @@ def _stream_wait(job_id: int) -> None:
 STALE_HEARTBEAT_SECONDS = 60
 
 
-def _worker_health_banner(client: httpx.Client) -> None:
+def _worker_health_banner(client: JobdClient) -> None:
     """Emit a one-line banner if any worker is offline or stale. Silent when healthy."""
     from datetime import datetime, timezone
 
     try:
         r = client.get("/workers")
-        r.raise_for_status()
-    except (httpx.HTTPError, httpx.ConnectError):
+    except (BrokerUnreachable, BrokerServerError, BrokerRefusal):
         return
     workers = r.json()
     if not workers:
-        typer.secho("\u26a0 no workers registered \u2014 nothing will dispatch", fg="yellow")
+        typer.secho("⚠ no workers registered — nothing will dispatch", fg="yellow")
         return
     now = datetime.now(timezone.utc)
     bad: list[str] = []
@@ -144,7 +143,7 @@ def _worker_health_banner(client: httpx.Client) -> None:
         if age > STALE_HEARTBEAT_SECONDS:
             bad.append(f"{w['host']} (stale {int(age)}s)")
     if bad:
-        typer.secho(f"\u26a0 worker health: {', '.join(bad)}", fg="yellow")
+        typer.secho(f"⚠ worker health: {', '.join(bad)}", fg="yellow")
 
 
 @app.command(name="list")
@@ -173,18 +172,16 @@ def list_jobs(
                 for d in deps:
                     st = state_by_id.get(d)
                     mark = (
-                        "\u2713"
+                        "✓"
                         if st == "completed"
                         else (
-                            "\u2717"
-                            if st in {"failed", "cancelled", "preempted", "orphaned"}
-                            else "\u29d6"
+                            "✗" if st in {"failed", "cancelled", "preempted", "orphaned"} else "⧖"
                         )
                     )
                     parts.append(f"{d}{mark}")
                 typer.echo(f"  deps: {' '.join(parts)}")
             if j.get("warning"):
-                typer.secho(f"  \u26a0 {j['warning']}", fg="yellow")
+                typer.secho(f"  ⚠ {j['warning']}", fg="yellow")
 
 
 def _render_status(j: dict) -> str:
