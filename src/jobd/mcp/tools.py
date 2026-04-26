@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 from jobd.client import JobdClient
 
@@ -138,3 +139,31 @@ def jobd_list(client: JobdClient, args: dict) -> dict:
         "jobs": [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in raw.get("jobs", [])],
         "counts": raw.get("counts", {}),
     }
+
+
+STALE_AFTER_S = 60
+
+
+def _heartbeat_age_s(iso_ts: str) -> float:
+    if iso_ts.endswith("Z"):
+        iso_ts = iso_ts[:-1] + "+00:00"
+    dt = datetime.fromisoformat(iso_ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds()
+
+
+def jobd_workers(client: JobdClient, args: dict) -> dict:
+    raw = client.workers()
+    workers = raw.get("workers", [])
+    if not workers:
+        return {"workers": [], "fleet_health": "empty", "warnings": ["no workers registered"]}
+    warnings: list[str] = []
+    for w in workers:
+        ts = w.get("last_heartbeat")
+        if ts:
+            age = _heartbeat_age_s(ts)
+            if age > STALE_AFTER_S:
+                warnings.append(f"worker {w.get('host', '?')} stale ({int(age)}s)")
+    health = "degraded" if warnings else "healthy"
+    return {"workers": workers, "fleet_health": health, "warnings": warnings}

@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import httpx
@@ -200,3 +201,47 @@ def test_jobd_list_summarizes_jobs():
         "queued_at",
         "started_at",
     }
+
+
+@respx.mock
+def test_jobd_workers_healthy_when_recent_heartbeat():
+    recent = datetime.now(timezone.utc).isoformat()
+    respx.get("http://broker.test/workers").mock(
+        return_value=httpx.Response(
+            200, json={"workers": [{"host": "desktop", "last_heartbeat": recent}]}
+        )
+    )
+    from jobd.mcp.tools import jobd_workers
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_workers(client, {})
+    assert out["fleet_health"] == "healthy"
+    assert out["warnings"] == []
+
+
+@respx.mock
+def test_jobd_workers_degraded_when_stale():
+    old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    respx.get("http://broker.test/workers").mock(
+        return_value=httpx.Response(
+            200, json={"workers": [{"host": "desktop", "last_heartbeat": old}]}
+        )
+    )
+    from jobd.mcp.tools import jobd_workers
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_workers(client, {})
+    assert out["fleet_health"] == "degraded"
+    assert any("stale" in w for w in out["warnings"])
+
+
+@respx.mock
+def test_jobd_workers_empty_fleet():
+    respx.get("http://broker.test/workers").mock(
+        return_value=httpx.Response(200, json={"workers": []})
+    )
+    from jobd.mcp.tools import jobd_workers
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_workers(client, {})
+    assert out["fleet_health"] == "empty"
