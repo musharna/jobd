@@ -117,3 +117,24 @@ def jobd_cancel(client: JobdClient, args: dict) -> dict:
         "new_state": after["state"],
         "signal_sent": cancel_resp.get("signal"),
     }
+
+
+_LIST_SUMMARY_FIELDS = (
+    "job_id",
+    "project",
+    "state",
+    "host",
+    "exit_code",
+    "queued_at",
+    "started_at",
+)
+
+
+def jobd_list(client: JobdClient, args: dict) -> dict:
+    states = args.get("state") or []
+    state = states[0] if states else None
+    raw = client.list_jobs(state=state, project=args.get("project"))
+    return {
+        "jobs": [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in raw.get("jobs", [])],
+        "counts": raw.get("counts", {}),
+    }
