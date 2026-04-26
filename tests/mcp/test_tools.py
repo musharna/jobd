@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import httpx
 import respx
 from jobd.client import JobdClient
@@ -73,3 +75,35 @@ def test_submit_extra_keys_merge_into_payload():
     assert '"idempotent":true' in body or '"idempotent": true' in body
     assert "depends_on" in body
     assert "max_wall" in body
+
+
+@respx.mock
+def test_jobd_status_async_returns_full_info():
+    respx.get("http://broker.test/jobs/7").mock(
+        return_value=httpx.Response(
+            200, json={"job_id": 7, "state": "running", "exit_code": None, "host": "desktop"}
+        )
+    )
+    from jobd.mcp.tools import jobd_status
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_status(client, {"job_id": 7})
+    assert out["state"] == "running"
+    assert out["host"] == "desktop"
+
+
+@respx.mock
+def test_jobd_status_wait_returns_timeout_when_running():
+    respx.get("http://broker.test/jobs/7").mock(
+        return_value=httpx.Response(200, json={"job_id": 7, "state": "running", "exit_code": None})
+    )
+    from jobd.mcp.tools import jobd_status
+
+    client = JobdClient(base_url="http://broker.test")
+    times = iter([0.0, 11.0])
+    with (
+        patch("jobd.mcp.tools.time.monotonic", side_effect=lambda: next(times)),
+        patch("jobd.mcp.tools.time.sleep"),
+    ):
+        out = jobd_status(client, {"job_id": 7, "wait": True, "wait_timeout_s": 10})
+    assert out["timed_out"] is True
