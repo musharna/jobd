@@ -264,6 +264,14 @@ def logs(
 
 
 @app.command()
+def workers():
+    """List registered workers and their health status."""
+    with JobdClient(base_url=BASE) as c:
+        data = c.workers()
+        typer.echo(json.dumps(data, default=str))
+
+
+@app.command()
 def classify(cmd: str):
     with _client() as c:
         r = c.post("/classify", json={"cmd": cmd})
