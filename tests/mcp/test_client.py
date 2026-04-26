@@ -137,3 +137,24 @@ def test_list_jobs_passes_filters():
     params = route.calls.last.request.url.params
     assert params["state_filter"] == "queued"
     assert params["project"] == "phelipanche"
+
+
+@respx.mock
+def test_workers_returns_worker_list():
+    respx.get("http://broker.test/workers").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "workers": [
+                    {
+                        "host": "desktop",
+                        "host_aliases": ["any", "any-gpu"],
+                        "last_heartbeat": "2026-04-26T12:00:00Z",
+                    }
+                ]
+            },
+        )
+    )
+    c = JobdClient(base_url="http://broker.test")
+    out = c.workers()
+    assert len(out["workers"]) == 1
