@@ -80,3 +80,6 @@ class JobdClient:
     def cancel(self, job_id: int, *, reason: str | None = None) -> dict:
         body = {"reason": reason} if reason else None
         return self._request("POST", f"/jobs/{job_id}/cancel", json=body).json()
+
+    def logs(self, job_id: int, *, tail_bytes: int = 8192) -> dict:
+        return self._request("GET", f"/jobs/{job_id}/output", params={"tail": tail_bytes}).json()
