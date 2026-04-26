@@ -45,6 +45,9 @@ packages = ["src/jobd", "src/job_cli"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "live: hits the real jobd broker; skipped unless RUN_LIVE_JOBD=1",
+]
 
 [tool.ruff]
 line-length = 100
