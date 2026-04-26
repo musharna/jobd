@@ -167,3 +167,7 @@ def jobd_workers(client: JobdClient, args: dict) -> dict:
                 warnings.append(f"worker {w.get('host', '?')} stale ({int(age)}s)")
     health = "degraded" if warnings else "healthy"
     return {"workers": workers, "fleet_health": health, "warnings": warnings}
+
+
+def jobd_job_get(client: JobdClient, args: dict) -> dict:
+    return client.job_get(args["job_id"])
