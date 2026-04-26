@@ -158,3 +158,17 @@ def test_workers_returns_worker_list():
     c = JobdClient(base_url="http://broker.test")
     out = c.workers()
     assert len(out["workers"]) == 1
+
+
+@respx.mock
+def test_job_get_returns_full_job_info():
+    respx.get("http://broker.test/jobs/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={"job_id": 42, "command": "sleep 1", "depends_on_json": [], "fast_path": False},
+        )
+    )
+    c = JobdClient(base_url="http://broker.test")
+    info = c.job_get(42)
+    assert info["job_id"] == 42
+    assert "fast_path" in info
