@@ -1,4 +1,10 @@
-"""MCP tool dispatch — calls JobdClient and shapes results per spec §3."""
+"""MCP tool dispatch — calls JobdClient and shapes results per spec §3.
+
+Outbound: `translate.xlate_submit_payload` translates MCP-flat args to the
+broker's JobSubmit body. Inbound: `translate.xlate_job_info` /
+`wrap_jobs` / `wrap_workers` reshape broker responses to MCP-facing
+field names. All translation lives in `translate.py`.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,12 @@ import time
 from datetime import datetime, timezone
 
 from jobd.client import JobdClient
+from jobd.mcp.translate import (
+    wrap_jobs,
+    wrap_workers,
+    xlate_job_info,
+    xlate_submit_payload,
+)
 
 POLL_INTERVAL_S = 2.0
 MAX_WAIT_S = 270
@@ -14,7 +26,11 @@ _TERMINAL = {"completed", "failed", "cancelled"}
 
 
 def _build_submit_payload(args: dict) -> dict:
-    """Merge first-class fields with extra (extra never overrides explicit fields)."""
+    """Merge first-class fields with extra (extra never overrides explicit fields).
+
+    Returns the MCP-flat payload; `xlate_submit_payload` converts it to
+    the broker JobSubmit body at the seam.
+    """
     payload = {
         "command": args["command"],
         "project": args["project"],
@@ -28,11 +44,16 @@ def _build_submit_payload(args: dict) -> dict:
     return payload
 
 
+def _status(client: JobdClient, job_id: int) -> dict:
+    """Fetch + translate JobInfo. Used everywhere status is read."""
+    return xlate_job_info(client.status(job_id))
+
+
 def _wait_for_terminal(client: JobdClient, job_id: int, timeout_s: int) -> tuple[dict, bool]:
     """Poll /status until terminal or timeout. Returns (last_status, timed_out)."""
     deadline = time.monotonic() + timeout_s
     while True:
-        info = client.status(job_id)
+        info = _status(client, job_id)
         if info["state"] in _TERMINAL:
             return info, False
         if time.monotonic() >= deadline:
@@ -42,8 +63,9 @@ def _wait_for_terminal(client: JobdClient, job_id: int, timeout_s: int) -> tuple
 
 def jobd_submit(client: JobdClient, args: dict) -> dict:
     """Submit a job. Async by default; sync wait supported via wait=True."""
-    payload = _build_submit_payload(args)
-    resp = client.submit(payload)
+    flat = _build_submit_payload(args)
+    broker_body = xlate_submit_payload(flat)
+    resp = xlate_job_info(client.submit(broker_body))
     base = {
         "job_id": resp["job_id"],
         "state": resp["state"],
@@ -62,7 +84,7 @@ def jobd_submit(client: JobdClient, args: dict) -> dict:
     clamped = requested > MAX_WAIT_S
 
     if base["state"] in _TERMINAL:
-        info = client.status(base["job_id"])
+        info = _status(client, base["job_id"])
     else:
         info, timed_out_flag = _wait_for_terminal(client, base["job_id"], timeout_s)
         if timed_out_flag:
@@ -92,7 +114,7 @@ def jobd_submit(client: JobdClient, args: dict) -> dict:
 def jobd_status(client: JobdClient, args: dict) -> dict:
     job_id = args["job_id"]
     if not args.get("wait"):
-        return client.status(job_id)
+        return _status(client, job_id)
     requested = int(args.get("wait_timeout_s", 90))
     timeout_s = min(requested, MAX_WAIT_S)
     info, timed_out = _wait_for_terminal(client, job_id, timeout_s)
@@ -108,15 +130,22 @@ def jobd_logs(client: JobdClient, args: dict) -> dict:
 
 
 def jobd_cancel(client: JobdClient, args: dict) -> dict:
+    """Cancel a job. signal_sent synthesized: 'cancel' if prior state was running, else None.
+
+    The broker's JobInfo response has no `signal` field; the cancel flow
+    is async (worker polls /signal endpoint and SIGTERMs). For MCP
+    consumers, surface the signal we know was queued.
+    """
     job_id = args["job_id"]
-    prior = client.status(job_id)
-    cancel_resp = client.cancel(job_id, reason=args.get("reason"))
-    after = client.status(job_id)
+    prior = _status(client, job_id)
+    client.cancel(job_id, reason=args.get("reason"))
+    after = _status(client, job_id)
+    signal_sent = "cancel" if prior["state"] == "running" else None
     return {
         "job_id": job_id,
         "prior_state": prior["state"],
         "new_state": after["state"],
-        "signal_sent": cancel_resp.get("signal"),
+        "signal_sent": signal_sent,
     }
 
 
@@ -134,10 +163,11 @@ _LIST_SUMMARY_FIELDS = (
 def jobd_list(client: JobdClient, args: dict) -> dict:
     states = args.get("state") or []
     state = states[0] if states else None
-    raw = client.list_jobs(state=state, project=args.get("project"))
+    raw_list = client.list_jobs(state=state, project=args.get("project"))
+    wrapped = wrap_jobs(raw_list if isinstance(raw_list, list) else raw_list.get("jobs", []))
     return {
-        "jobs": [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in raw.get("jobs", [])],
-        "counts": raw.get("counts", {}),
+        "jobs": [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in wrapped["jobs"]],
+        "counts": wrapped["counts"],
     }
 
 
@@ -155,7 +185,8 @@ def _heartbeat_age_s(iso_ts: str) -> float:
 
 def jobd_workers(client: JobdClient, args: dict) -> dict:
     raw = client.workers()
-    workers = raw.get("workers", [])
+    wrapped = wrap_workers(raw if isinstance(raw, list) else raw.get("workers", []))
+    workers = wrapped["workers"]
     if not workers:
         return {"workers": [], "fleet_health": "empty", "warnings": ["no workers registered"]}
     warnings: list[str] = []
@@ -170,4 +201,4 @@ def jobd_workers(client: JobdClient, args: dict) -> dict:
 
 
 def jobd_job_get(client: JobdClient, args: dict) -> dict:
-    return client.job_get(args["job_id"])
+    return xlate_job_info(client.job_get(args["job_id"]))
