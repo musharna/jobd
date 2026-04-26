@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import httpx
+
 
 class BrokerUnreachable(Exception):
     """Network failure — DNS, connect refused, TLS, connect timeout."""
@@ -22,3 +26,50 @@ class BrokerRefusal(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.detail = detail
+
+
+class JobdClient:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        *,
+        timeout: tuple[float, float] = (5.0, 30.0),
+    ) -> None:
+        self.base_url = (
+            base_url or os.environ.get("JOBD_URL") or "http://100.113.204.41:8765"
+        ).rstrip("/")
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=timeout[0],
+                read=timeout[1],
+                write=timeout[1],
+                pool=timeout[1],
+            )
+        )
+
+    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        try:
+            r = self._client.request(method, f"{self.base_url}{path}", **kwargs)
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.NetworkError,
+        ) as e:
+            raise BrokerUnreachable(f"{type(e).__name__}: {e} (JOBD_URL={self.base_url})") from e
+        if 500 <= r.status_code < 600:
+            raise BrokerServerError(
+                f"broker {r.status_code}: {r.text[:500]}", status_code=r.status_code
+            )
+        if 400 <= r.status_code < 500:
+            try:
+                detail = r.json().get("detail", r.text)
+            except Exception:
+                detail = r.text
+            raise BrokerRefusal(
+                f"broker {r.status_code}", status_code=r.status_code, detail=detail or ""
+            )
+        return r
+
+    def submit(self, payload: dict) -> dict:
+        return self._request("POST", "/submit", json=payload).json()
