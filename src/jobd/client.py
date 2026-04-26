@@ -94,3 +94,6 @@ class JobdClient:
 
     def workers(self) -> dict:
         return self._request("GET", "/workers").json()
+
+    def job_get(self, job_id: int) -> dict:
+        return self._request("GET", f"/jobs/{job_id}").json()
