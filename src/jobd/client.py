@@ -83,3 +83,11 @@ class JobdClient:
 
     def logs(self, job_id: int, *, tail_bytes: int = 8192) -> dict:
         return self._request("GET", f"/jobs/{job_id}/output", params={"tail": tail_bytes}).json()
+
+    def list_jobs(self, *, state: str | None = None, project: str | None = None) -> dict:
+        params: dict[str, str] = {}
+        if state:
+            params["state_filter"] = state
+        if project:
+            params["project"] = project
+        return self._request("GET", "/jobs", params=params).json()

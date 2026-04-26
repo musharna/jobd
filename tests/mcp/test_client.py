@@ -122,3 +122,18 @@ def test_logs_passes_tail_query_param():
     out = c.logs(42, tail_bytes=4096)
     assert out["tail"] == "hello"
     assert route.calls.last.request.url.params["tail"] == "4096"
+
+
+@respx.mock
+def test_list_jobs_passes_filters():
+    route = respx.get("http://broker.test/jobs").mock(
+        return_value=httpx.Response(
+            200, json={"jobs": [], "counts": {"queued": 0, "running": 0, "recent_failed_24h": 0}}
+        )
+    )
+    c = JobdClient(base_url="http://broker.test")
+    out = c.list_jobs(state="queued", project="phelipanche")
+    assert out["counts"]["queued"] == 0
+    params = route.calls.last.request.url.params
+    assert params["state_filter"] == "queued"
+    assert params["project"] == "phelipanche"
