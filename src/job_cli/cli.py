@@ -9,6 +9,7 @@ import time
 
 import httpx
 import typer
+from jobd.client import JobdClient
 
 app = typer.Typer(help="Submit and monitor jobs on jobd.")
 
@@ -16,8 +17,8 @@ BASE = os.environ.get("JOBD_URL", "http://10.0.0.10:8765")
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
 
-def _client() -> httpx.Client:
-    return httpx.Client(base_url=BASE, timeout=30.0)
+def _client() -> JobdClient:
+    return JobdClient(base_url=BASE)
 
 
 @app.command()
