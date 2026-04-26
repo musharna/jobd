@@ -104,3 +104,16 @@ def jobd_status(client: JobdClient, args: dict) -> dict:
 
 def jobd_logs(client: JobdClient, args: dict) -> dict:
     return client.logs(args["job_id"], tail_bytes=int(args.get("tail_bytes", 8192)))
+
+
+def jobd_cancel(client: JobdClient, args: dict) -> dict:
+    job_id = args["job_id"]
+    prior = client.status(job_id)
+    cancel_resp = client.cancel(job_id, reason=args.get("reason"))
+    after = client.status(job_id)
+    return {
+        "job_id": job_id,
+        "prior_state": prior["state"],
+        "new_state": after["state"],
+        "signal_sent": cancel_resp.get("signal"),
+    }

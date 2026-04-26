@@ -129,3 +129,25 @@ def test_jobd_logs_passes_tail_bytes_through():
     out = jobd_logs(client, {"job_id": 7, "tail_bytes": 1000})
     assert out["tail"] == "abc"
     assert route.calls.last.request.url.params["tail"] == "1000"
+
+
+@respx.mock
+def test_jobd_cancel_returns_prior_and_new_state():
+    respx.get("http://broker.test/jobs/7").mock(
+        side_effect=[
+            httpx.Response(200, json={"job_id": 7, "state": "running"}),  # prior
+            httpx.Response(
+                200, json={"job_id": 7, "state": "running", "signal": "cancel"}
+            ),  # post-cancel
+        ]
+    )
+    respx.post("http://broker.test/jobs/7/cancel").mock(
+        return_value=httpx.Response(200, json={"job_id": 7, "state": "running", "signal": "cancel"})
+    )
+    from jobd.mcp.tools import jobd_cancel
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_cancel(client, {"job_id": 7, "reason": "test"})
+    assert out["prior_state"] == "running"
+    assert out["new_state"] == "running"
+    assert out["signal_sent"] == "cancel"
