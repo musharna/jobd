@@ -232,10 +232,9 @@ def status(
 
 @app.command()
 def cancel(job_id: int):
-    with _client() as c:
-        r = c.post(f"/jobs/{job_id}/cancel")
-        r.raise_for_status()
-        typer.echo(json.dumps(r.json(), default=str))
+    with JobdClient(base_url=BASE) as c:
+        job = c.cancel(job_id)
+        typer.echo(json.dumps(job, default=str))
 
 
 @app.command()
