@@ -252,7 +252,6 @@ def logs(
     on a finished job without SSHing to the worker."""
     with _client() as c:
         r = c.get(f"/jobs/{job_id}/output", params={"tail": tail})
-        r.raise_for_status()
         body = r.json()
         if body["size_bytes"] == 0:
             typer.secho(f"[no log captured for job {job_id}]", fg="yellow")
