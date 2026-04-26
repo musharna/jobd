@@ -97,3 +97,9 @@ class JobdClient:
 
     def job_get(self, job_id: int) -> dict:
         return self._request("GET", f"/jobs/{job_id}").json()
+
+    def __enter__(self) -> "JobdClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._client.close()

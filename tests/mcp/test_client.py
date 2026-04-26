@@ -172,3 +172,9 @@ def test_job_get_returns_full_job_info():
     info = c.job_get(42)
     assert info["job_id"] == 42
     assert "fast_path" in info
+
+
+def test_client_context_manager_closes_underlying_httpx():
+    with JobdClient(base_url="http://broker.test") as c:
+        assert c._client is not None
+    assert c._client.is_closed
