@@ -245,3 +245,19 @@ def test_jobd_workers_empty_fleet():
     client = JobdClient(base_url="http://broker.test")
     out = jobd_workers(client, {})
     assert out["fleet_health"] == "empty"
+
+
+@respx.mock
+def test_jobd_job_get_returns_full_info():
+    respx.get("http://broker.test/jobs/7").mock(
+        return_value=httpx.Response(
+            200, json={"job_id": 7, "command": "x", "depends_on_json": [3], "fast_path": True}
+        )
+    )
+    from jobd.mcp.tools import jobd_job_get
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_job_get(client, {"job_id": 7})
+    assert out["job_id"] == 7
+    assert out["fast_path"] is True
+    assert out["depends_on_json"] == [3]
