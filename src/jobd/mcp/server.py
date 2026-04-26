@@ -6,6 +6,9 @@ import asyncio
 import json
 import os
 import sys
+import time
+from pathlib import Path
+from typing import Any
 
 from mcp import types
 from mcp.server import Server
@@ -65,6 +68,23 @@ _TOOLS = [
 ]
 
 
+def _log_call(name: str, arguments: dict | None, error_kind: str | None, ms: float) -> None:
+    log_dir = Path(
+        os.environ.get("JOBD_MCP_LOG_DIR") or os.path.expanduser("~/.claude/state/jobd-mcp")
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    entry: dict[str, Any] = {
+        "ts": time.time(),
+        "tool": name,
+        "job_id": (arguments or {}).get("job_id"),
+        "ms": round(ms, 1),
+    }
+    if error_kind:
+        entry["error_kind"] = error_kind
+    with (log_dir / "calls.jsonl").open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
 def build_server(client: JobdClient | None = None) -> Server:
     server = Server("jobd")
     client = client or JobdClient()
@@ -94,11 +114,22 @@ def build_server(client: JobdClient | None = None) -> Server:
 
     @server.call_tool()
     async def _call(name: str, arguments: dict) -> list[types.TextContent]:
+        t0 = time.monotonic()
+        error_kind: str | None = None
         try:
             payload = _dispatch(name, arguments)
+            if (
+                isinstance(payload, dict)
+                and "error" in payload
+                and isinstance(payload["error"], dict)
+            ):
+                error_kind = payload["error"].get("kind")
+            return [types.TextContent(type="text", text=json.dumps(payload))]
         except (BrokerUnreachable, BrokerServerError) as e:
+            error_kind = "transport"
             raise RuntimeError(f"jobd transport error: {e}") from e
-        return [types.TextContent(type="text", text=json.dumps(payload))]
+        finally:
+            _log_call(name, arguments, error_kind, (time.monotonic() - t0) * 1000)
 
     return server
 

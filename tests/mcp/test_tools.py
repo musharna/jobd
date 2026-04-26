@@ -292,3 +292,39 @@ def test_dispatch_passes_through_success_payload():
     out = server._jobd_dispatch("jobd_status", {"job_id": 7})  # type: ignore[attr-defined]
     assert out["job_id"] == 7
     assert out["state"] == "running"
+
+
+@respx.mock
+def test_call_tool_writes_jsonl_log_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("JOBD_MCP_LOG_DIR", str(tmp_path))
+    respx.get("http://broker.test/jobs/7").mock(
+        return_value=httpx.Response(200, json={"job_id": 7, "state": "completed"})
+    )
+    import json as _json
+    import time as _time
+
+    from jobd.mcp.server import _log_call
+
+    t0 = _time.monotonic()
+    _log_call("jobd_status", {"job_id": 7}, None, (_time.monotonic() - t0) * 1000)
+
+    log_file = tmp_path / "calls.jsonl"
+    assert log_file.exists()
+    line = log_file.read_text().strip().splitlines()[-1]
+    entry = _json.loads(line)
+    assert entry["tool"] == "jobd_status"
+    assert entry["job_id"] == 7
+    assert "ms" in entry
+    assert "error_kind" not in entry
+
+
+def test_call_tool_logs_error_kind_for_refusal(tmp_path, monkeypatch):
+    monkeypatch.setenv("JOBD_MCP_LOG_DIR", str(tmp_path))
+    import json as _json
+
+    from jobd.mcp.server import _log_call
+
+    _log_call("jobd_submit", {"command": "x"}, "cwd_outside_mount_roots", 12.3)
+    entry = _json.loads((tmp_path / "calls.jsonl").read_text().strip().splitlines()[-1])
+    assert entry["error_kind"] == "cwd_outside_mount_roots"
+    assert entry["tool"] == "jobd_submit"
