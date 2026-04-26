@@ -151,3 +151,52 @@ def test_jobd_cancel_returns_prior_and_new_state():
     assert out["prior_state"] == "running"
     assert out["new_state"] == "running"
     assert out["signal_sent"] == "cancel"
+
+
+@respx.mock
+def test_jobd_list_summarizes_jobs():
+    respx.get("http://broker.test/jobs").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jobs": [
+                    {
+                        "job_id": 1,
+                        "project": "p",
+                        "state": "queued",
+                        "host": None,
+                        "exit_code": None,
+                        "queued_at": "t",
+                        "started_at": None,
+                        "extra_field_dropped": "x",
+                    },
+                    {
+                        "job_id": 2,
+                        "project": "p",
+                        "state": "running",
+                        "host": "desktop",
+                        "exit_code": None,
+                        "queued_at": "t",
+                        "started_at": "t",
+                    },
+                ],
+                "counts": {"queued": 1, "running": 1, "recent_failed_24h": 0},
+            },
+        )
+    )
+    from jobd.mcp.tools import jobd_list
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_list(client, {"state": ["queued", "running"]})
+    assert out["counts"]["queued"] == 1
+    assert len(out["jobs"]) == 2
+    assert "extra_field_dropped" not in out["jobs"][0]
+    assert set(out["jobs"][0].keys()) == {
+        "job_id",
+        "project",
+        "state",
+        "host",
+        "exit_code",
+        "queued_at",
+        "started_at",
+    }
