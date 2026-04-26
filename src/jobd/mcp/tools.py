@@ -86,3 +86,17 @@ def jobd_submit(client: JobdClient, args: dict) -> dict:
     if clamped:
         out["clamped"] = True
     return out
+
+
+def jobd_status(client: JobdClient, args: dict) -> dict:
+    job_id = args["job_id"]
+    if not args.get("wait"):
+        return client.status(job_id)
+    requested = int(args.get("wait_timeout_s", 90))
+    timeout_s = min(requested, MAX_WAIT_S)
+    info, timed_out = _wait_for_terminal(client, job_id, timeout_s)
+    if timed_out:
+        info = {**info, "timed_out": True}
+    if requested > MAX_WAIT_S:
+        info["clamped"] = True
+    return info
