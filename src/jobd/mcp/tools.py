@@ -100,3 +100,7 @@ def jobd_status(client: JobdClient, args: dict) -> dict:
     if requested > MAX_WAIT_S:
         info["clamped"] = True
     return info
+
+
+def jobd_logs(client: JobdClient, args: dict) -> dict:
+    return client.logs(args["job_id"], tail_bytes=int(args.get("tail_bytes", 8192)))

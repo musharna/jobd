@@ -107,3 +107,25 @@ def test_jobd_status_wait_returns_timeout_when_running():
     ):
         out = jobd_status(client, {"job_id": 7, "wait": True, "wait_timeout_s": 10})
     assert out["timed_out"] is True
+
+
+@respx.mock
+def test_jobd_logs_passes_tail_bytes_through():
+    route = respx.get("http://broker.test/jobs/7/output").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "tail": "abc",
+                "size_bytes": 3,
+                "returned_bytes": 3,
+                "truncated": False,
+                "has_log": True,
+            },
+        )
+    )
+    from jobd.mcp.tools import jobd_logs
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_logs(client, {"job_id": 7, "tail_bytes": 1000})
+    assert out["tail"] == "abc"
+    assert route.calls.last.request.url.params["tail"] == "1000"
