@@ -92,3 +92,13 @@ def test_status_404_raises_refusal():
     with pytest.raises(BrokerRefusal) as excinfo:
         c.status(9999)
     assert excinfo.value.status_code == 404
+
+
+@respx.mock
+def test_cancel_posts_to_cancel_endpoint():
+    respx.post("http://broker.test/jobs/42/cancel").mock(
+        return_value=httpx.Response(200, json={"job_id": 42, "state": "cancelled", "signal": None})
+    )
+    c = JobdClient(base_url="http://broker.test")
+    out = c.cancel(42, reason="user")
+    assert out["state"] == "cancelled"
