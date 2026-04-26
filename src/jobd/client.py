@@ -98,6 +98,14 @@ class JobdClient:
     def job_get(self, job_id: int) -> dict:
         return self._request("GET", f"/jobs/{job_id}").json()
 
+    # Low-level passthrough helpers so callers using c.get()/c.post() patterns
+    # still route through _request() for error translation.
+    def get(self, path: str, *, params: dict | None = None) -> httpx.Response:
+        return self._request("GET", path, params=params)
+
+    def post(self, path: str, *, json: object = None) -> httpx.Response:
+        return self._request("POST", path, json=json)
+
     def __enter__(self) -> "JobdClient":
         return self
 
