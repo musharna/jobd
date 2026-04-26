@@ -71,3 +71,24 @@ def test_submit_connection_error_raises_broker_unreachable():
     c = JobdClient(base_url="http://broker.test")
     with pytest.raises(BrokerUnreachable):
         c.submit({"command": "x", "project": "p", "cwd": "/x"})
+
+
+@respx.mock
+def test_status_returns_job_info():
+    respx.get("http://broker.test/jobs/42").mock(
+        return_value=httpx.Response(200, json={"job_id": 42, "state": "running", "exit_code": None})
+    )
+    c = JobdClient(base_url="http://broker.test")
+    info = c.status(42)
+    assert info["state"] == "running"
+
+
+@respx.mock
+def test_status_404_raises_refusal():
+    respx.get("http://broker.test/jobs/9999").mock(
+        return_value=httpx.Response(404, json={"detail": "no job 9999"})
+    )
+    c = JobdClient(base_url="http://broker.test")
+    with pytest.raises(BrokerRefusal) as excinfo:
+        c.status(9999)
+    assert excinfo.value.status_code == 404

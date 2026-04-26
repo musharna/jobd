@@ -73,3 +73,6 @@ class JobdClient:
 
     def submit(self, payload: dict) -> dict:
         return self._request("POST", "/submit", json=payload).json()
+
+    def status(self, job_id: int) -> dict:
+        return self._request("GET", f"/jobs/{job_id}").json()
