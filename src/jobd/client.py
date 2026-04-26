@@ -91,3 +91,6 @@ class JobdClient:
         if project:
             params["project"] = project
         return self._request("GET", "/jobs", params=params).json()
+
+    def workers(self) -> dict:
+        return self._request("GET", "/workers").json()
