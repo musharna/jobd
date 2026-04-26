@@ -161,7 +161,6 @@ def list_jobs(
         if project:
             params["project"] = project
         r = c.get("/jobs", params=params)
-        r.raise_for_status()
         jobs = r.json()
         state_by_id = {j["id"]: j["state"] for j in jobs}
         for j in jobs:
