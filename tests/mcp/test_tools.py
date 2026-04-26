@@ -49,16 +49,21 @@ def test_submit_async_surfaces_broker_warning():
 
 
 @respx.mock
-def test_submit_extra_keys_merge_into_payload():
+def test_submit_extra_keys_translate_to_broker_payload():
+    """Translation: idempotent → requires.idempotent; depends_on top-level;
+    max_wall dropped (broker has no field). cmd wrapped with bash -c.
+    """
+    import json as _json
+
     route = respx.post("http://broker.test/submit").mock(
         return_value=httpx.Response(
             200,
             json={
-                "job_id": 9,
+                "id": 9,
                 "state": "queued",
                 "project": "p",
                 "host_pin": "any",
-                "queued_at": "t",
+                "submitted_at": "2026-04-26T00:00:00+00:00",
             },
         )
     )
@@ -72,10 +77,12 @@ def test_submit_extra_keys_merge_into_payload():
             "extra": {"idempotent": True, "depends_on": [1, 2], "max_wall": "1h"},
         },
     )
-    body = route.calls.last.request.content.decode()
-    assert '"idempotent":true' in body or '"idempotent": true' in body
-    assert "depends_on" in body
-    assert "max_wall" in body
+    body = _json.loads(route.calls.last.request.content)
+    assert body["cmd"] == ["bash", "-c", "x"]
+    assert body["depends_on"] == [1, 2]
+    assert body.get("requires", {}).get("idempotent") is True
+    assert "max_wall" not in body
+    assert "idempotent" not in body  # nested, not top-level
 
 
 @respx.mock
@@ -156,33 +163,33 @@ def test_jobd_cancel_returns_prior_and_new_state():
 
 @respx.mock
 def test_jobd_list_summarizes_jobs():
+    """Live broker returns bare list[JobInfo] with `id`/`worker`/`submitted_at`.
+    Translation renames to job_id/host/queued_at and counts derive client-side.
+    """
     respx.get("http://broker.test/jobs").mock(
         return_value=httpx.Response(
             200,
-            json={
-                "jobs": [
-                    {
-                        "job_id": 1,
-                        "project": "p",
-                        "state": "queued",
-                        "host": None,
-                        "exit_code": None,
-                        "queued_at": "t",
-                        "started_at": None,
-                        "extra_field_dropped": "x",
-                    },
-                    {
-                        "job_id": 2,
-                        "project": "p",
-                        "state": "running",
-                        "host": "desktop",
-                        "exit_code": None,
-                        "queued_at": "t",
-                        "started_at": "t",
-                    },
-                ],
-                "counts": {"queued": 1, "running": 1, "recent_failed_24h": 0},
-            },
+            json=[
+                {
+                    "id": 1,
+                    "project": "p",
+                    "state": "queued",
+                    "worker": None,
+                    "exit_code": None,
+                    "submitted_at": "2026-04-26T00:00:00+00:00",
+                    "started_at": None,
+                    "extra_field_dropped": "x",
+                },
+                {
+                    "id": 2,
+                    "project": "p",
+                    "state": "running",
+                    "worker": "desktop",
+                    "exit_code": None,
+                    "submitted_at": "2026-04-26T00:00:00+00:00",
+                    "started_at": "2026-04-26T00:00:01+00:00",
+                },
+            ],
         )
     )
     from jobd.mcp.tools import jobd_list
@@ -190,6 +197,7 @@ def test_jobd_list_summarizes_jobs():
     client = JobdClient(base_url="http://broker.test")
     out = jobd_list(client, {"state": ["queued", "running"]})
     assert out["counts"]["queued"] == 1
+    assert out["counts"]["running"] == 1
     assert len(out["jobs"]) == 2
     assert "extra_field_dropped" not in out["jobs"][0]
     assert set(out["jobs"][0].keys()) == {
@@ -201,6 +209,8 @@ def test_jobd_list_summarizes_jobs():
         "queued_at",
         "started_at",
     }
+    assert out["jobs"][0]["job_id"] == 1
+    assert out["jobs"][1]["host"] == "desktop"
 
 
 @respx.mock
