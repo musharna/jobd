@@ -102,3 +102,23 @@ def test_cancel_posts_to_cancel_endpoint():
     c = JobdClient(base_url="http://broker.test")
     out = c.cancel(42, reason="user")
     assert out["state"] == "cancelled"
+
+
+@respx.mock
+def test_logs_passes_tail_query_param():
+    route = respx.get("http://broker.test/jobs/42/output").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "tail": "hello",
+                "size_bytes": 5,
+                "returned_bytes": 5,
+                "truncated": False,
+                "has_log": True,
+            },
+        )
+    )
+    c = JobdClient(base_url="http://broker.test")
+    out = c.logs(42, tail_bytes=4096)
+    assert out["tail"] == "hello"
+    assert route.calls.last.request.url.params["tail"] == "4096"
