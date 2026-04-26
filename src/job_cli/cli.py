@@ -213,14 +213,12 @@ def status(
     with _client() as c:
         if not watch:
             r = c.get(f"/jobs/{job_id}")
-            r.raise_for_status()
             j = r.json()
             typer.echo(_render_status(j))
             sys.exit(j.get("exit_code") or 0 if j["state"] in TERMINAL_STATES else 0)
         try:
             while True:
                 r = c.get(f"/jobs/{job_id}")
-                r.raise_for_status()
                 j = r.json()
                 sys.stdout.write("\x1b[2J\x1b[H")
                 sys.stdout.write(_render_status(j) + "\n")
