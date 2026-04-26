@@ -261,3 +261,34 @@ def test_jobd_job_get_returns_full_info():
     assert out["job_id"] == 7
     assert out["fast_path"] is True
     assert out["depends_on_json"] == [3]
+
+
+@respx.mock
+def test_dispatch_maps_broker_refusal_to_structured_error():
+    respx.post("http://broker.test/submit").mock(
+        return_value=httpx.Response(400, json={"detail": "cwd /mnt/c/foo is under /mnt/c/"})
+    )
+    from jobd.mcp.server import build_server
+
+    client = JobdClient(base_url="http://broker.test")
+    server = build_server(client=client)
+    out = server._jobd_dispatch(  # type: ignore[attr-defined]
+        "jobd_submit", {"command": "x", "project": "p", "cwd": "/mnt/c/foo"}
+    )
+    assert "error" in out
+    assert out["error"]["kind"] == "cwd_outside_mount_roots"
+    assert "host" in out["error"]["hint"].lower() or "mount" in out["error"]["hint"].lower()
+
+
+@respx.mock
+def test_dispatch_passes_through_success_payload():
+    respx.get("http://broker.test/jobs/7").mock(
+        return_value=httpx.Response(200, json={"job_id": 7, "state": "running"})
+    )
+    from jobd.mcp.server import build_server
+
+    client = JobdClient(base_url="http://broker.test")
+    server = build_server(client=client)
+    out = server._jobd_dispatch("jobd_status", {"job_id": 7})  # type: ignore[attr-defined]
+    assert out["job_id"] == 7
+    assert out["state"] == "running"
