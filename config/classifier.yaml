@@ -1,0 +1,34 @@
+# Classifier rules — first-match-wins. When a command is submitted without an
+# explicit --profile, the broker matches it against these rules to suggest one.
+# `suggest_profile` must name a profile defined in profiles.yaml.
+#
+# These are examples — write rules that recognise your own heavy commands.
+rules:
+  - id: gpu-train-large
+    match:
+      - command_regex: "^accelerate\\s+launch\\s+.*train.*\\.py"
+      - command_contains: "train.py"
+    suggest_profile: gpu-train-large
+    confidence: high
+
+  - id: gpu-inference
+    match:
+      - command_regex: "python\\d?\\s+.*infer.*\\.py"
+      - command_contains: "inference"
+    suggest_profile: gpu-inference
+    confidence: medium
+
+  - id: cpu-pipeline
+    match:
+      - command_regex: "Rscript\\s+.*\\.R\\b"
+      - command_regex: "snakemake\\b"
+    suggest_profile: cpu-heavy
+    host_aware: true
+    confidence: high
+
+  - id: heavy-pytest
+    match:
+      - command_regex: "pytest\\s+.*--slow"
+      - command_regex: "pytest\\s+.*-m\\s+gpu"
+    suggest_profile: gpu-inference
+    confidence: medium

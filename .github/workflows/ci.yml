@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (from lockfile)
+        run: uv sync --frozen --python ${{ matrix.python-version }} --extra dev --extra worker --extra mcp
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Tests (excluding live broker)
+        run: uv run pytest -m "not live" -q
+
+      # Informational: the codebase is mid-typing-adoption, so mypy is reported
+      # but does not gate the build. Tighten to a hard gate once it's clean.
+      - name: Types (mypy, non-blocking)
+        run: uv run mypy src/jobd src/job_cli
+        continue-on-error: true

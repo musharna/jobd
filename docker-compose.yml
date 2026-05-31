@@ -1,0 +1,30 @@
+services:
+  jobd:
+    build: .
+    image: jobd:latest
+    container_name: jobd
+    restart: unless-stopped
+    # SECURITY: host networking + JOBD_HOST binding is the access-control model.
+    # Docker's default userland-proxy NATs all cross-host inbound source IPs to
+    # the bridge gateway, which defeats the source-IP ACL. With network_mode:
+    # host, uvicorn binds DIRECTLY to JOBD_HOST (a tailscale IP) on the host's
+    # network namespace — only requests arriving on the tailscale interface
+    # reach the broker, and source IPs are preserved for the ACL to inspect.
+    # JOBD_HOST MUST be a loopback (127.0.0.1) or tailscale CGNAT (100.64.0.0/10)
+    # address — never 0.0.0.0 or a public-facing interface. tests/test_deploy_lint.py
+    # enforces this at CI.
+    network_mode: host
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      JOBD_CONFIG_DIR: /app/config
+      JOBD_DB_URL: sqlite:////app/data/jobd.db
+      JOBD_LOGS_DIR: /app/logs
+      # Set to your host's tailscale CGNAT IP (100.64.0.0/10) for cross-host
+      # access, or leave at 127.0.0.1 for a single-host (loopback-only) broker.
+      # MUST NOT be 0.0.0.0 or a public interface — see the SECURITY note above.
+      JOBD_HOST: ${JOBD_HOST:-127.0.0.1}
+      JOBD_PORT: 8765
+      JOBD_API_TOKEN: ${JOBD_API_TOKEN:?JOBD_API_TOKEN must be set in .env (see docs/security.md)}

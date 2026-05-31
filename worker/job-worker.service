@@ -1,0 +1,27 @@
+[Unit]
+Description=jobd worker — polls broker, runs assigned jobs
+After=network-online.target
+
+[Service]
+Type=simple
+# EDIT: point at your broker. Use the broker host's tailscale IP for a
+# cross-host setup, or http://127.0.0.1:8765 if the worker runs on the
+# same host as the broker.
+Environment="JOBD_URL=http://127.0.0.1:8765"
+# EDIT: the broker's shared secret. REQUIRED unless the broker runs with
+# JOBD_ALLOW_NO_AUTH=1 — without it the worker gets 401 on every poll. Prefer
+# an EnvironmentFile (chmod 600) over an inline secret on a shared host.
+#Environment="JOBD_API_TOKEN=your-shared-token"
+# EDIT: a stable name for this worker host (shown in `job workers`).
+Environment="JOBD_WORKER_HOST=worker1"
+# EDIT: include CUDA bin dirs here if this worker has a GPU.
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+# EDIT: install path produced by scripts/install-worker.sh.
+ExecStart=/opt/jobd-worker/.venv/bin/python /opt/jobd-worker/job_worker.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

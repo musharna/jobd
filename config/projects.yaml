@@ -1,0 +1,26 @@
+# Per-project priority table. Higher priority wins when the queue is contended.
+# This file is OPTIONAL — with no projects.yaml the broker uses the global
+# default priority for every job. Edit freely for your own projects.
+#
+# Change priorities live (persists + reloads) with:
+#   job projects set NAME PRIORITY
+projects:
+  # Tier 1 — time-sensitive / blocking work
+  project-a: { priority: 80 }
+  project-b: { priority: 75 }
+
+  # Tier 2 — active development
+  project-c:
+    priority: 60
+    defaults:
+      # Per-project submit defaults. preemptible=true lets a higher-priority
+      # job pause this one (the worker is sent SIGTERM, then SIGKILL after the
+      # grace window) — only safe for jobs that checkpoint. See docs/preemption.md.
+      preemptible: true
+      checkpoint_grace_s: 60
+
+  # Tier 3 — background / best-effort
+  project-d: { priority: 40 }
+
+  # Priority applied to any project not listed above.
+  _default: { priority: 40 }

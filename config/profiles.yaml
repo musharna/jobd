@@ -1,0 +1,57 @@
+# Resource profiles — named bundles of resource requirements a job can request
+# with `job submit --profile NAME`. The matcher uses vram_gb / ram_gb / cpus to
+# pick a worker whose advertised capacity fits. `requires` constrains eligibility
+# (gpu, or arbitrary capability tags a worker advertises via --needs).
+#
+# These are examples — replace them with profiles that match your own workloads.
+profiles:
+  gpu-train-large:
+    vram_gb: 24
+    ram_gb: 24
+    cpus: 8
+    expected_runtime: 8h
+    preemptible: true
+    host_hint: any-gpu
+    requires:
+      gpu: true
+      needs: [cuda]
+
+  gpu-train-small:
+    vram_gb: 8
+    ram_gb: 8
+    cpus: 4
+    expected_runtime: 1h
+    preemptible: true
+    host_hint: any-gpu
+    requires:
+      gpu: true
+      needs: [cuda]
+
+  gpu-inference:
+    vram_gb: 6
+    ram_gb: 8
+    cpus: 4
+    expected_runtime: 20m
+    preemptible: true
+    host_hint: any-gpu
+    requires:
+      gpu: true
+
+  cpu-heavy:
+    vram_gb: 0
+    ram_gb: 24
+    cpus: 12
+    expected_runtime: 4h
+    preemptible: false
+    host_hint: any
+    requires:
+      needs: []
+
+  cpu-quick:
+    vram_gb: 0
+    ram_gb: 1
+    cpus: 1
+    expected_runtime: 10m
+    preemptible: true
+    host_hint: any
+    fast_path: true

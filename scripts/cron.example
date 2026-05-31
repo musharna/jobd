@@ -1,0 +1,13 @@
+# Example crontab entry for the nightly live integration test.
+#
+# Install on the broker host (or wherever the broker source + venv lives):
+#   crontab -e
+# then paste the line below (uncommented). Verify with:
+#   crontab -l
+# Inspect run history:
+#   tail -50 ~/jobd/logs/live-test.log
+#
+# Daily at 04:17 local — off-peak, away from the worker's nightly idle
+# checkpoint windows. Adjust if you have other 4am cron jobs.
+
+# 17 4 * * * /opt/jobd/scripts/run-live-test.sh

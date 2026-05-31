@@ -1,0 +1,28 @@
+[Unit]
+# Full-repo-checkout variant of job-worker.service.
+#
+# Use this on hosts where the worker runs out of the cloned jobd repo's
+# own venv, instead of the standalone install layout that
+# scripts/install-worker.sh produces under ~/jobd-worker/. Differences:
+#   - WorkingDirectory points at the repo root so capabilities.py + sibling
+#     modules import cleanly without a copy step.
+#   - ExecStart uses the repo's .venv and worker/job_worker.py directly.
+# Edit JOBD_URL, JOBD_WORKER_HOST, and the repo paths below before installing.
+Description=jobd worker — polls broker, runs assigned jobs
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="JOBD_URL=http://127.0.0.1:8765"
+Environment="JOBD_WORKER_HOST=worker1"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+# EDIT: path to your cloned jobd repo.
+WorkingDirectory=/opt/jobd
+ExecStart=/opt/jobd/.venv/bin/python /opt/jobd/worker/job_worker.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
