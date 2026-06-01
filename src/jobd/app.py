@@ -966,6 +966,8 @@ def build_app(
             worker.gpu = hb.gpu
             worker.tags_json = json.dumps(hb.tags)
             worker.mount_roots_json = json.dumps(hb.mount_roots)
+            worker.max_concurrent = hb.max_concurrent
+            worker.running = hb.running
             worker.state = "online"
             session.commit()
         if is_first_heartbeat:
@@ -1002,6 +1004,8 @@ def build_app(
                     gpu=w.gpu,
                     tags=json.loads(w.tags_json or "[]"),
                     mount_roots=json.loads(w.mount_roots_json or "[]"),
+                    max_concurrent=w.max_concurrent if w.max_concurrent is not None else 1,
+                    running=w.running if w.running is not None else 0,
                 )
                 for w in workers
             ]

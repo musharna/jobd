@@ -183,6 +183,26 @@ Three optional YAML files under `JOBD_CONFIG_DIR` (defaults shipped in `config/`
 
 All three are optional; with none present, every job runs at the global default priority.
 
+## Concurrency (multislotting)
+
+By default each worker runs **one job at a time** (`JOBD_WORKER_MAX_CONCURRENT_JOBS=1`). Raise it to let a worker bin-pack several jobs that fit side by side:
+
+```bash
+JOBD_WORKER_MAX_CONCURRENT_JOBS=3 jobd-worker
+```
+
+The matcher is resource-aware, so this is **not** blind N-up oversubscription. Each in-flight job reserves its `vram_gb` / `ram_gb` / `cpus` footprint, and the worker's heartbeat advertises only what's left (`free_vram = raw − Σ in-flight`). The broker won't place a job that doesn't fit the remaining headroom. The practical payoff: **a CPU-only job and a GPU job run at the same time** — the CPU job reserves 0 VRAM, so it never blocks the GPU slot, and vice-versa. Two GPU jobs co-run only if both fit live VRAM (the `/next-job` admission gate is the final safety net against an overstated ad).
+
+`job workers` reports each worker's slot usage — `running` jobs out of `max_concurrent` — alongside the live resource ad:
+
+```jsonc
+// job workers
+{ "host": "desktop", "state": "online", "running": 2, "max_concurrent": 3,
+  "free_vram_gb": 9.1, "idle_cpus": 6, ... }
+```
+
+Set the limit per worker from its environment (systemd unit, shell, or `worker.yaml` env) — it's a worker-local knob, not a broker setting.
+
 ## Security
 
 The broker has **no TCP-layer auth beyond a shared bearer token**, so it is meant to run on a trusted network (loopback or a Tailscale tailnet), never on a public interface. Two stacked controls:

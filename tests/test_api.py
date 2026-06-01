@@ -203,6 +203,28 @@ def test_list_workers_returns_registered_worker(client):
     assert w["gpu"] is True
     assert "R" in w["tags"]
     assert w["last_heartbeat"].endswith("+00:00")
+    # A heartbeat that omits the slot fields reads as single-slot, idle.
+    assert w["max_concurrent"] == 1
+    assert w["running"] == 0
+
+
+def test_list_workers_surfaces_slot_usage(client):
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 9.1,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 6,
+            "gpu": True,
+            "max_concurrent": 3,
+            "running": 2,
+        },
+    )
+    w = client.get("/workers").json()[0]
+    assert w["max_concurrent"] == 3
+    assert w["running"] == 2
 
 
 def test_delete_worker_404_when_unknown(client):

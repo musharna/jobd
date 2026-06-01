@@ -244,6 +244,9 @@ class WorkerInfo(BaseModel):
     gpu: bool
     tags: list[str]
     mount_roots: list[str] = Field(default_factory=list)
+    # Slot usage for multislotting: `running` jobs out of `max_concurrent`.
+    max_concurrent: int = 1
+    running: int = 0
 
     @field_serializer("last_heartbeat", when_used="always")
     def _ser_dt(self, v: datetime) -> str | None:
@@ -262,6 +265,11 @@ class WorkerHeartbeat(BaseModel):
     gpu: bool = False
     tags: list[str] = Field(default_factory=list)
     mount_roots: list[str] = Field(default_factory=list)
+    # Multislotting observability: the worker's JOBD_WORKER_MAX_CONCURRENT_JOBS
+    # and its live in-flight job count. Defaults (1/0) keep pre-field workers
+    # reading as single-slot, idle.
+    max_concurrent: int = 1
+    running: int = 0
 
 
 class NextJobQuery(BaseModel):

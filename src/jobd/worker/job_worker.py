@@ -120,6 +120,12 @@ def _unregister_in_flight(job_id: int) -> None:
         _in_flight.pop(job_id, None)
 
 
+def _running_count() -> int:
+    """Live count of in-flight jobs, for the heartbeat `running` slot field."""
+    with _in_flight_lock:
+        return len(_in_flight)
+
+
 def _is_solo_in_flight() -> bool:
     """True when at most one job (this one) is registered in flight.
 
@@ -366,6 +372,8 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
         "gpu": _CAPS.gpu,
         "tags": list(_CAPS.tags),
         "mount_roots": _detect_mount_roots(),
+        "max_concurrent": _max_concurrent_jobs(),
+        "running": _running_count(),
     }
 
 
@@ -383,6 +391,8 @@ def pick_resource_snapshot_mock():
         "gpu": False,
         "tags": [],
         "mount_roots": [],
+        "max_concurrent": 1,
+        "running": 0,
     }
 
 

@@ -1017,6 +1017,23 @@ def test_resource_snapshot_no_in_flight_unchanged(monkeypatch):
     assert snap["free_vram_gb"] == 30.0
 
 
+def test_resource_snapshot_reports_slot_usage(monkeypatch):
+    """Heartbeat carries max_concurrent (the env knob) + running (live
+    in-flight count) so the broker can surface slot usage in `job workers`."""
+    _reset_in_flight()
+    try:
+        monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 30.0)
+        monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [])
+        monkeypatch.setenv("JOBD_WORKER_MAX_CONCURRENT_JOBS", "3")
+        job_worker._register_in_flight({"id": 1, "vram_gb": 0, "ram_gb": 0, "cpus": 1})
+        job_worker._register_in_flight({"id": 2, "vram_gb": 0, "ram_gb": 0, "cpus": 1})
+        snap = job_worker.resource_snapshot(set())
+        assert snap["max_concurrent"] == 3
+        assert snap["running"] == 2
+    finally:
+        _reset_in_flight()
+
+
 def test_is_solo_in_flight_gates_reparented_orphan_sweep():
     """P3.5: the reparented-orphan /proc sweep must only run when this is the
     sole in-flight job. With a concurrent job registered, the global sweep

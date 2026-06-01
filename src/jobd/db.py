@@ -104,6 +104,12 @@ class Worker(Base):
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
     state: Mapped[str] = mapped_column(String(20), default="online", index=True)
     mount_roots_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Concurrency/multislotting observability: max_concurrent is the worker's
+    # JOBD_WORKER_MAX_CONCURRENT_JOBS; running is its live in-flight job count.
+    # Surfaced as `running/max` slots in `job workers`. Default 1/0 so an old
+    # worker (pre-field heartbeat) reads as single-slot, idle.
+    max_concurrent: Mapped[int] = mapped_column(Integer, default=1)
+    running: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class BypassLog(Base):
@@ -148,6 +154,8 @@ _WORKER_ADDS = [
     ("tags_json", "TEXT DEFAULT '[]'"),
     ("state", "VARCHAR(20) DEFAULT 'online'"),
     ("mount_roots_json", "TEXT DEFAULT '[]'"),
+    ("max_concurrent", "INTEGER DEFAULT 1"),
+    ("running", "INTEGER DEFAULT 0"),
 ]
 
 
