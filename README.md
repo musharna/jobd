@@ -114,9 +114,9 @@ The **worker** runs its best on Linux with a systemd user instance: memory caps,
 ## CLI
 
 ```
-job submit -p PROJ [--gpu] [--vram-required N] [--needs TAG]... [--wait] -- CMD...
-job list [--state STATE] [--project P]      # queue + recent jobs
-job status ID [--watch]                     # one job, optionally live
+job submit -p PROJ [--gpu] [--vram-required N] [--needs TAG]... [--count N] [--wait] -- CMD...
+job list [--state STATE] [--project P] [--array A<id>]   # queue + recent jobs
+job status ID | A<id> [--watch]             # one job, or an array's aggregate
 job logs ID [-n BYTES]                      # tail captured output
 job wait ID                                 # block until terminal
 job cancel ID  /  job preempt ID            # stop a job
@@ -126,6 +126,20 @@ job audit [--project P] [--since 24h]       # event history
 ```
 
 `job submit --explain` dry-runs the resolution (priority, profile, project defaults, host pin) and prints the effective config without enqueuing anything.
+
+### Job arrays
+
+Submit N jobs from one template with `--count N`. Each member is a normal job — it routes, runs, preempts, and checkpoints independently — and `{i}` in the command is replaced by the member's 0-based index:
+
+```bash
+job submit -p train --count 8 -- python train.py --fold {i}
+# → Submitted array A42: 8 jobs (ids 42..49)
+
+job list --array A42         # the members, with their index annotations
+job status A42               # aggregate: state tally + per-member rollup
+```
+
+The array is identified as `A<id>` (the first member's job id). `job status A42` exits non-zero if any member ended in a non-completed terminal state, so it composes with shell `&&`.
 
 ## MCP / agent integration
 

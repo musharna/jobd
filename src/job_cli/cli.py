@@ -106,8 +106,21 @@ def submit(
         help="print a one-line ETA banner after submit (p50/p90 from history, "
         "or ColdStart on insufficient history). On by default; --no-eta suppresses.",
     ),
+    count: int = typer.Option(
+        1,
+        "--count",
+        "-n",
+        help="submit N array members from one template (1..1000); `{i}` in the "
+        "command is replaced by the 0-based member index (0..N-1). 1 (default) "
+        "is an ordinary single job.",
+    ),
 ):
-    """Submit a job. With --wait, stream logs until terminal state."""
+    """Submit a job. With --wait, stream logs until terminal state.
+
+    With --count N, submits a job array: N members sharing one template, each
+    with `{i}` replaced by its 0-based index. The array prints as `A<id>`;
+    inspect it with `job list --array A<id>` or `job status A<id>`.
+    """
     if session_id is None:
         session_id = os.environ.get("CLAUDE_SESSION_ID")
     requires: dict | None = None
@@ -151,6 +164,8 @@ def submit(
         body["scheduling_timeout_s"] = scheduling_timeout_s
     if vram_required is not None:
         body["vram_gb"] = vram_required
+    if count > 1:
+        body["count"] = count
     if explain:
         with _client() as c:
             r = c.post("/resolve", json=body)
@@ -158,14 +173,29 @@ def submit(
         return
     with _client() as c:
         r = c.post("/submit", json=body)
-    job = r.json()
-    typer.echo(json.dumps(job, default=str))
+    resp = r.json()
+    typer.echo(json.dumps(resp, default=str))
+    if "job_ids" in resp:
+        # Array submit: summarize, then optionally stream-wait each member.
+        ids = resp["job_ids"]
+        rng = f"{ids[0]}..{ids[-1]}" if ids else "-"
+        typer.secho(
+            f"Submitted array A{resp['array_id']}: {resp['count']} jobs (ids {rng})",
+            err=True,
+        )
+        for w in resp.get("warnings") or []:
+            typer.secho(f"  ⚠ {w}", fg="yellow", err=True)
+        if wait:
+            for jid in ids:
+                typer.echo(f"--- member {jid} ---", err=True)
+                _stream_wait(jid)
+        return
     if eta:
-        banner = _eta_banner_line(job)
+        banner = _eta_banner_line(resp)
         if banner:
             typer.echo(banner, err=True)
     if wait:
-        _stream_wait(job["id"])
+        _stream_wait(resp["id"])
 
 
 def _fmt_seconds(s: int | None) -> str:
@@ -400,6 +430,15 @@ def _worker_health_banner(client: JobdClient) -> None:
         typer.secho(f"⚠ worker health: {', '.join(bad)}", fg="yellow")
 
 
+def _parse_array_token(s: str) -> int | None:
+    """Parse an array id token like `A42` / `a42` → 42. Returns None if `s` is
+    not in that form (so callers can distinguish a bad value from a plain int).
+    """
+    if len(s) >= 2 and s[0] in ("A", "a") and s[1:].isdigit():
+        return int(s[1:])
+    return None
+
+
 @app.command(name="list")
 def list_jobs(
     state: str | None = typer.Option(None),
@@ -407,17 +446,30 @@ def list_jobs(
     warnings: bool = typer.Option(
         False, "--warnings", "-w", help="Show only jobs with a non-null warning."
     ),
+    array: str | None = typer.Option(
+        None, "--array", help="show only members of an array, e.g. --array A42"
+    ),
 ):
     """List jobs."""
+    array_id: int | None = None
+    if array is not None:
+        array_id = _parse_array_token(array)
+        if array_id is None:
+            typer.secho(
+                f"invalid --array value {array!r}; expected A<id> like A42", fg="red", err=True
+            )
+            raise typer.Exit(2)
     with _client() as c:
         _worker_health_banner(c)
-        params: dict[str, str | bool] = {}
+        params: dict[str, str | bool | int] = {}
         if state:
             params["state_filter"] = state
         if project:
             params["project"] = project
         if warnings:
             params["warnings_only"] = True
+        if array_id is not None:
+            params["array_id"] = array_id
         r = c.get("/jobs", params=params)
         jobs = r.json()
         state_by_id = {j["id"]: j["state"] for j in jobs}
@@ -425,6 +477,8 @@ def list_jobs(
             typer.echo(
                 f"{j['id']:>5}  {j['state']:>10}  {j['project']:>20}  {' '.join(j['cmd'])[:80]}"
             )
+            if j.get("array_id"):
+                typer.echo(f"  array: A{j['array_id']} #{j['array_index']}/{j['array_size']}")
             deps = j.get("depends_on") or []
             if deps:
                 parts = []
@@ -461,14 +515,90 @@ def _render_status(j: dict) -> str:
     return "\n".join(lines)
 
 
+# Full terminal set for array aggregation. The single-job TERMINAL_STATES above
+# is intentionally narrow (legacy); arrays need every terminal state so --watch
+# can't hang on a preempted/orphaned/scheduling_timeout member.
+_ARRAY_TERMINAL = {
+    "completed",
+    "failed",
+    "cancelled",
+    "preempted",
+    "orphaned",
+    "scheduling_timeout",
+}
+_ARRAY_FAILURE = _ARRAY_TERMINAL - {"completed"}
+
+
+def _render_array_status(jobs: list[dict], array_id: int) -> str:
+    from collections import Counter
+
+    tally = Counter(j["state"] for j in jobs)
+    n = len(jobs)
+    done = sum(v for s, v in tally.items() if s in _ARRAY_TERMINAL)
+    lines = [
+        f"array A{array_id}  {n} members  {done}/{n} terminal",
+        "  " + "  ".join(f"{s}={tally[s]}" for s in sorted(tally)),
+    ]
+    for j in sorted(jobs, key=lambda x: x.get("array_index") or 0):
+        lines.append(
+            f"  #{j.get('array_index'):>3}  {j['id']:>6}  {j['state']:>10}  exit={j.get('exit_code')}"
+        )
+    return "\n".join(lines)
+
+
+def _status_array(c, array_id: int, watch: bool, interval: float) -> None:
+    def fetch() -> list[dict]:
+        return c.get("/jobs", params={"array_id": array_id}).json()
+
+    def exit_code(jobs: list[dict]) -> int:
+        # 1 if any member ended in a non-completed terminal state, else 0.
+        return 1 if any(j["state"] in _ARRAY_FAILURE for j in jobs) else 0
+
+    if not watch:
+        jobs = fetch()
+        if not jobs:
+            typer.secho(f"no such array: A{array_id}", fg="red", err=True)
+            raise typer.Exit(1)
+        typer.echo(_render_array_status(jobs, array_id))
+        all_term = all(j["state"] in _ARRAY_TERMINAL for j in jobs)
+        sys.exit(exit_code(jobs) if all_term else 0)
+    try:
+        while True:
+            jobs = fetch()
+            sys.stdout.write("\x1b[2J\x1b[H")
+            sys.stdout.write(_render_array_status(jobs, array_id) + "\n")
+            sys.stdout.flush()
+            if jobs and all(j["state"] in _ARRAY_TERMINAL for j in jobs):
+                sys.exit(exit_code(jobs))
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
 @app.command()
 def status(
-    job_id: int,
+    target: str = typer.Argument(..., help="job id, or an array id like A42"),
     watch: bool = typer.Option(False, "--watch", "-w", help="poll until terminal"),
     interval: float = typer.Option(2.0, "--interval", help="poll interval seconds (with --watch)"),
 ):
-    """Print one job's state. With --watch, redraw until terminal."""
+    """Print one job's state, or an array's aggregate state when target=A<id>.
+
+    With --watch, redraw until the job (or every array member) is terminal.
+    """
+    array_id = _parse_array_token(target)
     with _client() as c:
+        if array_id is not None:
+            _status_array(c, array_id, watch, interval)
+            return
+        try:
+            job_id = int(target)
+        except ValueError:
+            typer.secho(
+                f"invalid target {target!r}; expected a job id or an array id like A42",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(2) from None
         if not watch:
             r = c.get(f"/jobs/{job_id}")
             j = r.json()

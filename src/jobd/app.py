@@ -20,6 +20,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from jobd import __version__
+from jobd.arrays import index_subs, render_cmd, render_env
 from jobd.auth import install_tailnet_acl, require_token
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
@@ -363,31 +364,9 @@ def build_app(
                         status_code=400, detail=f"depends_on refers to missing job: {dep_id}"
                     )
             now = datetime.now(UTC)
-            job = Job(
-                project=req.project,
-                profile=req.profile,
-                host_pin=host_pin,
-                priority=priority,
-                state=JobState.QUEUED,
-                cmd_json=json.dumps(req.cmd),
-                cwd=req.cwd,
-                env_json=json.dumps(req.env),
-                preemptible=preemptible,
-                vram_gb=vram_gb,
-                ram_gb=ram_gb,
-                cpus=cpus,
-                session_id=req.session_id,
-                submitted_at=now,
-                requires_json=requires_json,
-                depends_on_json=json.dumps(req.depends_on),
-                depends_on_any_exit=req.depends_on_any_exit,
-                fast_path=fast_path,
-                max_wall_s=max_wall_s,
-                idle_timeout_s=idle_timeout_s,
-                checkpoint_grace_s=checkpoint_grace_s,
-                scheduling_timeout_s=req.scheduling_timeout_s,
-                submitted_via=req.submitted_via,
-            )
+            # Warnings are routing-derived (requires / host_pin / live capacity),
+            # so a job array's members share one warning string — the per-member
+            # `{i}` substitution only changes the command, not where it routes.
             online = list(
                 session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
             )
@@ -402,14 +381,14 @@ def build_app(
                 for w in (unknown_project_warning, preflight_warn, ser_warn, gpu_warn)
                 if w is not None
             ]
-            if warnings:
-                job.warning = "; ".join(warnings)
-                job.warning_at = now
+            warning_text = "; ".join(warnings) if warnings else None
             # Dry-run bail-out:
             # full validation + routing-decision has run above (profile lookup,
             # project defaults, cwd sanity, depends_on existence, preflight,
-            # gpu_contention). Return the would-be plan WITHOUT inserting a
-            # Job row or emitting `job_submitted`.
+            # gpu_contention). Return the would-be plan WITHOUT inserting any
+            # Job row or emitting `job_submitted`. One plan covers every array
+            # member (routing ignores the per-member substitution); array_count
+            # tells the caller how many members the live submit would create.
             if req.dry_run:
                 eligible = eligible_workers(requires, host_pin, snapshots)
                 # would_route_to: hostnames the matcher would currently
@@ -424,6 +403,7 @@ def build_app(
                     "state": "dry-run",
                     "would_route_to": would_route_to,
                     "would_use_worker": would_use_worker,
+                    "array_count": req.count,
                     "validation": {
                         "effective_priority": priority,
                         "effective_host_pin": host_pin,
@@ -442,37 +422,97 @@ def build_app(
                         "warnings": warnings,
                     },
                 }
-            session.add(job)
+
+            # Fan out into `count` members. count==1 is an ordinary single job
+            # with NULL array columns and an unchanged single-JobInfo response.
+            is_array = req.count > 1
+            members: list[Job] = []
+            for i in range(req.count):
+                member_cmd = render_cmd(req.cmd, index_subs(i)) if is_array else req.cmd
+                member_env = render_env(req.env, index_subs(i)) if is_array else req.env
+                job = Job(
+                    project=req.project,
+                    profile=req.profile,
+                    host_pin=host_pin,
+                    priority=priority,
+                    state=JobState.QUEUED,
+                    cmd_json=json.dumps(member_cmd),
+                    cwd=req.cwd,
+                    env_json=json.dumps(member_env),
+                    preemptible=preemptible,
+                    vram_gb=vram_gb,
+                    ram_gb=ram_gb,
+                    cpus=cpus,
+                    session_id=req.session_id,
+                    submitted_at=now,
+                    requires_json=requires_json,
+                    depends_on_json=json.dumps(req.depends_on),
+                    depends_on_any_exit=req.depends_on_any_exit,
+                    fast_path=fast_path,
+                    max_wall_s=max_wall_s,
+                    idle_timeout_s=idle_timeout_s,
+                    checkpoint_grace_s=checkpoint_grace_s,
+                    scheduling_timeout_s=req.scheduling_timeout_s,
+                    submitted_via=req.submitted_via,
+                    array_index=i if is_array else None,
+                    array_size=req.count if is_array else None,
+                )
+                if warning_text:
+                    job.warning = warning_text
+                    job.warning_at = now
+                session.add(job)
+                members.append(job)
+
+            # Flush to assign ids; the array shares the first member's id so
+            # `job status A<id>` resolves without a separate id sequence.
+            session.flush()
+            member_ids = [j.id for j in members]
+            array_id = member_ids[0] if is_array else None
+            if is_array:
+                for j in members:
+                    j.array_id = array_id
             session.commit()
-            session.refresh(job)
-            _emit_event(
-                logs_dir,
-                "job_submitted",
-                source="broker",
-                job_id=job.id,
-                project=job.project,
-                priority=job.priority,
-                host_pin=job.host_pin,
-                preemptible=job.preemptible,
-                warning=job.warning,
-            )
-            if job.warning:
+
+            # Emit events from captured scalars (no post-commit ORM reload per
+            # member — every member shares project/priority/host_pin/warning).
+            for jid in member_ids:
                 _emit_event(
                     logs_dir,
-                    "submit_warning",
+                    "job_submitted",
                     source="broker",
-                    job_id=job.id,
-                    project=job.project,
-                    warning_text=job.warning,
+                    job_id=jid,
+                    project=req.project,
+                    priority=priority,
+                    host_pin=host_pin,
+                    preemptible=preemptible,
+                    warning=warning_text,
                 )
+                if warning_text:
+                    _emit_event(
+                        logs_dir,
+                        "submit_warning",
+                        source="broker",
+                        job_id=jid,
+                        project=req.project,
+                        warning_text=warning_text,
+                    )
+
+            if is_array:
+                return {
+                    "array_id": array_id,
+                    "count": req.count,
+                    "job_ids": member_ids,
+                    "warnings": warnings,
+                }
             eta_ctx = _build_eta_ctx(session)
-            return _to_info(job, eta_ctx)
+            return _to_info(members[0], eta_ctx)
 
     @app.get("/jobs", response_model=list[JobInfo])
     def list_jobs(
         state_filter: str | None = None,
         project: str | None = None,
         warnings_only: bool = False,
+        array_id: int | None = None,
     ):
         with SessionLocal() as session:
             stmt = select(Job).order_by(Job.id.desc())
@@ -482,6 +522,9 @@ def build_app(
                 stmt = stmt.where(Job.project == project)
             if warnings_only:
                 stmt = stmt.where(Job.warning.is_not(None))
+            if array_id is not None:
+                # array members are ordered by index for readable `--array` output
+                stmt = stmt.where(Job.array_id == array_id).order_by(None).order_by(Job.array_index)
             jobs = session.execute(stmt).scalars().all()
             eta_ctx = _build_eta_ctx(session)
             return [_to_info(j, eta_ctx) for j in jobs]
@@ -1886,6 +1929,9 @@ def _to_info(job: Job, eta_ctx: dict | None = None) -> JobInfo:
         checkpoint_grace_s=job.checkpoint_grace_s,
         scheduling_timeout_s=job.scheduling_timeout_s,
         termination_reason=job.termination_reason,
+        array_id=job.array_id,
+        array_index=job.array_index,
+        array_size=job.array_size,
         submitted_via=job.submitted_via if job.submitted_via in ("cli", "mcp") else None,  # type: ignore[arg-type]
     )
     if eta_ctx is not None and job.state in {

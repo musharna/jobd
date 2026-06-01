@@ -4,6 +4,11 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added — Job arrays
+
+- **`job submit --count N`** fans out one command template into N array members in a single call. Each member is an ordinary job (independent routing, preemption, checkpointing); `{i}` in the command — and in env values via the API/MCP — is replaced by the member's 0-based index. The substitution is a literal `{key}` replace (not `str.format`), so commands containing JSON literals or shell braces pass through untouched. The engine is generic over named keys, leaving room for a future `--sweep` form.
+- **Array identity + inspection.** Members share an `array_id` (the first member's job id), plus `array_index` / `array_size`, surfaced on `JobInfo`. New `job list --array A<id>` filters to one array; `job status A<id>` prints an aggregate state tally + per-member rollup and exits non-zero if any member ended non-completed. The broker `/submit` returns `{array_id, count, job_ids, warnings}` for `count>1` (a single `JobInfo` for `count==1`, unchanged); `GET /jobs` gains an `array_id` filter. The `jobd_submit` MCP tool accepts `count` and returns the array summary.
+
 ### Changed — Worker is now a packaged, installable component
 
 - **`jobd-worker` console script.** The worker daemon and its capability detection moved into the `jobd` package (`jobd.worker.job_worker`, `jobd.worker.capabilities`) and now install as a `jobd-worker` entry point via `pip install "jobd[worker]"`. No clone, no manual file copy, no `python worker/job_worker.py`. The `[worker]` extra carries the runtime deps (httpx, psutil, pyyaml, nvidia-ml-py).

@@ -76,6 +76,11 @@ def jobd_submit(client: JobdClient, args: dict) -> dict:
     # Dry-run bypasses xlate_job_info (no id/worker/submitted_at fields).
     if isinstance(raw, dict) and raw.get("state") == "dry-run":
         return raw
+    # Array submit (count>1): broker returns {array_id, count, job_ids, warnings},
+    # not a JobInfo. Return it as-is; the caller polls members via jobd_status.
+    # (Per-member wait is a follow-up; `wait` is ignored for arrays in v1.)
+    if isinstance(raw, dict) and "job_ids" in raw:
+        return raw
     resp = xlate_job_info(raw)
     base = {
         "job_id": resp["job_id"],

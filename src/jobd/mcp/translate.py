@@ -124,6 +124,7 @@ def xlate_submit_payload(mcp: dict) -> dict:
         "idle_timeout_s",
         "checkpoint_grace_s",
         "vram_gb",
+        "count",
         "dry_run",
     ):
         if k in mcp:

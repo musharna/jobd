@@ -49,6 +49,20 @@ def test_submit_async_surfaces_broker_warning():
 
 
 @respx.mock
+def test_submit_array_returns_broker_summary_as_is():
+    """count>1: broker returns {array_id, count, job_ids, warnings}, which is
+    NOT a JobInfo. jobd_submit must return it unchanged (no xlate_job_info,
+    which would KeyError on the missing id/worker fields)."""
+    summary = {"array_id": 12, "count": 3, "job_ids": [12, 13, 14], "warnings": []}
+    respx.post("http://broker.test/submit").mock(return_value=httpx.Response(200, json=summary))
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_submit(
+        client, {"command": "echo {i}", "project": "p", "cwd": "/x", "extra": {"count": 3}}
+    )
+    assert out == summary
+
+
+@respx.mock
 def test_submit_extra_keys_translate_to_broker_payload():
     """Translation: idempotent → requires.idempotent; depends_on top-level;
     max_wall dropped (broker has no field). cmd wrapped with bash -c.

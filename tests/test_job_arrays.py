@@ -1,0 +1,120 @@
+"""Job-array broker fan-out: /submit --count N + {i} substitution."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from jobd.app import build_app
+
+
+@pytest.fixture
+def client(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml):
+    app = build_app(
+        db_url=f"sqlite:///{tmp_path}/jobd.db",
+        projects_path=sample_projects_yaml,
+        profiles_path=sample_profiles_yaml,
+        classifier_path=sample_classifier_yaml,
+        logs_path=tmp_path / "logs",
+    )
+    return TestClient(app)
+
+
+def _submit(client, **overrides):
+    body = {"cmd": ["echo", "hi"], "cwd": "/tmp", "project": "project-a"}
+    body.update(overrides)
+    return client.post("/submit", json=body)
+
+
+def test_count_default_is_single_job_with_null_array_fields(client):
+    r = _submit(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # count==1 path is unchanged: a single JobInfo, not an array summary.
+    assert body["id"] > 0
+    assert body["array_id"] is None
+    assert body["array_index"] is None
+    assert body["array_size"] is None
+
+
+def test_count_one_explicit_is_still_single_job(client):
+    r = _submit(client, count=1)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "job_ids" not in body  # not an array response
+    assert body["array_id"] is None
+
+
+def test_count_n_returns_array_summary(client):
+    r = _submit(client, count=3)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 3
+    assert len(body["job_ids"]) == 3
+    assert body["array_id"] == body["job_ids"][0]  # array_id = first member id
+    assert "warnings" in body
+
+
+def test_array_members_have_grouping_columns(client):
+    r = _submit(client, count=4)
+    body = r.json()
+    array_id = body["array_id"]
+    for idx, jid in enumerate(body["job_ids"]):
+        m = client.get(f"/jobs/{jid}").json()
+        assert m["array_id"] == array_id
+        assert m["array_index"] == idx
+        assert m["array_size"] == 4
+
+
+def test_index_substituted_into_cmd(client):
+    r = _submit(client, cmd=["python", "train.py", "--fold", "{i}"], count=3)
+    body = r.json()
+    folds = []
+    for jid in body["job_ids"]:
+        cmd = client.get(f"/jobs/{jid}").json()["cmd"]
+        assert cmd[:3] == ["python", "train.py", "--fold"]
+        folds.append(cmd[3])
+    assert folds == ["0", "1", "2"]
+
+
+def test_index_substituted_into_env(client):
+    r = _submit(client, cmd=["echo", "x"], env={"FOLD": "{i}", "STATIC": "k"}, count=2)
+    body = r.json()
+    seen = []
+    for jid in body["job_ids"]:
+        env = client.get(f"/jobs/{jid}").json()["env"]
+        assert env["STATIC"] == "k"
+        seen.append(env["FOLD"])
+    assert seen == ["0", "1"]
+
+
+def test_literal_braces_in_arg_survive_array_submit(client):
+    # JSON literal arg must not be mangled by substitution (the .replace vs
+    # str.format guarantee), while {i} inside it is still replaced.
+    r = _submit(client, cmd=["run", '--cfg={"lr":0.1,"fold":{i}}'], count=2)
+    body = r.json()
+    cfgs = [client.get(f"/jobs/{jid}").json()["cmd"][1] for jid in body["job_ids"]]
+    assert cfgs == ['--cfg={"lr":0.1,"fold":0}', '--cfg={"lr":0.1,"fold":1}']
+
+
+def test_count_zero_rejected(client):
+    assert _submit(client, count=0).status_code == 422
+
+
+def test_count_over_cap_rejected(client):
+    assert _submit(client, count=1001).status_code == 422
+
+
+def test_dry_run_reports_array_count_and_inserts_nothing(client):
+    before = len(client.get("/jobs").json())
+    r = _submit(client, count=5, dry_run=True)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == "dry-run"
+    assert body["array_count"] == 5
+    after = len(client.get("/jobs").json())
+    assert after == before  # dry-run inserts no rows
+
+
+def test_array_members_are_independent_queued_jobs(client):
+    r = _submit(client, count=3)
+    for jid in r.json()["job_ids"]:
+        assert client.get(f"/jobs/{jid}").json()["state"] == "queued"

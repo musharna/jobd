@@ -58,6 +58,13 @@ class Job(Base):
     scheduling_timeout_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
     termination_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
     submitted_via: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Phase 3 (job arrays): all NULL for a standalone job. A member is a normal
+    # job plus these grouping columns; array_id is the first member's job id, so
+    # `job status A<id>` / `job list --array A<id>` resolve without a new id
+    # sequence. array_index is 0-based; array_size is the member count.
+    array_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    array_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    array_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
     def requires(self):
@@ -130,6 +137,9 @@ _JOB_ADDS = [
     ("termination_reason", "VARCHAR(50)"),
     ("submitted_via", "VARCHAR(10)"),
     ("scheduling_timeout_s", "INTEGER"),
+    ("array_id", "INTEGER"),
+    ("array_index", "INTEGER"),
+    ("array_size", "INTEGER"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),

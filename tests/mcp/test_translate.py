@@ -156,6 +156,13 @@ def test_xlate_submit_passes_through_vram_gb():
     assert body["vram_gb"] == 12.0
 
 
+def test_xlate_submit_passes_through_count():
+    """Job arrays: `count` is a first-class JobSubmit field and must survive
+    the MCP translate seam so an agent can submit an array via jobd_submit."""
+    body = xlate_submit_payload({"command": "echo {i}", "project": "p", "cwd": "/x", "count": 5})
+    assert body["count"] == 5
+
+
 def test_xlate_submit_priority_to_priority_delta():
     body = xlate_submit_payload({"command": "x", "project": "p", "cwd": "/x", "priority": 10})
     assert body["priority_delta"] == 10

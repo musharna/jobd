@@ -97,6 +97,13 @@ class JobSubmit(BaseModel):
     # at 300s (sweeper interval) so a stuck checkpoint can't pin a slot.
     # None = use the worker's hard-coded 60s default.
     checkpoint_grace_s: int | None = Field(default=None, ge=1, le=300)
+    # Job arrays: submit N members from one template in a single call. Each
+    # member is a normal job; any `{i}` in a cmd arg or env value is replaced by
+    # the member's 0-based index (0..count-1). count=1 (default) is an ordinary
+    # single job and the response is a single JobInfo; count>1 returns an array
+    # summary. The upper bound guards against accidental runaway fan-out. See
+    # jobd.arrays.
+    count: int = Field(default=1, ge=1, le=1000)
     # Submission origin marker. CLI sets "cli", jobd-mcp sets "mcp". Used to
     # answer "are sessions actually using the MCP?" — observable via SQL
     # `SELECT submitted_via, COUNT(*) FROM jobs GROUP BY submitted_via`.
@@ -151,6 +158,11 @@ class JobInfo(BaseModel):
     checkpoint_grace_s: int | None = None
     scheduling_timeout_s: int | None = None
     termination_reason: str | None = None
+    # Job-array grouping (all None for a standalone job). array_id is the first
+    # member's job id; array_index is 0-based; array_size is the member count.
+    array_id: int | None = None
+    array_index: int | None = None
+    array_size: int | None = None
     # Time-estimation fields (None for terminal jobs and when no history bucket).
     # Always quoted in seconds; CLI formats. eta_basis identifies the source
     # so callers can distinguish "history-N=12" from "insufficient-history-N=2".
