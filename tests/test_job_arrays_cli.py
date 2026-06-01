@@ -1,7 +1,9 @@
 """CLI surface for job arrays: --count, --array filter, `status A<id>`."""
 
 import job_cli.cli as cli_mod
-from job_cli.cli import _parse_array_token
+import pytest
+import typer
+from job_cli.cli import _parse_array_token, _parse_sweep_axes
 from typer.testing import CliRunner
 
 from tests.test_cli import _FakePostClient
@@ -184,3 +186,118 @@ def test_status_unknown_array_exits_1(monkeypatch):
     r = runner.invoke(cli_mod.app, ["status", "A999"])
     assert r.exit_code == 1
     assert "no such array" in r.output
+
+
+# ---- _parse_sweep_axes unit ----
+
+
+def test_parse_sweep_single_axis():
+    assert _parse_sweep_axes(["lr=0.1,0.01,0.001"]) == [
+        {"key": "lr", "values": ["0.1", "0.01", "0.001"]}
+    ]
+
+
+def test_parse_sweep_multiple_axes_preserve_order():
+    out = _parse_sweep_axes(["lr=0.1,0.01", "seed=1,2,3"])
+    assert out == [
+        {"key": "lr", "values": ["0.1", "0.01"]},
+        {"key": "seed", "values": ["1", "2", "3"]},
+    ]
+
+
+def test_parse_sweep_value_may_contain_equals():
+    # only the first `=` separates key from values
+    assert _parse_sweep_axes(["arg=a=1,b=2"]) == [{"key": "arg", "values": ["a=1", "b=2"]}]
+
+
+def test_parse_sweep_single_value_is_valid():
+    assert _parse_sweep_axes(["model=resnet"]) == [{"key": "model", "values": ["resnet"]}]
+
+
+def test_parse_sweep_missing_equals_exits_2():
+    with pytest.raises(typer.Exit) as exc:
+        _parse_sweep_axes(["justkey"])
+    assert exc.value.exit_code == 2
+
+
+def test_parse_sweep_empty_key_exits_2():
+    with pytest.raises(typer.Exit) as exc:
+        _parse_sweep_axes(["=1,2"])
+    assert exc.value.exit_code == 2
+
+
+def test_parse_sweep_empty_values_exits_2():
+    with pytest.raises(typer.Exit) as exc:
+        _parse_sweep_axes(["lr="])
+    assert exc.value.exit_code == 2
+
+
+# ---- submit --sweep ----
+
+
+def test_submit_sweep_populates_body(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(cli_mod, "_client", lambda: _FakePostClient(captured))
+    r = runner.invoke(
+        cli_mod.app,
+        [
+            "submit",
+            "--project",
+            "p",
+            "--cwd",
+            "/tmp",
+            "--sweep",
+            "lr=0.1,0.01",
+            "--sweep",
+            "seed=1,2,3",
+            "--",
+            "python",
+            "t.py",
+            "--lr",
+            "{lr}",
+            "--seed",
+            "{seed}",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert captured["body"]["sweep"] == [
+        {"key": "lr", "values": ["0.1", "0.01"]},
+        {"key": "seed", "values": ["1", "2", "3"]},
+    ]
+    # template passed through verbatim; broker does the substitution
+    assert captured["body"]["cmd"] == ["python", "t.py", "--lr", "{lr}", "--seed", "{seed}"]
+    assert "count" not in captured["body"]
+
+
+def test_submit_sweep_omitted_when_unused(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(cli_mod, "_client", lambda: _FakePostClient(captured))
+    r = runner.invoke(
+        cli_mod.app, ["submit", "--project", "p", "--cwd", "/tmp", "--", "echo", "hi"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "sweep" not in captured["body"]
+
+
+def test_submit_sweep_with_count_exits_2(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(cli_mod, "_client", lambda: _FakePostClient(captured))
+    r = runner.invoke(
+        cli_mod.app,
+        [
+            "submit",
+            "--project",
+            "p",
+            "--cwd",
+            "/tmp",
+            "--count",
+            "3",
+            "--sweep",
+            "lr=0.1,0.01",
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert r.exit_code == 2
+    assert "mutually exclusive" in r.output

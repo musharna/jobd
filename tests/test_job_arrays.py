@@ -118,3 +118,122 @@ def test_array_members_are_independent_queued_jobs(client):
     r = _submit(client, count=3)
     for jid in r.json()["job_ids"]:
         assert client.get(f"/jobs/{jid}").json()["state"] == "queued"
+
+
+# --- parameter sweeps (--sweep) ------------------------------------------------
+
+
+def test_single_axis_sweep_fans_out_one_member_per_value(client):
+    r = _submit(
+        client,
+        cmd=["t.py", "--lr", "{lr}"],
+        sweep=[{"key": "lr", "values": ["0.1", "0.01", "0.001"]}],
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 3
+    lrs = [client.get(f"/jobs/{jid}").json()["cmd"][2] for jid in body["job_ids"]]
+    assert lrs == ["0.1", "0.01", "0.001"]
+
+
+def test_multi_axis_sweep_is_cartesian_product(client):
+    r = _submit(
+        client,
+        cmd=["t.py", "--lr", "{lr}", "--seed", "{seed}"],
+        sweep=[
+            {"key": "lr", "values": ["0.1", "0.01"]},
+            {"key": "seed", "values": ["1", "2", "3"]},
+        ],
+    )
+    body = r.json()
+    assert body["count"] == 6
+    pairs = []
+    for jid in body["job_ids"]:
+        cmd = client.get(f"/jobs/{jid}").json()["cmd"]
+        pairs.append((cmd[2], cmd[4]))
+    # odometer: lr outer, seed inner (last axis varies fastest)
+    assert pairs == [
+        ("0.1", "1"),
+        ("0.1", "2"),
+        ("0.1", "3"),
+        ("0.01", "1"),
+        ("0.01", "2"),
+        ("0.01", "3"),
+    ]
+
+
+def test_sweep_index_available_alongside_named_keys(client):
+    r = _submit(
+        client,
+        cmd=["t.py", "--lr", "{lr}", "--out", "run-{i}"],
+        sweep=[{"key": "lr", "values": ["0.1", "0.01"]}],
+    )
+    body = r.json()
+    outs = [client.get(f"/jobs/{jid}").json()["cmd"][4] for jid in body["job_ids"]]
+    assert outs == ["run-0", "run-1"]
+
+
+def test_sweep_members_carry_array_grouping(client):
+    r = _submit(client, cmd=["echo", "{k}"], sweep=[{"key": "k", "values": ["a", "b", "c"]}])
+    body = r.json()
+    array_id = body["array_id"]
+    assert array_id == body["job_ids"][0]
+    for idx, jid in enumerate(body["job_ids"]):
+        m = client.get(f"/jobs/{jid}").json()
+        assert m["array_id"] == array_id
+        assert m["array_index"] == idx
+        assert m["array_size"] == 3
+
+
+def test_sweep_substitutes_into_env(client):
+    r = _submit(
+        client,
+        cmd=["echo", "x"],
+        env={"LR": "{lr}", "STATIC": "k"},
+        sweep=[{"key": "lr", "values": ["0.1", "0.01"]}],
+    )
+    body = r.json()
+    seen = []
+    for jid in body["job_ids"]:
+        env = client.get(f"/jobs/{jid}").json()["env"]
+        assert env["STATIC"] == "k"
+        seen.append(env["LR"])
+    assert seen == ["0.1", "0.01"]
+
+
+def test_sweep_and_count_are_mutually_exclusive(client):
+    r = _submit(client, count=2, sweep=[{"key": "lr", "values": ["0.1"]}])
+    assert r.status_code == 422
+
+
+def test_sweep_reserved_index_key_rejected(client):
+    r = _submit(client, sweep=[{"key": "i", "values": ["0", "1"]}])
+    assert r.status_code == 422
+
+
+def test_sweep_over_cap_rejected(client):
+    r = _submit(
+        client,
+        sweep=[
+            {"key": "a", "values": [str(x) for x in range(40)]},
+            {"key": "b", "values": [str(x) for x in range(40)]},
+        ],
+    )
+    assert r.status_code == 422
+
+
+def test_sweep_dry_run_reports_product_count_and_inserts_nothing(client):
+    before = len(client.get("/jobs").json())
+    r = _submit(
+        client,
+        sweep=[
+            {"key": "lr", "values": ["0.1", "0.01"]},
+            {"key": "seed", "values": ["1", "2", "3"]},
+        ],
+        dry_run=True,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == "dry-run"
+    assert body["array_count"] == 6
+    assert len(client.get("/jobs").json()) == before

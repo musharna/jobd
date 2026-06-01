@@ -25,6 +25,29 @@ def _client() -> JobdClient:
     return JobdClient(base_url=BASE)
 
 
+def _parse_sweep_axes(specs: list[str]) -> list[dict]:
+    """Parse repeated `--sweep KEY=v1,v2,v3` strings into broker `sweep` axes.
+
+    Each spec splits once on `=` (so values may contain `=`); the value list
+    splits on `,`. Empty keys, empty value lists, or a missing `=` raise a
+    Typer.Exit(2) with a pointed message rather than letting a malformed axis
+    reach the broker as a confusing 422.
+    """
+    axes: list[dict] = []
+    for spec in specs:
+        if "=" not in spec:
+            typer.secho(f"invalid --sweep {spec!r}; expected KEY=v1,v2,v3", fg="red", err=True)
+            raise typer.Exit(2)
+        key, _, raw = spec.partition("=")
+        key = key.strip()
+        values = [v for v in raw.split(",") if v != ""]
+        if not key or not values:
+            typer.secho(f"invalid --sweep {spec!r}; expected KEY=v1,v2,v3", fg="red", err=True)
+            raise typer.Exit(2)
+        axes.append({"key": key, "values": values})
+    return axes
+
+
 @app.command()
 def submit(
     cmd: list[str] = typer.Argument(..., help="Command to run"),
@@ -114,6 +137,14 @@ def submit(
         "command is replaced by the 0-based member index (0..N-1). 1 (default) "
         "is an ordinary single job.",
     ),
+    sweep: list[str] = typer.Option(
+        None,
+        "--sweep",
+        help="parameter-sweep axis as KEY=v1,v2,v3 (repeatable). The broker fans "
+        "out the cartesian product of all axes, substituting `{KEY}` per member; "
+        "`{i}` (flat index) is also available. Mutually exclusive with --count. "
+        "E.g. --sweep lr=0.1,0.01 --sweep seed=1,2,3 → 6 members.",
+    ),
 ):
     """Submit a job. With --wait, stream logs until terminal state.
 
@@ -166,6 +197,12 @@ def submit(
         body["vram_gb"] = vram_required
     if count > 1:
         body["count"] = count
+    if sweep:
+        if count > 1:
+            typer.secho("--sweep and --count are mutually exclusive", fg="red", err=True)
+            raise typer.Exit(2)
+        axes = _parse_sweep_axes(sweep)
+        body["sweep"] = axes
     if explain:
         with _client() as c:
             r = c.post("/resolve", json=body)

@@ -6,7 +6,14 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 def _as_utc_iso(v: datetime | None) -> str | None:
@@ -58,6 +65,21 @@ class JobRequires(BaseModel):
     idempotent: bool = False
 
 
+class SweepAxis(BaseModel):
+    """One named axis of a parameter sweep: a key and the values it ranges over.
+
+    The broker takes the cartesian product of all axes to fan out array members;
+    each member substitutes `{key}` → its value in the command and env. `{i}`
+    (the flat member index) is always available alongside the named keys, so
+    `i` is reserved and rejected as an axis key. See jobd.arrays.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(..., min_length=1)
+    values: list[str] = Field(..., min_length=1)
+
+
 class JobSubmit(BaseModel):
     cmd: list[str] = Field(..., min_length=1)
     cwd: str
@@ -104,6 +126,13 @@ class JobSubmit(BaseModel):
     # summary. The upper bound guards against accidental runaway fan-out. See
     # jobd.arrays.
     count: int = Field(default=1, ge=1, le=1000)
+    # Job arrays via parameter sweep: instead of a bare `{i}` index, expand the
+    # cartesian product of named axes (e.g. lr=[0.1,0.01] × seed=[1,2,3] → 6
+    # members), substituting each `{key}` into the command/env. `{i}` (flat
+    # 0-based member index) is always available too. Mutually exclusive with
+    # count>1; the product is capped at 1000 to match count's bound. Empty
+    # (the default) = no sweep. See jobd.arrays.sweep_member_subs.
+    sweep: list[SweepAxis] = Field(default_factory=list)
     # Submission origin marker. CLI sets "cli", jobd-mcp sets "mcp". Used to
     # answer "are sessions actually using the MCP?" — observable via SQL
     # `SELECT submitted_via, COUNT(*) FROM jobs GROUP BY submitted_via`.
@@ -122,6 +151,27 @@ class JobSubmit(BaseModel):
     @classmethod
     def clamp_delta(cls, v: int) -> int:
         return max(-50, min(50, v))
+
+    @model_validator(mode="after")
+    def _check_sweep(self) -> JobSubmit:
+        if not self.sweep:
+            return self
+        # Sweep and --count are two surfaces for the same array machinery;
+        # combining them is ambiguous (does {i} mean sweep-flat-index or
+        # count-index?). Reject rather than guess.
+        if self.count != 1:
+            raise ValueError("sweep and count are mutually exclusive")
+        keys = [ax.key for ax in self.sweep]
+        if "i" in keys:
+            raise ValueError("'i' is reserved for the member index; use a different sweep key")
+        if len(set(keys)) != len(keys):
+            raise ValueError("sweep axis keys must be unique")
+        total = 1
+        for ax in self.sweep:
+            total *= len(ax.values)
+        if total > 1000:
+            raise ValueError(f"sweep expands to {total} members; cap is 1000")
+        return self
 
 
 class JobInfo(BaseModel):

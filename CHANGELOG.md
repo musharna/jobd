@@ -2,6 +2,12 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added — Parameter sweeps
+
+- **`job submit --sweep KEY=v1,v2,v3`** (repeatable) fans out a job array over the cartesian product of named axes — a grid search in one call. Each member substitutes `{KEY}` → its value in the command and env; `{i}` (the flat 0-based member index) is available alongside the named keys. `--sweep lr=0.1,0.01 --sweep seed=1,2,3` yields 6 members. `--sweep` and `--count` are mutually exclusive, the product is capped at 1000, and `i` is reserved as an axis key. Reuses the array machinery (shared `array_id`, `job list --array`, `job status A<id>`) and the literal-`{key}`-replace substitution from `--count`. The `jobd_submit` MCP tool accepts `sweep` (list of `{key, values}`); the broker `JobSubmit` model gains a `sweep: list[SweepAxis]` field.
+
 ## [0.2.0] — 2026-06-01
 
 ### Added — Job arrays

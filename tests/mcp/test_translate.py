@@ -163,6 +163,16 @@ def test_xlate_submit_passes_through_count():
     assert body["count"] == 5
 
 
+def test_xlate_submit_passes_through_sweep():
+    """Parameter sweeps: `sweep` axes must survive the MCP translate seam so an
+    agent can submit a sweep array via jobd_submit."""
+    axes = [{"key": "lr", "values": ["0.1", "0.01"]}, {"key": "seed", "values": ["1", "2"]}]
+    body = xlate_submit_payload(
+        {"command": "echo {lr} {seed}", "project": "p", "cwd": "/x", "sweep": axes}
+    )
+    assert body["sweep"] == axes
+
+
 def test_xlate_submit_priority_to_priority_delta():
     body = xlate_submit_payload({"command": "x", "project": "p", "cwd": "/x", "priority": 10})
     assert body["priority_delta"] == 10

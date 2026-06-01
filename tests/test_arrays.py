@@ -1,6 +1,12 @@
 """Unit tests for job-array template expansion (jobd.arrays)."""
 
-from jobd.arrays import index_subs, render_cmd, render_env, render_template
+from jobd.arrays import (
+    index_subs,
+    render_cmd,
+    render_env,
+    render_template,
+    sweep_member_subs,
+)
 
 
 def test_render_template_substitutes_index():
@@ -48,3 +54,38 @@ def test_render_env_substitutes_values_not_keys():
 def test_index_subs_is_zero_based_string():
     assert index_subs(0) == {"i": "0"}
     assert index_subs(11) == {"i": "11"}
+
+
+def test_sweep_single_axis():
+    subs = sweep_member_subs([("lr", ["0.1", "0.01"])])
+    assert subs == [{"lr": "0.1", "i": "0"}, {"lr": "0.01", "i": "1"}]
+
+
+def test_sweep_cartesian_product_last_axis_fastest():
+    subs = sweep_member_subs([("lr", ["0.1", "0.01"]), ("seed", ["1", "2", "3"])])
+    assert len(subs) == 6
+    # odometer: lr outer, seed inner
+    assert subs[0] == {"lr": "0.1", "seed": "1", "i": "0"}
+    assert subs[1] == {"lr": "0.1", "seed": "2", "i": "1"}
+    assert subs[3] == {"lr": "0.01", "seed": "1", "i": "3"}
+    assert subs[5] == {"lr": "0.01", "seed": "3", "i": "5"}
+
+
+def test_sweep_index_available_alongside_keys():
+    subs = sweep_member_subs([("k", ["a", "b"])])
+    assert all("i" in s for s in subs)
+    assert [s["i"] for s in subs] == ["0", "1"]
+
+
+def test_sweep_composes_with_render():
+    subs = sweep_member_subs([("lr", ["0.1", "0.01"])])
+    cmds = [render_cmd(["t.py", "--lr", "{lr}", "--out", "run{i}"], s) for s in subs]
+    assert cmds == [
+        ["t.py", "--lr", "0.1", "--out", "run0"],
+        ["t.py", "--lr", "0.01", "--out", "run1"],
+    ]
+
+
+def test_sweep_empty_axes_is_single_empty_member():
+    # itertools.product() with no iterables yields one empty tuple → one member.
+    assert sweep_member_subs([]) == [{"i": "0"}]

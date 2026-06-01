@@ -114,7 +114,7 @@ The **worker** runs its best on Linux with a systemd user instance: memory caps,
 ## CLI
 
 ```
-job submit -p PROJ [--gpu] [--vram-required N] [--needs TAG]... [--count N] [--wait] -- CMD...
+job submit -p PROJ [--gpu] [--vram-required N] [--needs TAG]... [--count N | --sweep K=v1,v2]... [--wait] -- CMD...
 job list [--state STATE] [--project P] [--array A<id>]   # queue + recent jobs
 job status ID | A<id> [--watch]             # one job, or an array's aggregate
 job logs ID [-n BYTES]                      # tail captured output
@@ -140,6 +140,16 @@ job status A42               # aggregate: state tally + per-member rollup
 ```
 
 The array is identified as `A<id>` (the first member's job id). `job status A42` exits non-zero if any member ended in a non-completed terminal state, so it composes with shell `&&`.
+
+For a grid search, use `--sweep KEY=v1,v2,v3` (repeatable) instead of `--count`. The broker fans out the cartesian product of all axes, substituting `{KEY}` per member; `{i}` (the flat member index) is also available:
+
+```bash
+job submit -p train --sweep lr=0.1,0.01 --sweep seed=1,2,3 \
+  -- python train.py --lr {lr} --seed {seed} --out run-{i}
+# → Submitted array A50: 6 jobs (ids 50..55)   # 2 × 3 = 6 members
+```
+
+`--sweep` and `--count` are mutually exclusive, the product is capped at 1000 members, and `i` is reserved as an axis key. Substitution is a literal `{key}` replace (not `str.format`), so JSON literals and shell braces in the command pass through untouched.
 
 ## MCP / agent integration
 

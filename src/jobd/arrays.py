@@ -18,7 +18,8 @@ machinery with no changes here.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import itertools
+from collections.abc import Mapping, Sequence
 
 
 def render_template(value: str, subs: Mapping[str, str]) -> str:
@@ -46,3 +47,25 @@ def render_env(env: Mapping[str, str], subs: Mapping[str, str]) -> dict[str, str
 def index_subs(i: int) -> dict[str, str]:
     """Substitution mapping for the `--count` form: member index as `{i}`."""
     return {"i": str(i)}
+
+
+def sweep_member_subs(axes: Sequence[tuple[str, Sequence[str]]]) -> list[dict[str, str]]:
+    """Cartesian product of named sweep axes → one substitution mapping per member.
+
+    `axes` is an ordered list of `(key, values)` pairs — e.g.
+    `[("lr", ["0.1", "0.01"]), ("seed", ["1", "2", "3"])]` yields 6 members.
+    Member order is the standard `itertools.product` odometer (last axis varies
+    fastest). Each mapping also carries `{i}` = the flat 0-based member index, so
+    `{i}` keeps working alongside the named keys (e.g. for an output dir).
+
+    Axis order is preserved so the product (and thus the index assignment) is
+    deterministic for a given CLI invocation.
+    """
+    keys = [k for k, _ in axes]
+    value_lists = [list(vs) for _, vs in axes]
+    out: list[dict[str, str]] = []
+    for i, combo in enumerate(itertools.product(*value_lists)):
+        subs = dict(zip(keys, combo))
+        subs["i"] = str(i)
+        out.append(subs)
+    return out

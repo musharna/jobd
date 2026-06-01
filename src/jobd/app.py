@@ -20,7 +20,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from jobd import __version__
-from jobd.arrays import index_subs, render_cmd, render_env
+from jobd.arrays import index_subs, render_cmd, render_env, sweep_member_subs
 from jobd.auth import install_tailnet_acl, require_token
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
@@ -382,6 +382,23 @@ def build_app(
                 if w is not None
             ]
             warning_text = "; ".join(warnings) if warnings else None
+
+            # Resolve the per-member substitutions up front so dry-run reports
+            # the same member count the live submit would create. Three forms,
+            # mutually exclusive (sweep+count rejected at the model):
+            #   sweep   → cartesian product of named axes, each carrying {i}
+            #   count>1 → bare {i} = 0..count-1
+            #   neither → a single ordinary job (NULL array columns)
+            if req.sweep:
+                member_subs = sweep_member_subs([(ax.key, ax.values) for ax in req.sweep])
+            elif req.count > 1:
+                member_subs = [index_subs(i) for i in range(req.count)]
+            else:
+                member_subs = None
+            is_array = member_subs is not None
+            subs_list = member_subs if is_array else [{}]
+            member_count = len(subs_list)
+
             # Dry-run bail-out:
             # full validation + routing-decision has run above (profile lookup,
             # project defaults, cwd sanity, depends_on existence, preflight,
@@ -403,7 +420,7 @@ def build_app(
                     "state": "dry-run",
                     "would_route_to": would_route_to,
                     "would_use_worker": would_use_worker,
-                    "array_count": req.count,
+                    "array_count": member_count,
                     "validation": {
                         "effective_priority": priority,
                         "effective_host_pin": host_pin,
@@ -423,13 +440,13 @@ def build_app(
                     },
                 }
 
-            # Fan out into `count` members. count==1 is an ordinary single job
-            # with NULL array columns and an unchanged single-JobInfo response.
-            is_array = req.count > 1
+            # Fan out into members using the substitutions resolved above. A
+            # non-array submit (member_subs is None) is one ordinary job with
+            # NULL array columns and an unchanged single-JobInfo response.
             members: list[Job] = []
-            for i in range(req.count):
-                member_cmd = render_cmd(req.cmd, index_subs(i)) if is_array else req.cmd
-                member_env = render_env(req.env, index_subs(i)) if is_array else req.env
+            for i, subs in enumerate(subs_list):
+                member_cmd = render_cmd(req.cmd, subs) if is_array else req.cmd
+                member_env = render_env(req.env, subs) if is_array else req.env
                 job = Job(
                     project=req.project,
                     profile=req.profile,
@@ -455,7 +472,7 @@ def build_app(
                     scheduling_timeout_s=req.scheduling_timeout_s,
                     submitted_via=req.submitted_via,
                     array_index=i if is_array else None,
-                    array_size=req.count if is_array else None,
+                    array_size=member_count if is_array else None,
                 )
                 if warning_text:
                     job.warning = warning_text
@@ -500,7 +517,7 @@ def build_app(
             if is_array:
                 return {
                     "array_id": array_id,
-                    "count": req.count,
+                    "count": member_count,
                     "job_ids": member_ids,
                     "warnings": warnings,
                 }
