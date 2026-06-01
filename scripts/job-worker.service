@@ -16,8 +16,10 @@ Environment="JOBD_URL=http://127.0.0.1:8765"
 Environment="JOBD_WORKER_HOST=worker1"
 # EDIT: include CUDA bin dirs here if this worker has a GPU.
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
-# EDIT: install path produced by scripts/install-worker.sh.
-ExecStart=/opt/jobd-worker/.venv/bin/python /opt/jobd-worker/job_worker.py
+# EDIT: the jobd-worker console script from the venv where you ran
+# `pip install "jobd[worker]"` (scripts/install-worker.sh puts it under
+# ~/jobd-worker/.venv/bin/jobd-worker).
+ExecStart=%h/jobd-worker/.venv/bin/jobd-worker
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

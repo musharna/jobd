@@ -1,13 +1,11 @@
 """Unit tests for the worker — pure functions + cancel-signal e2e with a real subprocess."""
 
-import sys
 import threading
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "worker"))
-
-from job_worker import (  # noqa: E402
+import jobd.worker.job_worker as job_worker
+from jobd.worker.job_worker import (
+    _missing_launcher_path,
     command_has_concurrent_ok,
     compute_unregistered_vram,
     effective_vram_request_gb_from_job,
@@ -15,8 +13,6 @@ from job_worker import (  # noqa: E402
     pick_resource_snapshot_mock,
     run_job,
 )
-from job_worker import _missing_launcher_path  # noqa: E402
-import job_worker  # noqa: E402
 
 
 def test_compute_unregistered_zero_when_all_tracked():
@@ -225,7 +221,7 @@ def test_run_job_cancel_signal_terminates_child(tmp_path, monkeypatch):
     we care about the signal chain inside run_job, not the scope
     integration — that's covered by tests/integration/test_cancel_latency.py.
     """
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -254,7 +250,7 @@ def test_run_job_fast_path_skips_systemd_run_wrap(tmp_path, monkeypatch):
     and defeats the whole point."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,
@@ -301,7 +297,7 @@ def test_run_job_non_fast_path_uses_named_scope(tmp_path, monkeypatch):
     no-op because pid pointed at the systemd-run client, not at bash."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,
@@ -350,7 +346,7 @@ def test_run_job_no_systemd_run_runs_bare(tmp_path, monkeypatch):
     the worker must run the workload directly — no wrap, no crash."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
     captured: dict[str, list[str]] = {}
@@ -384,7 +380,7 @@ def test_run_job_cancel_signals_scope_unit_not_pid(tmp_path, monkeypatch):
     latency bug). This test verifies the signaling channel."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,
@@ -462,7 +458,7 @@ def test_run_job_posts_started_after_popen(tmp_path, monkeypatch):
     ASSIGNED for their entire run and MCP cancel signal_sent reads as null."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -533,7 +529,7 @@ def test_run_job_idle_timeout_kills_silent_workload(tmp_path, monkeypatch):
     failure mode: liveness != progress."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker, "SIGNAL_POLL_INTERVAL_S", 0.05)
     monkeypatch.setattr(
@@ -592,7 +588,7 @@ def test_run_job_max_wall_kills_long_running_workload(tmp_path, monkeypatch):
     it's producing output (i.e. not idle)."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker, "SIGNAL_POLL_INTERVAL_S", 0.05)
     monkeypatch.setattr(
@@ -646,7 +642,7 @@ def test_run_job_env_default_idle_timeout(tmp_path, monkeypatch):
     without changing every call site."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setenv("JOBD_WORKER_IDLE_TIMEOUT_S", "1")
     monkeypatch.setattr(job_worker, "SIGNAL_POLL_INTERVAL_S", 0.05)
@@ -682,7 +678,7 @@ def test_user_cancel_surfaces_as_cancelled_not_failed(tmp_path, monkeypatch):
     abort surface stays clean."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker, "SIGNAL_POLL_INTERVAL_S", 0.05)
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
@@ -717,7 +713,7 @@ def test_run_job_does_not_post_started_when_popen_fails(tmp_path, monkeypatch):
     no live subprocess to be 'running'."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -769,7 +765,7 @@ def test_run_job_preempt_with_checkpoint_token_emits_checkpoint_complete(tmp_pat
     """#37: when the workload prints `jobd-checkpoint-complete` after
     SIGTERM during a preempt, the worker POSTs /checkpoint-complete and
     reports final_state=preempted."""
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -805,7 +801,7 @@ def test_run_job_preempt_with_checkpoint_token_emits_checkpoint_complete(tmp_pat
 def test_run_job_preempt_without_token_skips_checkpoint_complete(tmp_path, monkeypatch):
     """#37: a preempted workload that exits without printing the token
     still completes as preempted, but no /checkpoint-complete POST fires."""
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -830,7 +826,7 @@ def test_run_job_preempt_honors_checkpoint_grace_s(tmp_path, monkeypatch):
     """#37: an explicit checkpoint_grace_s overrides the worker's 60s
     default — a workload that ignores SIGTERM gets SIGKILLed after the
     configured grace window, not after a minute."""
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -859,7 +855,7 @@ def test_run_job_exports_checkpoint_grace_env_for_workload(tmp_path, monkeypatch
     """#38: worker exposes the resolved per-job checkpoint_grace_s to the
     workload via JOBD_CHECKPOINT_GRACE_S so install_preemption_handler
     can compute time_remaining()."""
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -881,7 +877,7 @@ def test_run_job_exports_checkpoint_grace_env_for_workload(tmp_path, monkeypatch
 def test_run_job_exports_default_checkpoint_grace_env_when_unset(tmp_path, monkeypatch):
     """No checkpoint_grace_s on the job → worker exports the default 60s
     so install_preemption_handler always has a sane value to read."""
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(job_worker.shutil, "which", lambda _name: None)
 
@@ -1147,7 +1143,7 @@ def test_run_job_exposes_checkpoint_dir(tmp_path, monkeypatch):
     Workloads use this to write durable checkpoints during a preempt."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,
@@ -1203,7 +1199,7 @@ def test_run_job_propagates_submitted_env(tmp_path, monkeypatch):
     clobber JOBD_CHECKPOINT_DIR)."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,
@@ -1258,7 +1254,7 @@ def test_run_job_checkpoint_dir_root_override(tmp_path, monkeypatch):
     instead of HDD-backed home)."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,
@@ -1309,7 +1305,7 @@ def test_run_job_checkpoint_dir_override_expands_tilde(tmp_path, monkeypatch):
     literal ~/ckpts directory."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,
@@ -1363,7 +1359,7 @@ def test_run_job_checkpoint_dir_xdg_data_home_branch(tmp_path, monkeypatch):
     fallback. Closes the contract→test gap on resolution rule #2."""
     import subprocess
 
-    import job_worker
+    import jobd.worker.job_worker as job_worker
 
     monkeypatch.setattr(
         job_worker.shutil,

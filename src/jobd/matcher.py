@@ -72,7 +72,7 @@ def effective_vram_request_gb(job: QueuedJob) -> float:
          `JobSubmit.vram_gb`)
       2. Tier-tag fallback: max N across `cuda-Ngb` tags in
          `requires.needs` (an 8 GB / 12 GB / 16 GB / 24 GB / 32 GB ladder
-         maintained by `worker/capabilities.py`)
+         maintained by `jobd/worker/capabilities.py`)
       3. `GPU_IMPLICIT_FLOOR_GB` (2 GB) when `requires.gpu is True`
       4. 0 — non-GPU jobs don't gate on VRAM
     """

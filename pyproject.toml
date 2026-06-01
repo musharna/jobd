@@ -61,6 +61,7 @@ mcp = ["mcp>=1.0", "httpx>=0.27"]
 jobd = "jobd.main:run"
 job = "job_cli.cli:app"
 jobd-mcp = "jobd.mcp.server:main"
+jobd-worker = "jobd.worker.job_worker:main"
 
 [build-system]
 requires = ["hatchling"]

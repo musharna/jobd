@@ -1,14 +1,12 @@
 """Worker-side _post_event helper: envelope shape, error swallowing."""
 
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "worker"))
-
-from job_worker import _post_event  # noqa: E402
+import jobd.worker.job_worker as job_worker
+from jobd.worker.job_worker import _post_event
 
 
 def test_post_event_builds_envelope_for_worker_shutdown():
@@ -72,7 +70,7 @@ def test_post_event_is_called_at_three_trigger_sites_in_source():
     """Sentinel: confirm wiring landed at watchdog wall-timeout, watchdog
     idle-timeout, and shutdown handler. If a refactor removes one of these,
     this test fails loud rather than silently dropping audit coverage."""
-    src = (Path(__file__).parent.parent / "worker" / "job_worker.py").read_text()
+    src = Path(job_worker.__file__).read_text()
     assert src.count("_post_event(") >= 4, (
         "expected at least 4 _post_event calls (helper def + 3 trigger sites); "
         f"found {src.count('_post_event(')}"

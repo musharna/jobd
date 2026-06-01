@@ -4,8 +4,9 @@
 # Usage:
 #   bash install-worker.sh --broker http://127.0.0.1:8765 --host <name> [--tags tag1,tag2] [--dry-run]
 #
-# Assumes: python3.11+, bash, curl, git. Does NOT require sudo.
-# Installs to: $HOME/jobd-worker/ (venv + job_worker.py + capabilities.py)
+# Assumes: python3.11+, bash. Does NOT require sudo, a clone, or git — the
+# worker ships on PyPI as jobd[worker] and runs via the `jobd-worker` command.
+# Installs to: $HOME/jobd-worker/ (a venv with jobd[worker] installed)
 # Writes config to: $HOME/.config/jobd/worker.yaml
 
 set -euo pipefail
@@ -103,27 +104,22 @@ fi
 
 "$INSTALL_DIR/.venv/bin/pip" install -U pip >/dev/null
 
-DEPS="httpx psutil pyyaml"
-if [[ "$HAS_NVIDIA" == "true" ]]; then
-	DEPS="$DEPS nvidia-ml-py" # note: prefer nvidia-ml-py over pynvml (renamed upstream)
-fi
-"$INSTALL_DIR/.venv/bin/pip" install $DEPS
-
-# Copy worker + capability modules (expects to run from checkout)
+# The worker + capability detection ship inside the jobd package; the [worker]
+# extra pulls httpx, psutil, pyyaml, and nvidia-ml-py (pure-Python; harmless on
+# non-GPU hosts). Installs the `jobd-worker` console script into the venv.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cp "$SCRIPT_DIR/../worker/job_worker.py" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/../worker/capabilities.py" "$INSTALL_DIR/"
+"$INSTALL_DIR/.venv/bin/pip" install "jobd[worker]"
 
 # Config file
 #
-# We deliberately DO NOT write a `tags:` block here. capabilities.py
+# We deliberately DO NOT write a `tags:` block here. jobd/worker/capabilities.py
 # REPLACES the auto-detected tag list when `tags:` is set in the yaml
-# (`tags_replace if provided` semantics at capabilities.py:214-215),
-# and the auto-detected list includes runtime-computed cuda-Ngb tier
-# tags that an install-time snapshot can't see. Writing tags here was
-# the 2026-04-27 #51 bug: server's `cuda-8gb` tier vanished on every
-# worker startup. Auto-detection re-runs every start; extras go via
-# JOBD_WORKER_TAGS (which APPENDS, not REPLACES — see line 167-169).
+# (`tags_replace if provided` semantics), and the auto-detected list
+# includes runtime-computed cuda-Ngb tier tags that an install-time
+# snapshot can't see. Writing tags here was the 2026-04-27 #51 bug:
+# server's `cuda-8gb` tier vanished on every worker startup.
+# Auto-detection re-runs every start; extras go via JOBD_WORKER_TAGS
+# (which APPENDS, not REPLACES).
 CFG="$HOME/.config/jobd/worker.yaml"
 {
 	echo "# jobd worker config — auto-detection handles tags on every start."
@@ -153,8 +149,9 @@ echo "  config:  $CFG"
 echo ""
 echo "To run manually (test):"
 echo "  JOBD_URL=$BROKER_URL JOBD_WORKER_HOST=$HOST_NAME \\"
-echo "    $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/job_worker.py"
+echo "    $INSTALL_DIR/.venv/bin/jobd-worker"
 echo ""
 echo "To auto-start (systemd user unit, requires 'sudo loginctl enable-linger \$USER'):"
-echo "  cp $SCRIPT_DIR/../worker/job-worker.service ~/.config/systemd/user/"
+echo "  cp $SCRIPT_DIR/job-worker.service ~/.config/systemd/user/"
+echo "  # then edit ExecStart in the unit to: $INSTALL_DIR/.venv/bin/jobd-worker"
 echo "  systemctl --user enable --now job-worker.service"

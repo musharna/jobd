@@ -22,14 +22,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "worker"))
 
 
 def _systemd_user_works() -> bool:
@@ -100,7 +96,7 @@ def test_cancel_latency_under_5s_via_scope_kill(tmp_path):
     /signal returns 'cancel', the worker MUST kill the workload within
     a few seconds via `systemctl --user kill`. Pre-fix, this took ~60s
     because SIGTERM-to-pid was a no-op on the systemd-run client."""
-    from job_worker import run_job  # noqa: E402
+    from jobd.worker.job_worker import run_job
 
     job_id = 99100 + int(time.time()) % 1000
     job = {

@@ -1,25 +1,19 @@
 """Unit tests for worker capability detection."""
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-
-# Add worker/ to path for direct import
-import sys
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "worker"))
-
-from capabilities import Capabilities, detect  # noqa: E402
+from jobd.worker.capabilities import Capabilities, detect
 
 
 def test_detect_arch_x86_64():
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=False),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=False),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
         patch.dict("os.environ", {}, clear=False),
     ):
         c = detect()
@@ -31,11 +25,11 @@ def test_detect_arch_x86_64():
 
 def test_detect_arm64_linux_no_gpu():
     with (
-        patch("capabilities.platform.machine", return_value="aarch64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=False),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="aarch64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=False),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert c.arch == "arm64"
@@ -48,11 +42,11 @@ def test_detect_gpu_adds_cuda_tag():
         return f"/usr/bin/{name}" if name in ("nvidia-smi", "python3") else None
 
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", side_effect=_which),
-        patch("capabilities._has_nvidia", return_value=True),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", side_effect=_which),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=True),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert c.gpu is True
@@ -62,11 +56,11 @@ def test_detect_gpu_adds_cuda_tag():
 
 def test_detect_wsl_sets_tag():
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=False),
-        patch("capabilities._wsl", return_value=True),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=False),
+        patch("jobd.worker.capabilities._wsl", return_value=True),
     ):
         c = detect()
     assert "wsl" in c.tags
@@ -74,11 +68,11 @@ def test_detect_wsl_sets_tag():
 
 def test_env_override_appends_tags():
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=False),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=False),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
         patch.dict("os.environ", {"JOBD_WORKER_TAGS": "extra1,extra2"}),
     ):
         c = detect()
@@ -91,11 +85,11 @@ def test_config_file_override_replaces_arch(tmp_path, monkeypatch):
     cfg.write_text("arch: arm7\ntags: [custom-tag]\n")
     monkeypatch.setenv("JOBD_WORKER_CONFIG", str(cfg))
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=False),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=False),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert c.arch == "arm7"
@@ -111,17 +105,17 @@ def test_yaml_without_tags_preserves_autodetected_tier_tags(tmp_path, monkeypatc
     `tags:` block that REPLACED auto-detect on every start, killing the
     cuda-8gb tier tag for server. Regression-locking the post-fix behavior.
     """
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     cfg = tmp_path / "worker.yaml"
     cfg.write_text("host: server\narch: x86_64\nos: linux\ngpu: true\n")
     monkeypatch.setenv("JOBD_WORKER_CONFIG", str(cfg))
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=True),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=True),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
         patch.object(caps_mod, "_max_cuda_vram_gb", return_value=8.5),
     ):
         c = detect()
@@ -137,7 +131,7 @@ def test_on_battery_discharging(tmp_path, monkeypatch):
     bat.mkdir()
     (bat / "type").write_text("Battery\n")
     (bat / "status").write_text("Discharging\n")
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     monkeypatch.setattr(caps_mod, "_POWER_SUPPLY_ROOT", tmp_path)
     assert caps_mod._on_battery() is True
@@ -148,14 +142,14 @@ def test_on_battery_not_discharging(tmp_path, monkeypatch):
     bat.mkdir()
     (bat / "type").write_text("Battery\n")
     (bat / "status").write_text("Not charging\n")
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     monkeypatch.setattr(caps_mod, "_POWER_SUPPLY_ROOT", tmp_path)
     assert caps_mod._on_battery() is False
 
 
 def test_on_battery_no_battery_dir(tmp_path, monkeypatch):
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     monkeypatch.setattr(caps_mod, "_POWER_SUPPLY_ROOT", tmp_path / "does-not-exist")
     assert caps_mod._on_battery() is None
@@ -169,11 +163,11 @@ def test_malformed_yaml_does_not_crash(tmp_path, monkeypatch):
     cfg.write_text("arch: [unclosed list\nnot valid yaml:\n  - :")
     monkeypatch.setenv("JOBD_WORKER_CONFIG", str(cfg))
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=False),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=False),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert c.arch == "x86_64"  # fell back to auto-detect, no crash
@@ -181,7 +175,7 @@ def test_malformed_yaml_does_not_crash(tmp_path, monkeypatch):
 
 def test_on_battery_multi_battery_discharging_found_second(tmp_path, monkeypatch):
     """Two batteries: first is Full, second is Discharging → True."""
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     for name, status in [("BAT0", "Full"), ("BAT1", "Discharging")]:
         bat = tmp_path / name
@@ -198,11 +192,11 @@ def test_binary_config_file_does_not_crash(tmp_path, monkeypatch):
     cfg.write_bytes(b"\xff\xfe\x00\x01\x02\x03\xc3\x28")  # invalid UTF-8
     monkeypatch.setenv("JOBD_WORKER_CONFIG", str(cfg))
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", return_value=None),
-        patch("capabilities._has_nvidia", return_value=False),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=False),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert c.arch == "x86_64"
@@ -210,7 +204,7 @@ def test_binary_config_file_does_not_crash(tmp_path, monkeypatch):
 
 def test_has_nvidia_detects_wsl_stub_path():
     """_has_nvidia returns True when /usr/lib/wsl/lib/nvidia-smi exists even if PATH lookup fails."""
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     real_exists = Path.exists
 
@@ -220,7 +214,7 @@ def test_has_nvidia_detects_wsl_stub_path():
         return real_exists(self)
 
     with (
-        patch("capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
         patch("pathlib.Path.exists", fake_exists),
     ):
         assert caps_mod._has_nvidia() is True
@@ -228,7 +222,7 @@ def test_has_nvidia_detects_wsl_stub_path():
 
 def test_cuda_tier_tags_thresholds():
     """Tier tags are additive: every threshold the GPU exceeds gets emitted."""
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     assert caps_mod._cuda_tier_tags(0) == []
     assert caps_mod._cuda_tier_tags(7) == []
@@ -259,12 +253,12 @@ def test_detect_emits_cuda_tier_tags_for_32gb():
         return f"/usr/bin/{name}" if name in ("nvidia-smi", "python3") else None
 
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", side_effect=_which),
-        patch("capabilities._has_nvidia", return_value=True),
-        patch("capabilities._max_cuda_vram_gb", return_value=32),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", side_effect=_which),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=True),
+        patch("jobd.worker.capabilities._max_cuda_vram_gb", return_value=32),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert "cuda" in c.tags
@@ -283,12 +277,12 @@ def test_detect_emits_only_low_tier_for_12gb():
         return f"/usr/bin/{name}" if name in ("nvidia-smi", "python3") else None
 
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", side_effect=_which),
-        patch("capabilities._has_nvidia", return_value=True),
-        patch("capabilities._max_cuda_vram_gb", return_value=12),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", side_effect=_which),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=True),
+        patch("jobd.worker.capabilities._max_cuda_vram_gb", return_value=12),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert "cuda" in c.tags
@@ -307,12 +301,12 @@ def test_detect_no_tier_tags_when_pynvml_unavailable():
         return f"/usr/bin/{name}" if name in ("nvidia-smi", "python3") else None
 
     with (
-        patch("capabilities.platform.machine", return_value="x86_64"),
-        patch("capabilities.platform.system", return_value="Linux"),
-        patch("capabilities.shutil.which", side_effect=_which),
-        patch("capabilities._has_nvidia", return_value=True),
-        patch("capabilities._max_cuda_vram_gb", return_value=0),
-        patch("capabilities._wsl", return_value=False),
+        patch("jobd.worker.capabilities.platform.machine", return_value="x86_64"),
+        patch("jobd.worker.capabilities.platform.system", return_value="Linux"),
+        patch("jobd.worker.capabilities.shutil.which", side_effect=_which),
+        patch("jobd.worker.capabilities._has_nvidia", return_value=True),
+        patch("jobd.worker.capabilities._max_cuda_vram_gb", return_value=0),
+        patch("jobd.worker.capabilities._wsl", return_value=False),
     ):
         c = detect()
     assert "cuda" in c.tags
@@ -321,17 +315,16 @@ def test_detect_no_tier_tags_when_pynvml_unavailable():
 
 def test_has_nvidia_falls_back_to_pynvml():
     """When no filesystem signal is present, a successful pynvml.nvmlInit is enough."""
-    import sys
     import types
 
-    import capabilities as caps_mod
+    import jobd.worker.capabilities as caps_mod
 
     fake_pynvml = types.SimpleNamespace(
         nvmlInit=lambda: None,
         nvmlShutdown=lambda: None,
     )
     with (
-        patch("capabilities.shutil.which", return_value=None),
+        patch("jobd.worker.capabilities.shutil.which", return_value=None),
         patch("pathlib.Path.exists", lambda self: False),
         patch.dict(sys.modules, {"pynvml": fake_pynvml}),
     ):

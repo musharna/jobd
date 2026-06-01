@@ -1,4 +1,4 @@
-"""jobd worker daemon — single-file, one per host.
+"""jobd worker daemon — one per host.
 
 Responsibilities:
 - Heartbeat every 5s with current resource snapshot
@@ -23,28 +23,19 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capabilities import detect as _detect_caps  # noqa: E402
-
-# Audit 2026-05-18 (runtime-zombies S4): subreaper + cgroup-walk live in
-# src/jobd/ for reuse, but the worker is a single-file deploy that doesn't
-# import the jobd package by default. Make them importable from the same
-# tree the broker uses.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-try:
-    from jobd import subreaper as _subreaper  # noqa: E402
-    from jobd import cgroup_walk as _cgroup_walk  # noqa: E402
-
-    _REAPER_OK = True
-except Exception as _e:  # pragma: no cover - defensive: bad install layout
-    print(
-        f"[worker] subreaper/cgroup_walk import failed ({_e}); orphan-reap disabled",
-        file=sys.stderr,
-    )
-    _REAPER_OK = False
-
 import httpx
 import psutil
+
+from jobd import cgroup_walk as _cgroup_walk
+from jobd import subreaper as _subreaper
+
+from .capabilities import detect as _detect_caps
+
+# subreaper + cgroup_walk ship in the jobd package alongside this worker module,
+# so they import directly (no sys.path juggling). _REAPER_OK stays as the flag
+# the job-finalize path reads; a broken import now fails loudly at load — a
+# broken install — rather than silently disabling orphan reaping.
+_REAPER_OK = True
 
 try:
     import pynvml
@@ -255,11 +246,10 @@ def gpu_admission_check(required_gb: float, tracked_pids: set[int]) -> dict:
     }
 
 
-# Mirror of jobd.matcher.GPU_IMPLICIT_FLOOR_GB / effective_vram_request_gb.
-# Worker is a single-file deploy that doesn't import the jobd package, so the
-# helper has to live here too. If you change the resolution rules, change
-# both — the matcher decides who claims the job, this gate decides whether
-# to start it under live contention.
+# Deliberate mirror of jobd.matcher.GPU_IMPLICIT_FLOOR_GB /
+# effective_vram_request_gb. Kept separate on purpose: the matcher decides who
+# *claims* the job, this gate decides whether to *start* it under live
+# contention. If you change the resolution rules, change both.
 _GPU_IMPLICIT_FLOOR_GB = 2.0
 
 # Mirrors the `# NO_GPU` override pattern in the example PreToolUse hook

@@ -2,7 +2,7 @@
 fuser-of-/dev/nvidia*.
 
 # METRIC_REFERENCE_OK - this is a diagnostic-surface module, not a
-# bespoke probe formula. NVML enumeration mirrors worker/job_worker.py
+# bespoke probe formula. NVML enumeration mirrors jobd/worker/job_worker.py
 # nvidia_processes() (the verified production probe); fuser parsing is
 # a system-tool wrapper, not a derived metric.
 
@@ -50,7 +50,7 @@ def _nvml_processes() -> list[tuple[int, int, int]]:
     """Return [(pid, gpu_id, mem_mb)] from NVML compute apps.
 
     Returns [] on any failure (no driver, no pynvml, NVML init error).
-    Mirrors worker/job_worker.py:nvidia_processes but tagged per-GPU.
+    Mirrors jobd/worker/job_worker.py:nvidia_processes but tagged per-GPU.
     """
     try:
         import pynvml  # type: ignore

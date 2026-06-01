@@ -74,11 +74,12 @@ Workers **poll** the broker (pull model — no inbound connection to a worker); 
 ## Install
 
 ```bash
-pip install jobd            # broker + CLI
-pip install "jobd[mcp]"     # adds the MCP server
+pip install jobd               # broker + CLI
+pip install "jobd[mcp]"        # adds the MCP server
+pip install "jobd[worker]"     # adds the worker daemon (jobd-worker)
 ```
 
-Requires Python ≥ 3.11. The `pip` package is the **broker + CLI + MCP server**; the worker is intentionally not bundled (it has host-specific system deps). Workers run from a clone of this repo (`worker/job_worker.py`) — `scripts/install-worker.sh` sets one up under `~/jobd-worker` with its own venv. (Packaging the worker as `jobd-worker` is planned for a later release.)
+Requires Python ≥ 3.11. Everything ships in the one `jobd` package: the broker (`jobd`), the CLI (`job`), the MCP server (`jobd-mcp`), and the worker (`jobd-worker`). The worker's runtime deps (httpx, psutil, pyyaml, nvidia-ml-py) live behind the `[worker]` extra since they're only needed on machines that actually run jobs. `scripts/install-worker.sh` sets a worker up under `~/jobd-worker` with its own venv and a generated config.
 
 ## Quickstart (single host)
 
@@ -86,10 +87,9 @@ Requires Python ≥ 3.11. The `pip` package is the **broker + CLI + MCP server**
 # 1. start the broker (binds 127.0.0.1:8765 by default)
 JOBD_ALLOW_NO_AUTH=1 jobd          # no-auth is fine for a loopback-only broker
 
-# 2. in another shell (from a clone of this repo), start a worker pointed at it
-pip install httpx psutil pyyaml pynvml   # worker deps (pynvml only needed for GPU hosts)
-JOBD_URL=http://127.0.0.1:8765 JOBD_WORKER_HOST=local \
-  python worker/job_worker.py
+# 2. in another shell, install + start a worker pointed at it
+pip install "jobd[worker]"
+JOBD_URL=http://127.0.0.1:8765 JOBD_WORKER_HOST=local jobd-worker
 
 # 3. submit a job and wait for it
 job submit --project demo --wait -- echo hello
@@ -97,7 +97,7 @@ job list
 job logs <id>
 ```
 
-For a real multi-host deployment (Docker broker + systemd workers, Tailscale binding, shared auth token), see **[docs/security.md](docs/security.md)** and the templates in `docker-compose.yml`, `scripts/`, and `worker/`. Day-2 operations (health, draining a worker, upgrades, token rotation, backups) are in **[docs/runbook.md](docs/runbook.md)**.
+For a real multi-host deployment (Docker broker + systemd workers, Tailscale binding, shared auth token), see **[docs/security.md](docs/security.md)** and the templates in `docker-compose.yml` and `scripts/` (broker compose, `install-worker.sh`, `job-worker.service`). Day-2 operations (health, draining a worker, upgrades, token rotation, backups) are in **[docs/runbook.md](docs/runbook.md)**.
 
 ## Supported platforms
 
@@ -107,7 +107,7 @@ Python 3.11+ everywhere.
 | -------------------------------------- | ------- | ----------- | -------------------- |
 | **Broker** (`jobd`)                    | ✅      | ✅          | ✅ (WSL recommended) |
 | **CLI** (`job`) / **MCP** (`jobd-mcp`) | ✅      | ✅          | ✅                   |
-| **Worker** (`job_worker.py`)           | ✅ full | ⚠️ degraded | ⚠️ degraded          |
+| **Worker** (`jobd-worker`)             | ✅ full | ⚠️ degraded | ⚠️ degraded          |
 
 The **worker** runs its best on Linux with a systemd user instance: memory caps, process reaping, and preemption use `systemd-run --user` scopes and cgroups. On non-systemd hosts the worker still executes jobs, but silently drops those guarantees — fine for a single trusted box, not for hard resource isolation. GPU features need NVIDIA + `nvidia-ml-py`. The broker, CLI, and MCP server are pure-Python and portable.
 

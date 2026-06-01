@@ -40,7 +40,7 @@ def test_client_no_header_when_env_unset(monkeypatch):
 
 
 def test_worker_httpx_client_carries_bearer(monkeypatch):
-    """Mirror the construction at worker/job_worker.py:773 — JOBD_API_TOKEN
+    """Mirror the heartbeat-client construction in jobd/worker/job_worker.py — JOBD_API_TOKEN
     must propagate into the worker's heartbeat httpx.Client headers."""
     import os
 

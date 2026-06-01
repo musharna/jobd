@@ -2,6 +2,13 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — Worker is now a packaged, installable component
+
+- **`jobd-worker` console script.** The worker daemon and its capability detection moved into the `jobd` package (`jobd.worker.job_worker`, `jobd.worker.capabilities`) and now install as a `jobd-worker` entry point via `pip install "jobd[worker]"`. No clone, no manual file copy, no `python worker/job_worker.py`. The `[worker]` extra carries the runtime deps (httpx, psutil, pyyaml, nvidia-ml-py).
+- **Simplified worker setup.** `scripts/install-worker.sh` now `pip install`s `jobd[worker]` into `~/jobd-worker/.venv` instead of copying source files from a checkout. The two systemd templates collapsed into one `scripts/job-worker.service` (`ExecStart=…/jobd-worker`) — the repo-checkout vs standalone-copy distinction is gone now that imports resolve from the installed package.
+
 ## [0.1.0] — 2026-05-31
 
 Initial public release. The bullets below summarize the capabilities built during
