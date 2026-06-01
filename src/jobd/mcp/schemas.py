@@ -25,7 +25,7 @@ SUBMIT_INPUT = {
         "wait": {
             "type": "boolean",
             "default": False,
-            "description": "Sync mode: block until terminal or timeout.",
+            "description": "Sync mode: block until terminal or timeout. For an array submit (count/sweep), waits on every member under one shared deadline and returns an aggregate {array_id, count, job_ids, states, all_completed, members:[{job_id, state, exit_code}]}.",
         },
         "wait_timeout_s": {
             "type": "integer",

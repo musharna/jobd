@@ -63,6 +63,72 @@ def test_submit_array_returns_broker_summary_as_is():
 
 
 @respx.mock
+def test_submit_array_wait_aggregates_when_all_complete():
+    """wait=True on an array polls every member to terminal and returns an
+    aggregate, not the bare summary."""
+    summary = {"array_id": 12, "count": 3, "job_ids": [12, 13, 14], "warnings": []}
+    respx.post("http://broker.test/submit").mock(return_value=httpx.Response(200, json=summary))
+    for jid in (12, 13, 14):
+        respx.get(f"http://broker.test/jobs/{jid}").mock(
+            return_value=httpx.Response(
+                200, json={"job_id": jid, "state": "completed", "exit_code": 0}
+            )
+        )
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_submit(
+        client,
+        {
+            "command": "echo {i}",
+            "project": "p",
+            "cwd": "/x",
+            "wait": True,
+            "extra": {"count": 3},
+        },
+    )
+    assert out["array_id"] == 12
+    assert out["all_completed"] is True
+    assert out["states"] == {"completed": 3}
+    assert [m["job_id"] for m in out["members"]] == [12, 13, 14]
+    assert all(m["exit_code"] == 0 for m in out["members"])
+    assert "timed_out" not in out
+
+
+@respx.mock
+def test_submit_array_wait_reports_timeout_with_partial_progress():
+    """If a member is still running when the shared deadline elapses, the
+    aggregate carries timed_out + the last-known per-member states."""
+    summary = {"array_id": 20, "count": 2, "job_ids": [20, 21], "warnings": []}
+    respx.post("http://broker.test/submit").mock(return_value=httpx.Response(200, json=summary))
+    respx.get("http://broker.test/jobs/20").mock(
+        return_value=httpx.Response(200, json={"job_id": 20, "state": "completed", "exit_code": 0})
+    )
+    respx.get("http://broker.test/jobs/21").mock(
+        return_value=httpx.Response(200, json={"job_id": 21, "state": "running", "exit_code": None})
+    )
+    client = JobdClient(base_url="http://broker.test")
+    times = iter([0.0, 11.0, 11.0, 11.0])
+    with (
+        patch("jobd.mcp.tools.time.monotonic", side_effect=lambda: next(times)),
+        patch("jobd.mcp.tools.time.sleep"),
+    ):
+        out = jobd_submit(
+            client,
+            {
+                "command": "echo {i}",
+                "project": "p",
+                "cwd": "/x",
+                "wait": True,
+                "wait_timeout_s": 10,
+                "extra": {"count": 2},
+            },
+        )
+    assert out["timed_out"] is True
+    assert out["all_completed"] is False
+    assert out["states"] == {"completed": 1, "running": 1}
+    assert "hint" in out
+
+
+@respx.mock
 def test_submit_extra_keys_translate_to_broker_payload():
     """Translation: idempotent → requires.idempotent; depends_on top-level;
     max_wall dropped (broker has no field). cmd wrapped with bash -c.

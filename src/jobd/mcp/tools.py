@@ -62,6 +62,38 @@ def _wait_for_terminal(client: JobdClient, job_id: int, timeout_s: int) -> tuple
         time.sleep(POLL_INTERVAL_S)
 
 
+def _wait_array_for_terminal(
+    client: JobdClient, job_ids: list[int], timeout_s: int
+) -> tuple[list[dict], bool]:
+    """Poll every array member until all are terminal or a shared deadline elapses.
+
+    The deadline bounds the *aggregate* wait (not per-member), so an N-member
+    array can't multiply MAX_WAIT_S. Returns (statuses, timed_out) where
+    statuses is in job_ids order; on timeout it carries the last-known state of
+    any still-pending member so the caller can report partial progress.
+    """
+    deadline = time.monotonic() + timeout_s
+    done: dict[int, dict] = {}
+    pending = list(job_ids)
+    while pending:
+        still: list[int] = []
+        for jid in pending:
+            info = _status(client, jid)
+            if info["state"] in _TERMINAL:
+                done[jid] = info
+            else:
+                still.append(jid)
+        pending = still
+        if not pending:
+            break
+        if time.monotonic() >= deadline:
+            for jid in pending:
+                done[jid] = _status(client, jid)
+            return [done[j] for j in job_ids], True
+        time.sleep(POLL_INTERVAL_S)
+    return [done[j] for j in job_ids], False
+
+
 def jobd_submit(client: JobdClient, args: dict) -> dict:
     """Submit a job. Async by default; sync wait supported via wait=True.
 
@@ -76,11 +108,43 @@ def jobd_submit(client: JobdClient, args: dict) -> dict:
     # Dry-run bypasses xlate_job_info (no id/worker/submitted_at fields).
     if isinstance(raw, dict) and raw.get("state") == "dry-run":
         return raw
-    # Array submit (count>1): broker returns {array_id, count, job_ids, warnings},
-    # not a JobInfo. Return it as-is; the caller polls members via jobd_status.
-    # (Per-member wait is a follow-up; `wait` is ignored for arrays in v1.)
+    # Array submit (count>1 or sweep): broker returns
+    # {array_id, count, job_ids, warnings}, not a JobInfo. Without wait, return
+    # it as-is; the caller polls members via jobd_status. With wait, poll every
+    # member to terminal under one shared deadline and return an aggregate.
     if isinstance(raw, dict) and "job_ids" in raw:
-        return raw
+        if not args.get("wait"):
+            return raw
+        requested = int(args.get("wait_timeout_s", 90))
+        timeout_s = min(requested, MAX_WAIT_S)
+        clamped = requested > MAX_WAIT_S
+        statuses, timed_out_flag = _wait_array_for_terminal(client, raw["job_ids"], timeout_s)
+        tally: dict[str, int] = {}
+        for s in statuses:
+            tally[s["state"]] = tally.get(s["state"], 0) + 1
+        out = {
+            "array_id": raw["array_id"],
+            "count": raw["count"],
+            "job_ids": raw["job_ids"],
+            "states": tally,
+            "all_completed": all(s["state"] == "completed" for s in statuses),
+            "members": [
+                {
+                    "job_id": s["job_id"],
+                    "state": s["state"],
+                    "exit_code": s.get("exit_code"),
+                }
+                for s in statuses
+            ],
+        }
+        if raw.get("warnings"):
+            out["warnings"] = raw["warnings"]
+        if timed_out_flag:
+            out["timed_out"] = True
+            out["hint"] = "call jobd_status on individual members to keep polling"
+        if clamped:
+            out["clamped"] = True
+        return out
     resp = xlate_job_info(raw)
     base = {
         "job_id": resp["job_id"],
