@@ -4,6 +4,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-02
+
 ### Added — job/log retention
 
 - **`JOBD_JOB_RETENTION_DAYS` prunes old terminal jobs.** When set to a positive number, the sweeper deletes jobs in a terminal state (`completed`/`failed`/`cancelled`/`preempted`/`orphaned`/`scheduling_timeout`) whose `finished_at` is older than that many days, along with their per-job `.log` files, and emits a `jobs_pruned` event with the count. This bounds jobs-table and log-dir growth on a long-running broker (the `events.jsonl` stream is already bounded by size-rotation). Opt-in: the default (`0`) keeps history forever, so existing deployments are unchanged. Freed SQLite pages are reused under WAL, so the DB file stays bounded without a global-locking `VACUUM`. Pruning old terminal parents is safe for any still-pending dependents — they're already treated as dependency-satisfied.
