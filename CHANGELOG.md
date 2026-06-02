@@ -4,6 +4,12 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-06-02
+
+### Documentation
+
+- **README "Retention" section** documenting `JOBD_JOB_RETENTION_DAYS` — the opt-in knob added in 0.5.0 was only described in the runbook, not the main README's Configuration area (the 0.3.0 multislotting knob set the precedent of documenting user-facing config in the README). No behavior change.
+
 ## [0.5.0] — 2026-06-02
 
 ### Added — job/log retention
