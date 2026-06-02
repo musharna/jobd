@@ -4,6 +4,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-02
+
 ### Changed — server-side long-poll for `/next-job`
 
 - **The broker now holds `/next-job` until a job is dispatchable.** Previously the endpoint returned `null` instantly and the worker re-polled every 2s, so each idle worker drove ~15× the intended request rate (a full queued-scan + per-dep lookups every 2s) even with nothing to do — the worker's own 30s client timeout showed a long-poll was the original design intent, never built. The endpoint now blocks up to `wait_s` (the worker sends its `POLL_TIMEOUT_S`, 30s), re-attempting whenever a `/submit`, terminal transition, or requeue wakes it (a `threading.Condition`), and otherwise rechecking at most every 10s as a backstop. Result: an idle worker makes ~0 requests while waiting, and a freshly submitted job dispatches near-instantly instead of after up to 2s.
