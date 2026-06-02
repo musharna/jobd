@@ -283,6 +283,10 @@ class NextJobQuery(BaseModel):
     gpu: bool = False
     tags: list[str] = Field(default_factory=list)
     mount_roots: list[str] = Field(default_factory=list)
+    # Server-side long-poll: seconds the broker may hold this request waiting for
+    # a dispatchable job before returning null. 0 (default) = legacy instant
+    # return, so older workers and tests that don't set it are unaffected.
+    wait_s: float = 0.0
 
 
 class AdmissionRefusal(BaseModel):

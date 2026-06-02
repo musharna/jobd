@@ -90,3 +90,15 @@ any prior one) and starts a fresh file. Total on-disk retention is therefore
 spanning a rotation still returns a continuous history within that window. Raise
 `JOBD_EVENTS_MAX_BYTES` if you need a longer audit trail on the broker itself,
 or back the files up out-of-band for unbounded history.
+
+### Worker polling / dispatch latency
+
+Workers long-poll `/next-job`: the broker holds the request until a job is
+dispatchable (woken by a submit, a terminal transition, or a requeue) or until
+the worker's poll timeout (~30s) elapses, then the worker re-polls. An idle
+worker therefore makes almost no requests while waiting, and a freshly submitted
+job is picked up near-instantly rather than on the next poll tick. This needs no
+configuration. A worker pointed at an older broker that doesn't support the hold
+falls back to a 2s re-poll automatically. If you run the broker behind a reverse
+proxy, make sure its idle/read timeout exceeds ~35s so it doesn't sever the held
+connection.
