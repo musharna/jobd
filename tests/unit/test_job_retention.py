@@ -1,0 +1,190 @@
+"""jobs-table + per-job-log retention prune (JOBD_JOB_RETENTION_DAYS).
+
+Terminal jobs whose finished_at is older than the retention horizon — and
+their per-job .log files — are deleted by the sweeper. 0 days (default) keeps
+history forever, so the feature is opt-in and the rest of the suite is
+unaffected.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select, update
+
+from jobd import app as app_mod
+from jobd.app import build_app
+from jobd.db import Job
+
+
+@pytest.fixture
+def client_logs(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml):
+    app = build_app(
+        db_url=f"sqlite:///{tmp_path}/jobd.db",
+        projects_path=sample_projects_yaml,
+        profiles_path=sample_profiles_yaml,
+        classifier_path=sample_classifier_yaml,
+        logs_path=tmp_path / "logs",
+    )
+    return TestClient(app), tmp_path / "logs"
+
+
+def _submit(client: TestClient, project: str = "project-b") -> int:
+    r = client.post(
+        "/submit",
+        json={"project": project, "cmd": ["true"], "cwd": "/tmp/foo", "host_pin": "any"},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def _set_state(job_id: int, state: str, *, finished_days_ago: float | None) -> None:
+    """Force a job's state and finished_at (naive UTC, matching the schema)."""
+    finished = (
+        None
+        if finished_days_ago is None
+        else datetime.now(UTC).replace(tzinfo=None) - timedelta(days=finished_days_ago)
+    )
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(update(Job).where(Job.id == job_id).values(state=state, finished_at=finished))
+
+
+def _exists(job_id: int) -> bool:
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        return conn.execute(select(Job.id).where(Job.id == job_id)).first() is not None
+
+
+def _make_log(logs_dir: Path, job_id: int) -> Path:
+    p = logs_dir / f"{job_id}.log"
+    p.write_text("some job output\n")
+    return p
+
+
+def _pruned_events(logs_dir: Path) -> list[dict]:
+    f = logs_dir / "events.jsonl"
+    if not f.exists():
+        return []
+    rows = [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+    return [r for r in rows if r.get("event") == "jobs_pruned"]
+
+
+# ---- default = disabled ----
+
+
+def test_retention_disabled_by_default(client_logs, monkeypatch):
+    monkeypatch.delenv("JOBD_JOB_RETENTION_DAYS", raising=False)
+    client, logs = client_logs
+    jid = _submit(client)
+    _set_state(jid, "completed", finished_days_ago=100)
+    log = _make_log(logs, jid)
+
+    assert app_mod._prune_old_jobs() == 0
+    assert _exists(jid), "default (0 days) must not prune anything"
+    assert log.exists()
+
+
+def test_invalid_env_falls_back_to_disabled(client_logs, monkeypatch):
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "garbage")
+    client, logs = client_logs
+    jid = _submit(client)
+    _set_state(jid, "completed", finished_days_ago=100)
+
+    assert app_mod._prune_old_jobs() == 0
+    assert _exists(jid)
+
+
+# ---- pruning ----
+
+
+def test_prunes_old_terminal_job_and_its_log(client_logs, monkeypatch):
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "7")
+    client, logs = client_logs
+    jid = _submit(client)
+    _set_state(jid, "completed", finished_days_ago=10)
+    log = _make_log(logs, jid)
+
+    n = app_mod._prune_old_jobs()
+    assert n == 1
+    assert not _exists(jid), "terminal job past the horizon must be deleted"
+    # Real-execution check: the actual log file is gone from disk.
+    assert not log.exists(), "the per-job .log file must be unlinked"
+
+
+def test_keeps_recent_terminal_job(client_logs, monkeypatch):
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "7")
+    client, _ = client_logs
+    jid = _submit(client)
+    _set_state(jid, "completed", finished_days_ago=2)  # within the window
+
+    assert app_mod._prune_old_jobs() == 0
+    assert _exists(jid)
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "assigned"])
+def test_skips_non_terminal_jobs(client_logs, monkeypatch, state):
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "7")
+    client, _ = client_logs
+    jid = _submit(client)
+    # Even with an ancient finished_at, a non-terminal job is never pruned.
+    _set_state(jid, state, finished_days_ago=100)
+
+    assert app_mod._prune_old_jobs() == 0
+    assert _exists(jid)
+
+
+@pytest.mark.parametrize("state", ["completed", "failed", "cancelled", "preempted", "orphaned"])
+def test_prunes_all_terminal_states(client_logs, monkeypatch, state):
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "7")
+    client, _ = client_logs
+    jid = _submit(client)
+    _set_state(jid, state, finished_days_ago=30)
+
+    assert app_mod._prune_old_jobs() == 1
+    assert not _exists(jid)
+
+
+def test_emits_jobs_pruned_event(client_logs, monkeypatch):
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "7")
+    client, logs = client_logs
+    a, b = _submit(client), _submit(client)
+    _set_state(a, "completed", finished_days_ago=30)
+    _set_state(b, "failed", finished_days_ago=30)
+
+    app_mod._prune_old_jobs()
+    events = _pruned_events(logs)
+    assert len(events) == 1
+    assert events[0]["source"] == "broker"
+    assert events[0]["payload"]["count"] == 2
+    assert events[0]["payload"]["retention_days"] == 7
+
+
+def test_missing_log_file_is_not_an_error(client_logs, monkeypatch):
+    """A terminal job whose .log was already gone still prunes cleanly."""
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "7")
+    client, _ = client_logs
+    jid = _submit(client)
+    _set_state(jid, "completed", finished_days_ago=30)  # no _make_log
+
+    assert app_mod._prune_old_jobs() == 1
+    assert not _exists(jid)
+
+
+# ---- wired into the sweeper ----
+
+
+def test_sweep_once_runs_the_prune(client_logs, monkeypatch):
+    monkeypatch.setenv("JOBD_JOB_RETENTION_DAYS", "7")
+    client, logs = client_logs
+    jid = _submit(client)
+    _set_state(jid, "completed", finished_days_ago=30)
+    _make_log(logs, jid)
+
+    app_mod._sweep_once()  # the periodic pass must invoke the prune
+    assert not _exists(jid)
+    assert not (logs / f"{jid}.log").exists()

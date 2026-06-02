@@ -91,6 +91,18 @@ spanning a rotation still returns a continuous history within that window. Raise
 `JOBD_EVENTS_MAX_BYTES` if you need a longer audit trail on the broker itself,
 or back the files up out-of-band for unbounded history.
 
+### Job/log retention
+
+By default the broker keeps every job row and per-job `.log` forever. Set
+`JOBD_JOB_RETENTION_DAYS=N` to have the sweeper delete terminal jobs (and their
+`.log` files) whose `finished_at` is older than `N` days, bounding jobs-table and
+log-dir growth on a long-running broker. It emits a `jobs_pruned` event per pass
+that removes anything. Leave it unset (or `0`) to disable. The SQLite file
+reuses freed pages under WAL, so it stays bounded by the retention window
+without a `VACUUM`; if you need to reclaim file _size_ after a large one-time
+purge, run `VACUUM` manually during a maintenance window (it takes a global
+lock).
+
 ### Worker polling / dispatch latency
 
 Workers long-poll `/next-job`: the broker holds the request until a job is
