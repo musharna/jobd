@@ -126,6 +126,46 @@ def _running_count() -> int:
         return len(_in_flight)
 
 
+def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
+    """The full set of GPU pids this worker owns, for NVML foreign-VRAM exclusion.
+
+    `tracked_pids` holds the single pid this worker Popen'd. That pid is the
+    job's top-level process, but a GPU job's CUDA contexts can live in FORKED
+    CHILDREN under different pids — DDP/accelerate/dataloader workers, or a
+    bash -c that spawns the trainer. NVML reports whichever pid actually holds
+    the VRAM, so excluding only `tracked_pids` mis-counts the worker's OWN
+    children as foreign/unregistered VRAM. (Verified on an RTX 5090: a parent
+    that forks a child holding the CUDA context shows NVML reporting the child
+    pid, which is NOT proc.pid but IS in the scope cgroup.procs.)
+
+    The scope cgroup is the true ownership boundary — every pid the job spawned
+    lives in it (same model the cancel/reap paths use via cgroup_walk). So the
+    owned set is `tracked_pids` unioned with the live pids in every in-flight
+    job's scope cgroup. Fast-path / unwrapped jobs have no scope (resolve
+    returns None → contributes nothing) and their real child pid is already in
+    `tracked_pids`, so both cases are covered.
+
+    Best-effort: cgroup reads race with systemd teardown; on any error we fall
+    back to the tracked_pids we already have (never fewer than the old behavior).
+    """
+    owned = set(tracked_pids)
+    if not _REAPER_OK:
+        return owned
+    with _in_flight_lock:
+        job_ids = list(_in_flight.keys())
+    for jid in job_ids:
+        try:
+            scope_path = _cgroup_walk.resolve_user_scope_path(f"jobd-{jid}.scope")
+            if scope_path is not None:
+                owned.update(_cgroup_walk.list_scope_pids(scope_path))
+        except Exception as e:  # best-effort; never block a heartbeat
+            print(
+                f"[worker] cgroup-walk owned-pid resolve failed for job {jid}: {e}",
+                file=sys.stderr,
+            )
+    return owned
+
+
 def _is_solo_in_flight() -> bool:
     """True when at most one job (this one) is registered in flight.
 
@@ -363,7 +403,9 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
     return {
         "host": hostname(),
         "free_vram_gb": free_vram,
-        "unregistered_vram_gb": compute_unregistered_vram(nvidia_processes(), tracked_pids),
+        "unregistered_vram_gb": compute_unregistered_vram(
+            nvidia_processes(), _effective_owned_pids(tracked_pids)
+        ),
         "free_ram_gb": free_ram,
         "idle_cpus": idle_cpus,
         "host_aliases": _configured_aliases(),
@@ -581,20 +623,18 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         except Exception as post_err:
             print(f"[worker] complete POST error: {post_err}", file=sys.stderr)
         return
-    # KNOWN ISSUE (deferred, 2026-05-31): when the job is systemd-scope-wrapped,
-    # `proc.pid` is the systemd-run CLIENT pid, which exits as soon as the scope
-    # is set up (see the scope_unit comments below) — the real workload (and its
-    # CUDA contexts) run inside the jobd-<id>.scope cgroup under DIFFERENT,
-    # untracked pids. So compute_unregistered_vram()/gpu_admission_check(), which
-    # exclude tracked_pids, count this worker's OWN GPU job as "foreign" VRAM,
-    # inflating the heartbeat's unregistered_vram_gb (spurious broker contention
-    # signals) and, at max_concurrent>1, refusing the worker's own second job.
-    # free_vram (from in-flight allocations) is unaffected, so routing stays
-    # correct. Proper fix: track the scope cgroup's live pids (we already resolve
-    # the scope path via cgroup_walk) and exclude those — but verifying that
-    # cgroup-resident pids match NVML's reported GPU pids needs a real CUDA
-    # process in a real systemd scope (real-execution doctrine), so it's deferred
-    # to a dedicated GPU-host pass rather than fixed blind.
+    # `proc.pid` is the job's top-level process (for a scope-wrapped job,
+    # systemd-run --scope exec-replaces into it, so this pid lives in the scope
+    # cgroup — it is NOT a transient client). But a GPU job's CUDA contexts can
+    # live in forked CHILDREN under other pids (DDP/dataloader workers, a
+    # bash -c that spawns the trainer). NVML reports whichever pid holds the
+    # VRAM, so tracking only proc.pid would mis-count the worker's OWN children
+    # as foreign. GPU foreign-VRAM accounting therefore feeds
+    # compute_unregistered_vram / gpu_admission_check `_effective_owned_pids()`,
+    # which unions tracked_pids with the live pids in each in-flight job's scope
+    # cgroup. Without it, a multi-process GPU job inflated unregistered_vram_gb
+    # (spurious contention) and, at max_concurrent>1, made the worker refuse its
+    # own second job. (RTX 5090 verified, 2026-06-01.)
     tracked_pids.add(proc.pid)
     # Tell the broker the subprocess is live: assigned -> running. Best-effort:
     # if the POST fails the job still runs and /complete will land the terminal
@@ -992,7 +1032,7 @@ def main():
                     _dispatch(job)
                     continue
                 required_gb = effective_vram_request_gb_from_job(job)
-                admission = gpu_admission_check(required_gb, tracked_pids)
+                admission = gpu_admission_check(required_gb, _effective_owned_pids(tracked_pids))
                 if admission["blocked"]:
                     job_id = job["id"]
                     print(

@@ -4,6 +4,10 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — Worker's own multi-process GPU job mis-counted as foreign VRAM
+
+- **GPU foreign-VRAM accounting now uses the scope cgroup, not a single pid.** A GPU job's CUDA contexts can live in forked children (DDP / accelerate / dataloader workers, or a `bash -c` that spawns the trainer) under pids different from the one the worker tracked. NVML reports whichever pid holds the VRAM, so the worker counted its _own_ children as foreign — inflating heartbeat `unregistered_vram_gb` (spurious broker contention) and, at `JOBD_WORKER_MAX_CONCURRENT_JOBS>1`, refusing the worker's own second job. `compute_unregistered_vram` and the live admission gate now exclude `_effective_owned_pids()` = the tracked pid unioned with every live pid in each in-flight job's `jobd-<id>.scope` cgroup (the same ownership boundary the cancel/reap paths already use). Verified on an RTX 5090: a parent that forks a CUDA-holding child shows NVML reporting the child pid, which is absent from the tracked set but present in `cgroup.procs`.
+
 ### Added — Multislotting observability
 
 - **Slot usage in `job workers`.** Each worker's heartbeat now carries `max_concurrent` (its `JOBD_WORKER_MAX_CONCURRENT_JOBS`) and `running` (live in-flight job count), persisted on the worker row (additive migration) and surfaced on `WorkerInfo` / `job workers` as `running`/`max_concurrent`. Pre-field workers read as `1`/`0`. Lets you see at a glance how full each worker's slots are when bin-packing CPU + GPU jobs.

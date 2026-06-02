@@ -1034,6 +1034,69 @@ def test_resource_snapshot_reports_slot_usage(monkeypatch):
         _reset_in_flight()
 
 
+def test_effective_owned_pids_unions_scope_cgroup_pids(tmp_path, monkeypatch):
+    """A scope-wrapped job's real CUDA pids live in its cgroup, not in
+    tracked_pids (which holds the systemd-run client pid). The owned set must
+    union both — read from a real cgroup.procs file."""
+    _reset_in_flight()
+    try:
+        scope_dir = tmp_path / "jobd-9300.scope"
+        scope_dir.mkdir()
+        (scope_dir / "cgroup.procs").write_text("4242\n4243\n")
+        monkeypatch.setattr(job_worker, "_REAPER_OK", True)
+        monkeypatch.setattr(
+            job_worker._cgroup_walk,
+            "resolve_user_scope_path",
+            lambda unit: scope_dir if unit == "jobd-9300.scope" else None,
+        )
+        job_worker._register_in_flight({"id": 9300, "vram_gb": 8, "ram_gb": 0, "cpus": 0})
+        # 999 = the systemd-run client pid we Popen'd; 4242/4243 = real workload.
+        assert job_worker._effective_owned_pids({999}) == {999, 4242, 4243}
+    finally:
+        _reset_in_flight()
+
+
+def test_effective_owned_pids_no_scope_is_just_tracked(monkeypatch):
+    """Fast-path / unwrapped jobs have no scope cgroup (resolve → None); the
+    owned set is then exactly tracked_pids (the real child is already there)."""
+    _reset_in_flight()
+    try:
+        monkeypatch.setattr(job_worker, "_REAPER_OK", True)
+        monkeypatch.setattr(job_worker._cgroup_walk, "resolve_user_scope_path", lambda unit: None)
+        job_worker._register_in_flight({"id": 9301, "vram_gb": 0, "ram_gb": 0, "cpus": 0})
+        assert job_worker._effective_owned_pids({777}) == {777}
+    finally:
+        _reset_in_flight()
+
+
+def test_own_scope_job_not_counted_as_foreign_vram(tmp_path, monkeypatch):
+    """The P3.3 bug: NVML reports a forked-child pid (inside the scope cgroup)
+    holding the VRAM, but tracked_pids only has the job's top-level pid — so the
+    worker's OWN child was mis-counted as foreign/unregistered. With the
+    effective-owned-pids union (cgroup is the ownership boundary) it reads as 0
+    unregistered. RTX 5090 real-exec confirmed NVML reports the child pid."""
+    _reset_in_flight()
+    try:
+        scope_dir = tmp_path / "jobd-9302.scope"
+        scope_dir.mkdir()
+        (scope_dir / "cgroup.procs").write_text("5000\n")  # the real CUDA pid
+        monkeypatch.setattr(job_worker, "_REAPER_OK", True)
+        monkeypatch.setattr(
+            job_worker._cgroup_walk,
+            "resolve_user_scope_path",
+            lambda unit: scope_dir if unit == "jobd-9302.scope" else None,
+        )
+        monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [(5000, 8192)])
+        monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 24.0)
+        job_worker._register_in_flight({"id": 9302, "vram_gb": 8, "ram_gb": 0, "cpus": 0})
+        # tracked_pids holds only the top-level pid 999; the forked CUDA child
+        # (5000) is owned via the cgroup, so it is NOT foreign.
+        snap = job_worker.resource_snapshot({999})
+        assert snap["unregistered_vram_gb"] == 0.0
+    finally:
+        _reset_in_flight()
+
+
 def test_is_solo_in_flight_gates_reparented_orphan_sweep():
     """P3.5: the reparented-orphan /proc sweep must only run when this is the
     sole in-flight job. With a concurrent job registered, the global sweep
