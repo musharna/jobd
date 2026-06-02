@@ -81,14 +81,12 @@ systemctl --user start jobd-broker
 Per-job logs live under `JOBD_LOGS_DIR` and the event stream in
 `events.jsonl`; back those up too if you need an audit trail across a rebuild.
 
-## Known issues
+### Event-stream retention
 
-- **A GPU worker may report its own running job as "unregistered" (foreign)
-  VRAM.** For systemd-scope-wrapped jobs the worker tracks the `systemd-run`
-  client pid rather than the in-scope workload pid, so a worker's own GPU job
-  inflates the heartbeat's `unregistered_vram_gb` and can trigger spurious
-  submit-time contention warnings. This is a reporting artifact only — the
-  routing-critical `free_vram` figure is computed from in-flight allocations and
-  stays correct, so jobs still place properly. At `JOBD_WORKER_MAX_CONCURRENT_JOBS
-  > 1` it can also make a worker refuse its own second GPU job. Fix is tracked
-  > for a dedicated GPU-host pass.
+`events.jsonl` is size-rotated: when it crosses `JOBD_EVENTS_MAX_BYTES`
+(default 50 MB) the broker moves it to `events.jsonl.1` (one backup, overwriting
+any prior one) and starts a fresh file. Total on-disk retention is therefore
+~2× the threshold; `job audit` / `GET /events` read both files, so a query
+spanning a rotation still returns a continuous history within that window. Raise
+`JOBD_EVENTS_MAX_BYTES` if you need a longer audit trail on the broker itself,
+or back the files up out-of-band for unbounded history.

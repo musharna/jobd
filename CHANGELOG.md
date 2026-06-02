@@ -2,6 +2,17 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added — events.jsonl rotation + bounded reverse-read
+
+- **Size-based rotation.** The broker's `events.jsonl` is rotated to `events.jsonl.1` (one backup, overwriting any prior) once it crosses `JOBD_EVENTS_MAX_BYTES` (default 50 MB), bounding on-disk retention to ~2× the threshold. `job audit` / `GET /events` read both files, so a query spanning a rotation returns continuous history within the window. New `jobd.events` module is the single write choke-point (serialized by a lock so a concurrent rotate+append can't race).
+- **Bounded reverse-read.** `GET /events` now reads newest→oldest and, with a `--since` cutoff, stops at the first row older than it instead of scanning the whole file — events are append-ordered by the broker's server-side timestamp, so the early-stop is exact. Output order, filters, and `limit` semantics are unchanged.
+
+### Fixed
+
+- **Removed a stale runbook "Known issue"** describing the self-GPU-as-foreign-VRAM reporting bug, which was fixed in 0.3.0.
+
 ## [0.3.0] — 2026-06-01
 
 ### Fixed — Worker's own multi-process GPU job mis-counted as foreign VRAM

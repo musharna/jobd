@@ -20,6 +20,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from jobd import __version__
+from jobd import events as _events
 from jobd.arrays import index_subs, render_cmd, render_env, sweep_member_subs
 from jobd.auth import install_tailnet_acl, require_token
 from sqlalchemy import create_engine, event, select
@@ -95,8 +96,6 @@ _UNMATCHEABLE_WARNING_PREFIX = "no matching worker —"
 _BLOCKED_WARNING_PREFIX = "queue-age "
 _AUTO_PREEMPT_WARNING_PREFIX = "auto-preempted in favor of job "
 
-_EVENTS_FILENAME = "events.jsonl"
-
 _SINCE_RELATIVE_RE = re.compile(r"^(\d+)([hdw])$")
 
 
@@ -154,8 +153,7 @@ def _emit_event(
         "payload": payload,
     }
     try:
-        with (logs_dir / _EVENTS_FILENAME).open("a") as f:
-            f.write(json.dumps(row, default=str) + "\n")
+        _events.append_event(logs_dir, row)
     except Exception as e:
         log.warning("event emit failed (%s): %s", event, e)
 
@@ -1160,47 +1158,23 @@ def build_app(
         """
         limit = max(1, min(10000, int(limit)))
         cutoff = _parse_since(since) if since else None
-        out: list[dict] = []
-        skipped_legacy = 0
-        events_path = logs_dir / _EVENTS_FILENAME
-        if not events_path.exists():
-            return []
-        with events_path.open() as f:
-            for raw in f:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    row = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if "source" not in row:
-                    skipped_legacy += 1
-                    continue
-                if cutoff is not None:
-                    ts_raw = row.get("ts")
-                    if not isinstance(ts_raw, str):
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=UTC)
-                    if ts < cutoff:
-                        continue
-                if project is not None and row.get("project") != project:
-                    continue
-                if event is not None and row.get("event") != event:
-                    continue
-                if job_id is not None and row.get("job_id") != job_id:
-                    continue
-                if source is not None and row.get("source") != source:
-                    continue
-                out.append(row)
-        if skipped_legacy:
-            log.info("get_events skipped %d legacy (pre-schema-v2) rows", skipped_legacy)
-        return out[-limit:]
+
+        def _match(row: dict) -> bool:
+            # Rows missing `source` are legacy (pre-schema-v2) — excluded, same
+            # as before. The reverse-reader handles the ts/cutoff early-stop.
+            if "source" not in row:
+                return False
+            if project is not None and row.get("project") != project:
+                return False
+            if event is not None and row.get("event") != event:
+                return False
+            if job_id is not None and row.get("job_id") != job_id:
+                return False
+            if source is not None and row.get("source") != source:
+                return False
+            return True
+
+        return _events.read_events(logs_dir, match=_match, cutoff=cutoff, limit=limit)
 
     @app.get("/projects")
     def list_projects():
