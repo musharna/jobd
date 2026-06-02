@@ -90,6 +90,12 @@ OFFLINE_AFTER_SECONDS = 120
 # tune for heartbeat cadence.
 STALE_WORKER_THRESHOLD_S_DEFAULT = 60
 SWEEP_INTERVAL_SECONDS = 30
+# Job/log retention: terminal jobs (and their per-job .log files) whose
+# finished_at is older than this many days are pruned by the sweeper. 0
+# (default) keeps history forever — opt-in so existing deployments never
+# silently lose job records. Override via JOBD_JOB_RETENTION_DAYS. Bounds
+# jobs-table + log-dir growth; events.jsonl is bounded separately by rotation.
+JOB_RETENTION_DAYS_DEFAULT = 0
 # /next-job long-poll: a waiting worker re-attempts the pick at least this often
 # even with no wake, so a missed wake site costs at most this much latency (not
 # the full wait_s). Small enough to be a safe backstop, large enough that an
@@ -1380,6 +1386,63 @@ def build_app(
             submit_warning=warning,
         )
 
+    def _prune_old_jobs(now: datetime | None = None) -> int:
+        """Delete terminal jobs and their per-job .log files whose ``finished_at``
+        is older than ``JOBD_JOB_RETENTION_DAYS``. Returns the count pruned; 0
+        days (the default) disables pruning entirely — opt-in so an existing
+        deployment never silently loses history.
+
+        Keeps the jobs table and log dir bounded by the retention window on a
+        long-running broker (events.jsonl is bounded separately by size
+        rotation). Freed SQLite pages are reused under WAL, so the DB file stays
+        bounded without a global-locking VACUUM. Removing old terminal rows is
+        safe for any still-pending dependents: ``_deps_satisfied`` already treats
+        a pruned parent as satisfied.
+        """
+        raw = os.environ.get("JOBD_JOB_RETENTION_DAYS", "").strip()
+        try:
+            retention_days = int(raw) if raw else JOB_RETENTION_DAYS_DEFAULT
+        except ValueError:
+            retention_days = JOB_RETENTION_DAYS_DEFAULT
+        if retention_days <= 0:
+            return 0
+        if now is None:
+            now = datetime.now(UTC).replace(tzinfo=None)
+        cutoff = now - timedelta(days=retention_days)
+        terminal = [s.value for s in TERMINAL_STATES]
+        with SessionLocal() as session:
+            pruned_ids = list(
+                session.execute(
+                    select(Job.id).where(
+                        Job.state.in_(terminal),
+                        Job.finished_at.is_not(None),
+                        Job.finished_at < cutoff,
+                    )
+                ).scalars()
+            )
+            if not pruned_ids:
+                return 0
+            session.execute(Job.__table__.delete().where(Job.id.in_(pruned_ids)))
+            session.commit()
+        # Unlink each per-job .log AFTER the rows are gone: a leftover log for a
+        # deleted row is harmless disk, whereas deleting the log of a row that
+        # survived (had the delete failed) would 404 a live `job output`.
+        for jid in pruned_ids:
+            try:
+                (logs_dir / f"{jid}.log").unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning("retention: could not unlink %s.log: %s", jid, e)
+        _emit_event(
+            logs_dir,
+            "jobs_pruned",
+            source="broker",
+            count=len(pruned_ids),
+            retention_days=retention_days,
+        )
+        return len(pruned_ids)
+
     def _sweep_once():
         """One pass: reclaim orphans, mark offline workers."""
         # SQLite stores datetimes as naive UTC; compare naive-to-naive.
@@ -1686,8 +1749,12 @@ def build_app(
                     j.warning_at = None
             session.commit()
 
+        # Retention prune (own session, opt-in via JOBD_JOB_RETENTION_DAYS).
+        _prune_old_jobs(now)
+
     # Expose as test seams at module scope
     globals()["_sweep_once"] = _sweep_once
+    globals()["_prune_old_jobs"] = _prune_old_jobs
     globals()["_engine_for_testing"] = lambda: engine
 
     return app
