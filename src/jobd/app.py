@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -88,6 +90,11 @@ OFFLINE_AFTER_SECONDS = 120
 # tune for heartbeat cadence.
 STALE_WORKER_THRESHOLD_S_DEFAULT = 60
 SWEEP_INTERVAL_SECONDS = 30
+# /next-job long-poll: a waiting worker re-attempts the pick at least this often
+# even with no wake, so a missed wake site costs at most this much latency (not
+# the full wait_s). Small enough to be a safe backstop, large enough that an
+# idle worker held on the condition isn't busy-querying.
+_LONGPOLL_RECHECK_S = 10.0
 UNMATCHEABLE_THRESHOLD_SECONDS = 60
 QUEUE_BLOCKED_THRESHOLD_SECONDS = 300  # 5 min: above this, surface load-blocker
 AUTO_PREEMPT_MIN_RUNTIME_SECONDS = 300  # don't auto-preempt jobs that just started
@@ -229,6 +236,20 @@ def build_app(
     }
     app.state.shared = state
     app.state.SessionLocal = SessionLocal
+
+    # Server-side long-poll wake signal. /next-job with wait_s>0 blocks on this
+    # condition until a job may have become dispatchable (submit / terminal
+    # transition / requeue) or its deadline elapses, instead of returning
+    # instantly and forcing the worker to re-poll every 2s. notify_all is cheap
+    # and spurious wakes are harmless (the waiter just re-runs the pick and
+    # re-waits), so we wake liberally on any mutation that could newly satisfy a
+    # match. A bounded internal recheck (_LONGPOLL_RECHECK_S) backstops any wake
+    # site we miss, capping worst-case dispatch latency without a network poll.
+    _job_wake = threading.Condition()
+
+    def _wake_dispatchers() -> None:
+        with _job_wake:
+            _job_wake.notify_all()
 
     @app.get("/health")
     def health():
@@ -512,6 +533,8 @@ def build_app(
                         warning_text=warning_text,
                     )
 
+            # New queued job(s) — wake any worker long-polling /next-job.
+            _wake_dispatchers()
             if is_array:
                 return {
                     "array_id": array_id,
@@ -659,6 +682,8 @@ def build_app(
                 termination_reason=job.termination_reason,
                 worker=job.worker,
             )
+            # Terminal transition frees a slot and may unblock dependents — wake.
+            _wake_dispatchers()
             return _to_info(job)
 
     @app.post("/jobs/{job_id}/cancel", response_model=JobInfo)
@@ -692,6 +717,8 @@ def build_app(
                     project=job.project,
                     **cancel_event_kw,
                 )
+                # A cancel can unblock depends_on_any_exit dependents — wake.
+                _wake_dispatchers()
             return _to_info(job)
 
     @app.post("/jobs/{job_id}/preempt", response_model=JobInfo)
@@ -866,6 +893,8 @@ def build_app(
                 foreign_pids=list(payload.foreign_pids),
                 foreign_vram_gb=payload.foreign_vram_gb,
             )
+            # Job is back in QUEUED — wake another worker to re-route it.
+            _wake_dispatchers()
             session.refresh(job)
             return _to_info(job)
 
@@ -1030,95 +1059,113 @@ def build_app(
     def next_job(q: NextJobQuery):
         from jobd.matcher import pick_next_job
 
-        with SessionLocal() as session:
-            all_queued = (
-                session.execute(select(Job).where(Job.state == JobState.QUEUED)).scalars().all()
-            )
-            queued = [j for j in all_queued if _deps_satisfied(j, session)]
-            worker_row = session.execute(
-                select(Worker).where(Worker.host == q.host)
-            ).scalar_one_or_none()
-            aliases: list[str] = ["any", "any-gpu"] if q.free_vram_gb > 0 else ["any"]
-            arch = q.arch
-            os_ = q.os
-            gpu = q.gpu or q.free_vram_gb > 0
-            tags: list[str] = list(q.tags)
-            mount_roots: list[str] = list(q.mount_roots)
-            if worker_row is not None:
-                aliases = json.loads(worker_row.host_aliases_json)
-                arch = worker_row.arch
-                os_ = worker_row.os
-                gpu = worker_row.gpu
-                tags = json.loads(worker_row.tags_json)
-                mount_roots = json.loads(worker_row.mount_roots_json or "[]")
-            # Filter out jobs whose cwd can't exist on this worker. Non-empty
-            # mount_roots is the signal that the worker reported — older
-            # workers that don't advertise roots get the old behavior (all
-            # jobs eligible).
-            if mount_roots:
-                queued = [j for j in queued if any(j.cwd.startswith(r) for r in mount_roots)]
-            w = WorkerSnapshot(
-                host=q.host,
-                host_aliases=aliases,
-                free_vram_gb=q.free_vram_gb,
-                unregistered_vram_gb=q.unregistered_vram_gb,
-                free_ram_gb=q.free_ram_gb,
-                idle_cpus=q.idle_cpus,
-                arch=arch,
-                os=os_,
-                gpu=gpu,
-                tags=tags,
-            )
-            pick = pick_next_job(queued, w)
-            if pick is None:
-                from jobd.matcher import explain_skip
+        def _attempt() -> JobInfo | None:
+            """One claim attempt against the live queue. Returns the claimed job
+            or None (no match OR lost race — both mean 'nothing for you now')."""
+            with SessionLocal() as session:
+                all_queued = (
+                    session.execute(select(Job).where(Job.state == JobState.QUEUED)).scalars().all()
+                )
+                queued = [j for j in all_queued if _deps_satisfied(j, session)]
+                worker_row = session.execute(
+                    select(Worker).where(Worker.host == q.host)
+                ).scalar_one_or_none()
+                aliases: list[str] = ["any", "any-gpu"] if q.free_vram_gb > 0 else ["any"]
+                arch = q.arch
+                os_ = q.os
+                gpu = q.gpu or q.free_vram_gb > 0
+                tags: list[str] = list(q.tags)
+                mount_roots: list[str] = list(q.mount_roots)
+                if worker_row is not None:
+                    aliases = json.loads(worker_row.host_aliases_json)
+                    arch = worker_row.arch
+                    os_ = worker_row.os
+                    gpu = worker_row.gpu
+                    tags = json.loads(worker_row.tags_json)
+                    mount_roots = json.loads(worker_row.mount_roots_json or "[]")
+                # Filter out jobs whose cwd can't exist on this worker. Non-empty
+                # mount_roots is the signal that the worker reported — older
+                # workers that don't advertise roots get the old behavior (all
+                # jobs eligible).
+                if mount_roots:
+                    queued = [j for j in queued if any(j.cwd.startswith(r) for r in mount_roots)]
+                w = WorkerSnapshot(
+                    host=q.host,
+                    host_aliases=aliases,
+                    free_vram_gb=q.free_vram_gb,
+                    unregistered_vram_gb=q.unregistered_vram_gb,
+                    free_ram_gb=q.free_ram_gb,
+                    idle_cpus=q.idle_cpus,
+                    arch=arch,
+                    os=os_,
+                    gpu=gpu,
+                    tags=tags,
+                )
+                pick = pick_next_job(queued, w)
+                if pick is None:
+                    from jobd.matcher import explain_skip
 
-                skips = explain_skip(queued, w)
-                skip_state: dict[int, str] = state["dispatch_skip_state"]
-                queued_by_id = {j.id: j for j in queued}
-                for job_id, reason in skips:
-                    if skip_state.get(job_id) != reason:
-                        skip_state[job_id] = reason
-                        _emit_event(
-                            logs_dir,
-                            "dispatch_skip",
-                            source="broker",
-                            job_id=job_id,
-                            project=queued_by_id[job_id].project,
-                            worker=q.host,
-                            reason=reason,
-                        )
-                # Drop dedup entries for jobs no longer in the queue (so a
-                # job that ran or was cancelled doesn't leak memory, and a
-                # resubmit gets a fresh slot).
-                for stale in [k for k in skip_state if k not in queued_by_id]:
-                    del skip_state[stale]
+                    skips = explain_skip(queued, w)
+                    skip_state: dict[int, str] = state["dispatch_skip_state"]
+                    queued_by_id = {j.id: j for j in queued}
+                    for job_id, reason in skips:
+                        if skip_state.get(job_id) != reason:
+                            skip_state[job_id] = reason
+                            _emit_event(
+                                logs_dir,
+                                "dispatch_skip",
+                                source="broker",
+                                job_id=job_id,
+                                project=queued_by_id[job_id].project,
+                                worker=q.host,
+                                reason=reason,
+                            )
+                    # Drop dedup entries for jobs no longer in the queue (so a
+                    # job that ran or was cancelled doesn't leak memory, and a
+                    # resubmit gets a fresh slot).
+                    for stale in [k for k in skip_state if k not in queued_by_id]:
+                        del skip_state[stale]
+                    return None
+                # Atomic claim: only one worker can transition queued -> assigned
+                result = session.execute(
+                    Job.__table__.update()
+                    .where(Job.id == pick.id, Job.state == JobState.QUEUED)
+                    .values(state=JobState.ASSIGNED, worker=q.host, started_at=datetime.now(UTC))
+                )
+                session.commit()
+                if result.rowcount == 0:
+                    return None  # lost race; re-attempt / re-wait
+                session.refresh(pick)
+                # SQLite stores naive UTC; mirror the sweeper pattern (line ~999)
+                # so the subtract is naive-to-naive.
+                queue_wait_s = (
+                    datetime.now(UTC).replace(tzinfo=None) - pick.submitted_at
+                ).total_seconds()
+                _emit_event(
+                    logs_dir,
+                    "job_dispatched",
+                    source="broker",
+                    job_id=pick.id,
+                    project=pick.project,
+                    worker=q.host,
+                    queue_wait_s=round(queue_wait_s, 2),
+                )
+                return _to_info(pick)
+
+        # Long-poll: hold the request up to q.wait_s, re-attempting whenever a
+        # dispatcher wake fires (or every _LONGPOLL_RECHECK_S as a backstop for
+        # any wake site we miss). wait_s=0 → single attempt, legacy behavior.
+        wait_s = max(0.0, float(q.wait_s or 0.0))
+        deadline = time.monotonic() + wait_s
+        while True:
+            info = _attempt()
+            if info is not None:
+                return info
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
                 return None
-            # Atomic claim: only one worker can transition queued -> assigned
-            result = session.execute(
-                Job.__table__.update()
-                .where(Job.id == pick.id, Job.state == JobState.QUEUED)
-                .values(state=JobState.ASSIGNED, worker=q.host, started_at=datetime.now(UTC))
-            )
-            session.commit()
-            if result.rowcount == 0:
-                return None  # lost race; next poll
-            session.refresh(pick)
-            # SQLite stores naive UTC; mirror the sweeper pattern (line ~999)
-            # so the subtract is naive-to-naive.
-            queue_wait_s = (
-                datetime.now(UTC).replace(tzinfo=None) - pick.submitted_at
-            ).total_seconds()
-            _emit_event(
-                logs_dir,
-                "job_dispatched",
-                source="broker",
-                job_id=pick.id,
-                project=pick.project,
-                worker=q.host,
-                queue_wait_s=round(queue_wait_s, 2),
-            )
-            return _to_info(pick)
+            with _job_wake:
+                _job_wake.wait(timeout=min(remaining, _LONGPOLL_RECHECK_S))
 
     @app.post("/events", status_code=204)
     def ingest_event(body: EventIngest):
@@ -1487,6 +1534,9 @@ def build_app(
                     orphan_records.append((j.id, j.project, j.worker, last_hb))
 
             session.commit()
+            # Reclaims/requeues and orphan cascades above may have made jobs
+            # dispatchable — wake any long-polling workers.
+            _wake_dispatchers()
             for jid, proj, wkr, last_hb in orphan_records:
                 _emit_event(
                     logs_dir,

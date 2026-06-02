@@ -1013,6 +1013,13 @@ def main():
                 continue
             snap = resource_snapshot(tracked_pids)
             q = {k: v for k, v in snap.items() if k != "host_aliases"}
+            # Long-poll: ask the broker to hold this request until a job is
+            # dispatchable or POLL_TIMEOUT_S elapses, instead of returning
+            # instantly and forcing a 2s re-poll. Old brokers ignore the extra
+            # field (Pydantic drops unknown keys) and return immediately — the
+            # elapsed-time check on the no-job path below restores the backoff.
+            q["wait_s"] = POLL_TIMEOUT_S
+            t_poll = time.monotonic()
             r = client.post("/next-job", json=q, timeout=POLL_TIMEOUT_S + 5)
             if r.status_code == 200 and r.json() is not None:
                 job = r.json()
@@ -1066,7 +1073,12 @@ def main():
                     continue
                 _dispatch(job)
             else:
-                time.sleep(2)
+                # No job. A long-polling broker already held us ~POLL_TIMEOUT_S,
+                # so re-poll immediately; a fast null (wait_s=0 path, a non-200,
+                # or an old broker ignoring wait_s) gets the 2s backoff so we
+                # don't hot-loop the broker.
+                if time.monotonic() - t_poll < POLL_TIMEOUT_S / 2:
+                    time.sleep(2)
             job_threads = [t for t in job_threads if t.is_alive()]
         except Exception as e:
             print(f"[worker] poll error: {e}", file=sys.stderr)

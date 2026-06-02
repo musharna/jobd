@@ -4,6 +4,11 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — server-side long-poll for `/next-job`
+
+- **The broker now holds `/next-job` until a job is dispatchable.** Previously the endpoint returned `null` instantly and the worker re-polled every 2s, so each idle worker drove ~15× the intended request rate (a full queued-scan + per-dep lookups every 2s) even with nothing to do — the worker's own 30s client timeout showed a long-poll was the original design intent, never built. The endpoint now blocks up to `wait_s` (the worker sends its `POLL_TIMEOUT_S`, 30s), re-attempting whenever a `/submit`, terminal transition, or requeue wakes it (a `threading.Condition`), and otherwise rechecking at most every 10s as a backstop. Result: an idle worker makes ~0 requests while waiting, and a freshly submitted job dispatches near-instantly instead of after up to 2s.
+- **Backward-compatible.** `wait_s` defaults to `0` (legacy instant return), so older workers — and any client that omits it — are unaffected. A worker talking to an older broker that ignores `wait_s` gets an immediate `null`; the worker detects the fast return (elapsed < half its timeout) and keeps the 2s backoff, so it never hot-loops.
+
 ### Added — events.jsonl rotation + bounded reverse-read
 
 - **Size-based rotation.** The broker's `events.jsonl` is rotated to `events.jsonl.1` (one backup, overwriting any prior) once it crosses `JOBD_EVENTS_MAX_BYTES` (default 50 MB), bounding on-disk retention to ~2× the threshold. `job audit` / `GET /events` read both files, so a query spanning a rotation returns continuous history within the window. New `jobd.events` module is the single write choke-point (serialized by a lock so a concurrent rotate+append can't race).
