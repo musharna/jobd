@@ -203,6 +203,16 @@ The matcher is resource-aware, so this is **not** blind N-up oversubscription. E
 
 Set the limit per worker from its environment (systemd unit, shell, or `worker.yaml` env) — it's a worker-local knob, not a broker setting.
 
+## Retention
+
+By default jobd **keeps every job record and `.log` file forever** — history is never lost. On a long-running broker, opt into pruning:
+
+```bash
+JOBD_JOB_RETENTION_DAYS=30 jobd   # delete terminal jobs + their logs after 30 days
+```
+
+The sweeper deletes jobs in a terminal state whose `finished_at` is older than the horizon, unlinks their per-job `.log`, and emits a `jobs_pruned` event. Freed SQLite pages are reused under WAL, so the DB file stays bounded without a global-locking `VACUUM`. The default (`0`) keeps everything; pruning old terminal parents is safe for any still-pending dependents.
+
 ## Security
 
 The broker has **no TCP-layer auth beyond a shared bearer token**, so it is meant to run on a trusted network (loopback or a Tailscale tailnet), never on a public interface. Two stacked controls:
