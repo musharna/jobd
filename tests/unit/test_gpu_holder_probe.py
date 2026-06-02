@@ -108,6 +108,20 @@ def test_fuser_nvidia_pids_parses_output(monkeypatch):
     monkeypatch.setattr(gpu_holder_probe.subprocess, "run", lambda *a, **kw: _R())
     # Force the device-list to be non-empty so we attempt parsing.
     monkeypatch.setattr(gpu_holder_probe, "_nvidia_dev_nodes", lambda: ["/dev/nvidia0"])
+    # Isolate the PARSER from the live /proc second-pass filter: force every
+    # /proc/<pid>/comm read to miss so the function returns the raw parsed set.
+    # Without this the test is flaky — it silently drops a synthetic pid whenever
+    # that integer happens to be a live process on the host (real-execution leak).
+    import builtins
+
+    _real_open = builtins.open
+
+    def _no_proc(path, *a, **k):
+        if str(path).startswith("/proc/"):
+            raise FileNotFoundError(path)
+        return _real_open(path, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", _no_proc)
     pids = gpu_holder_probe._fuser_nvidia_pids()
     assert 12345 in pids
     assert 67890 in pids
