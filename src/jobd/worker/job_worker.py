@@ -604,7 +604,11 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=1,
+            # Unbuffered: we stream the pipe with explicit read(4096) chunks below.
+            # bufsize=1 (line buffering) is invalid in binary mode (text=False) — it
+            # warns and falls back to a BufferedReader whose read(4096) blocks until
+            # 4096 bytes accumulate, delaying log streaming. 0 = prompt chunk reads.
+            bufsize=0,
             text=False,
         )
     except (OSError, FileNotFoundError) as e:

@@ -57,6 +57,16 @@ systemctl --user restart jobd-broker
 job ping        # confirm the new version is serving
 ```
 
+**Broker crash-loops on `attempt to write a readonly database`?** The image runs as a
+non-root user (uid 10001); a bind-mounted `data/`/`logs/` owned by a different host uid
+isn't writable by it. Fix: either `chown -R 10001:10001 ./data ./logs`, or run the
+container as your host user (`user: "$(id -u):$(id -g)"` in compose — keeps the files
+host-owned for backups). See the commented `user:` block in `docker-compose.yml`.
+
+**systemd worker fails `can't open file '.../worker/job_worker.py'`?** The unit's
+`ExecStart` hardcodes a source path that a refactor moved. Point it at the installed
+console script instead — `ExecStart=…/.venv/bin/jobd-worker` — which is layout-stable.
+
 ## Rotate the auth token
 
 See [security.md](security.md) — rotation is a coordinated push (broker first,
