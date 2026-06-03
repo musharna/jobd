@@ -5,7 +5,7 @@
 [![CI](https://github.com/musharna/jobd/actions/workflows/ci.yml/badge.svg)](https://github.com/musharna/jobd/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/jobd)](https://pypi.org/project/jobd/)
 ![Python](https://img.shields.io/pypi/pyversions/jobd)
-[![Glama](https://glama.ai/mcp/servers/musharna/jobd/badge)](https://glama.ai/mcp/servers/musharna/jobd)
+<a href="https://glama.ai/mcp/servers/musharna/jobd"><img height="20" alt="Glama" src="https://glama.ai/mcp/servers/musharna/jobd/badge"></a>
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A self-hostable, GPU-aware job broker for your own machines — with native MCP/agent integration.**
