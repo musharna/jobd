@@ -4,6 +4,15 @@ services:
     image: jobd:latest
     container_name: jobd
     restart: unless-stopped
+    # PERMISSIONS: the image runs as a non-root user (uid 10001, see Dockerfile).
+    # The bind-mounted ./data + ./logs below must be WRITABLE by that user, or the
+    # broker crash-loops on "sqlite3.OperationalError: attempt to write a readonly
+    # database". Two fixes — pick one:
+    #   (a) chown the dirs to the image user:  chown -R 10001:10001 ./data ./logs
+    #   (b) run the container as your host user so the files stay host-owned (nicer
+    #       for backups/log-tailing): uncomment the line below, replacing 1000:1000
+    #       with your own `id -u`:`id -g`.
+    # user: "1000:1000"
     # SECURITY: host networking + JOBD_HOST binding is the access-control model.
     # Docker's default userland-proxy NATs all cross-host inbound source IPs to
     # the bridge gateway, which defeats the source-IP ACL. With network_mode:

@@ -4,6 +4,17 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-06-03
+
+### Fixed
+
+- **Worker no longer warns + buffers job output.** The job subprocess was opened with `bufsize=1` (line buffering) in binary mode (`text=False`), which Python doesn't support — it emitted a `RuntimeWarning` on every job and fell back to a `BufferedReader` whose `read(4096)` blocks until 4096 bytes accumulate, delaying streamed logs. Now `bufsize=0` (unbuffered): the warning is gone and each chunk read returns on first available data, so logs stream promptly.
+- **Docker image now builds.** The Dockerfile only `COPY`ed `pyproject.toml` + `src`, but `pyproject.toml` declares `readme = "README.md"`, which hatchling reads during metadata generation at `pip install .` → build failed with `OSError: Readme file does not exist`. Added `README.md` to the `COPY`. (The public Docker build path isn't exercised by CI, so this was latent.)
+
+### Documentation
+
+- **Non-root image + host-owned bind-mount gotcha.** The image runs as uid 10001; a bind-mounted `data/`/`logs/` owned by a different host uid makes the broker crash-loop on `attempt to write a readonly database`. Documented the two fixes (chown to 10001, or run the container as your host user via `user:`) in `docker-compose.yml` and the runbook, plus a runbook note on repointing a stale worker-unit `ExecStart` at the `jobd-worker` console script.
+
 ## [0.5.1] — 2026-06-02
 
 ### Documentation
