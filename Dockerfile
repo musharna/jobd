@@ -10,7 +10,9 @@ ENV PYTHONUNBUFFERED=1 \
     JOBD_LOGS_DIR=/app/logs \
     JOBD_PORT=8765
 
-COPY pyproject.toml ./
+# README.md is required because pyproject.toml declares `readme = "README.md"`,
+# which hatchling reads during metadata generation at `pip install .`.
+COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install -U pip && pip install .
 
