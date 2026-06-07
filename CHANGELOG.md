@@ -4,6 +4,10 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed
+
+- **mypy is now a blocking CI gate.** Added a `[tool.mypy]` config and dropped `continue-on-error` from the type-check step, so type regressions fail the build. Cleared the pre-existing type debt with real fixes (a `BrokerState` TypedDict, `Literal` resolution-source annotations, `None`-narrowing) and targeted `# type: ignore[attr-defined]` only for genuine SQLAlchemy/mypy false-positives. No runtime change.
+
 ## [0.5.4] — 2026-06-07
 
 ### Fixed

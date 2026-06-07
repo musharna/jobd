@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from jobd.models import JobRequires
 
@@ -36,14 +37,33 @@ class WorkerSnapshot:
 
 
 class QueuedJob(Protocol):
-    id: int
-    priority: int
-    submitted_at: datetime
-    host_pin: str
-    vram_gb: float
-    ram_gb: float
-    cpus: int
-    requires: JobRequires | None
+    # Read-only members (declared as properties) so the protocol stays
+    # covariance-friendly: a concrete row type whose fields are SQLAlchemy
+    # `Mapped[...]` descriptors / a `requires` @property satisfies read-only
+    # access, which a mutable (read-write) protocol attribute would reject
+    # when used as a TypeVar bound or `Sequence[QueuedJob]` element.
+    @property
+    def id(self) -> int: ...
+    @property
+    def priority(self) -> int: ...
+    @property
+    def submitted_at(self) -> datetime: ...
+    @property
+    def host_pin(self) -> str: ...
+    @property
+    def vram_gb(self) -> float: ...
+    @property
+    def ram_gb(self) -> float: ...
+    @property
+    def cpus(self) -> int: ...
+    @property
+    def requires(self) -> JobRequires | None: ...
+
+
+# Bound to the structural protocol so callers passing a concrete row type
+# (e.g. the ORM `Job`) get that same type back from `pick_next_job` rather
+# than the widened `QueuedJob`.
+QueuedJobT = TypeVar("QueuedJobT", bound=QueuedJob)
 
 
 def _selectors_match(req: JobRequires | None, w: WorkerSnapshot) -> bool:
@@ -110,7 +130,7 @@ def fits_on_worker(job: QueuedJob, w: WorkerSnapshot) -> bool:
     return True
 
 
-def explain_skip(jobs: list[QueuedJob], w: WorkerSnapshot) -> list[tuple[int, str]]:
+def explain_skip(jobs: Sequence[QueuedJob], w: WorkerSnapshot) -> list[tuple[int, str]]:
     """For each job that would NOT be picked on `w`, return (job_id, reason).
 
     Reasons are stable strings — public API:
@@ -284,7 +304,7 @@ def gpu_contention_warning(
     return f"GPU contention: all eligible workers saturated — {', '.join(parts)}"
 
 
-def pick_next_job(jobs: list[QueuedJob], w: WorkerSnapshot) -> QueuedJob | None:
+def pick_next_job(jobs: Sequence[QueuedJobT], w: WorkerSnapshot) -> QueuedJobT | None:
     """Highest priority first, FIFO tiebreak. Skip jobs that don't fit."""
     ordered = sorted(jobs, key=lambda j: (-j.priority, j.submitted_at))
     for j in ordered:

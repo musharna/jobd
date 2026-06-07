@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypedDict
 
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -29,6 +30,7 @@ from jobd import events as _events
 from jobd.arrays import index_subs, render_cmd, render_env, sweep_member_subs
 from jobd.auth import install_tailnet_acl, require_token
 from jobd.config import (
+    ClassifierRule,
     ProjectEntry,
     load_classifier_rules,
     load_profiles,
@@ -64,12 +66,30 @@ from jobd.models import (
     JobState,
     JobSubmit,
     NextJobQuery,
+    ProfileSpec,
+    ResolutionSource,
     ResolvedConfig,
     WorkerHeartbeat,
     WorkerInfo,
 )
 
 log = logging.getLogger("jobd")
+
+
+class BrokerState(TypedDict):
+    """Shared, mutable per-broker config + scratch, stored on app.state.shared.
+
+    Typed so the heterogeneous values resolve to their real types instead of
+    the `object` join mypy would otherwise infer from a bare dict literal.
+    """
+
+    projects: dict[str, ProjectEntry]
+    profiles: dict[str, ProfileSpec]
+    classifier: list[ClassifierRule]
+    paths: dict[str, Path]
+    logs_dir: Path
+    dispatch_skip_state: dict[int, str]
+
 
 TERMINAL_STATES = {
     JobState.COMPLETED,
@@ -231,7 +251,7 @@ def build_app(
     logs_dir = Path(logs_path) if logs_path else Path(os.environ.get("JOBD_LOGS_DIR", "./logs"))
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    state = {
+    state: BrokerState = {
         "projects": load_projects(projects_path),
         "profiles": load_profiles(profiles_path),
         "classifier": load_classifier_rules(classifier_path),
@@ -427,7 +447,7 @@ def build_app(
             else:
                 member_subs = None
             is_array = member_subs is not None
-            subs_list = member_subs if is_array else [{}]
+            subs_list = member_subs if member_subs is not None else [{}]
             member_count = len(subs_list)
 
             # Dry-run bail-out:
@@ -1078,7 +1098,7 @@ def build_app(
                 all_queued = (
                     session.execute(select(Job).where(Job.state == JobState.QUEUED)).scalars().all()
                 )
-                queued = [j for j in all_queued if _deps_satisfied(j, session)]
+                queued: list[Job] = [j for j in all_queued if _deps_satisfied(j, session)]
                 worker_row = session.execute(
                     select(Worker).where(Worker.host == q.host)
                 ).scalar_one_or_none()
@@ -1140,12 +1160,12 @@ def build_app(
                     return None
                 # Atomic claim: only one worker can transition queued -> assigned
                 result = session.execute(
-                    Job.__table__.update()
+                    Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
                     .where(Job.id == pick.id, Job.state == JobState.QUEUED)
                     .values(state=JobState.ASSIGNED, worker=q.host, started_at=datetime.now(UTC))
                 )
                 session.commit()
-                if result.rowcount == 0:
+                if result.rowcount == 0:  # type: ignore[attr-defined]  # SQLAlchemy: CursorResult.rowcount
                     return None  # lost race; re-attempt / re-wait
                 session.refresh(pick)
                 # SQLite stores naive UTC; mirror the sweeper pattern (line ~999)
@@ -1287,11 +1307,12 @@ def build_app(
 
         # priority: existing logic (project base + delta).
         priority_value = resolve_priority(state["projects"], req.project, req.priority_delta)
-        priority_source = "cli" if req.priority_delta != 0 else "project_default"
+        priority_source: ResolutionSource = "cli" if req.priority_delta != 0 else "project_default"
         if req.project not in state["projects"]:
             priority_source = "global"
 
         # host_pin
+        host_pin_source: ResolutionSource
         if req.host_pin != "any":
             host_pin_value = req.host_pin
             host_pin_source = "cli"
@@ -1307,6 +1328,7 @@ def build_app(
 
         # max_wall_s / idle_timeout_s — no profile-level default; fall through
         # CLI -> project -> global(None).
+        max_wall_source: ResolutionSource
         if req.max_wall_s is not None:
             max_wall_value = req.max_wall_s
             max_wall_source = "cli"
@@ -1317,6 +1339,7 @@ def build_app(
             max_wall_value = None
             max_wall_source = "global"
 
+        idle_source: ResolutionSource
         if req.idle_timeout_s is not None:
             idle_value = req.idle_timeout_s
             idle_source = "cli"
@@ -1327,6 +1350,7 @@ def build_app(
             idle_value = None
             idle_source = "global"
 
+        ckpt_source: ResolutionSource
         if req.checkpoint_grace_s is not None:
             ckpt_value = req.checkpoint_grace_s
             ckpt_source = "cli"
@@ -1338,6 +1362,7 @@ def build_app(
             ckpt_source = "global"
 
         # preemptible
+        pre_source: ResolutionSource
         if req.preemptible is not None:
             pre_value = req.preemptible
             pre_source = "cli"
@@ -1352,6 +1377,7 @@ def build_app(
             pre_source = "global"
 
         # requires
+        req_source: ResolutionSource
         if req.requires is not None:
             req_value = req.requires.model_dump()
             req_source = "cli"
@@ -1366,6 +1392,7 @@ def build_app(
             req_source = "global"
 
         # escalate_to_arc — only project-default or global today.
+        arc_source: ResolutionSource
         if proj_defaults.escalate_to_arc:
             arc_value = True
             arc_source = "project_default"
@@ -1428,7 +1455,7 @@ def build_app(
             )
             if not pruned_ids:
                 return 0
-            session.execute(Job.__table__.delete().where(Job.id.in_(pruned_ids)))
+            session.execute(Job.__table__.delete().where(Job.id.in_(pruned_ids)))  # type: ignore[attr-defined]  # SQLAlchemy: Table.delete on __table__
             session.commit()
         # Unlink each per-job .log AFTER the rows are gone: a leftover log for a
         # deleted row is harmless disk, whereas deleting the log of a row that
@@ -1837,7 +1864,7 @@ def _projects_to_jsonable(projects: dict[str, ProjectEntry]) -> dict[str, dict]:
     return {name: _entry_to_jsonable(entry) for name, entry in projects.items()}
 
 
-def _persist_projects(state: dict) -> None:
+def _persist_projects(state: BrokerState) -> None:
     """Write the in-memory projects dict back to YAML in the canonical shape.
 
     Round-trip safety: must preserve ``defaults:`` blocks exactly so that a
