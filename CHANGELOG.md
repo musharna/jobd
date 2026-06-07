@@ -4,6 +4,12 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-06-07
+
+### Added
+
+- **Listed on the official MCP registry.** Added `server.json` plus a `publish-registry.yml` workflow that submits it via GitHub Actions OIDC (`mcp-publisher login github-oidc`) on every published release — no stored credentials, mirroring the existing PyPI trusted-publishing. An `mcp-name: io.github.musharna/jobd` marker in the README lets the registry verify the PyPI package belongs to this server. Because the MCP server is the `jobd-mcp` entry point behind the `[mcp]` extra (not the default `jobd` broker entry point), the registry entry runs it as `uvx --from jobd[mcp] jobd-mcp`. Auto-propagates the listing to downstream directories (PulseMCP, etc.). No code or runtime change.
+
 ## [0.5.2] — 2026-06-03
 
 ### Fixed

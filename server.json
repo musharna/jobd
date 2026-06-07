@@ -1,0 +1,48 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.musharna/jobd",
+  "title": "jobd",
+  "description": "Self-hostable GPU-aware job broker: submit, route by VRAM, babysit jobs across machines via MCP.",
+  "websiteUrl": "https://github.com/musharna/jobd",
+  "repository": {
+    "url": "https://github.com/musharna/jobd",
+    "source": "github"
+  },
+  "version": "0.5.3",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "jobd",
+      "version": "0.5.3",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        { "type": "positional", "value": "--from", "valueHint": "from-flag" },
+        {
+          "type": "positional",
+          "value": "jobd[mcp]",
+          "valueHint": "package-with-mcp-extra"
+        },
+        {
+          "type": "positional",
+          "value": "jobd-mcp",
+          "valueHint": "mcp-entry-point"
+        }
+      ],
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "JOBD_URL",
+          "description": "Base URL of the jobd broker the MCP server talks to. Defaults to http://127.0.0.1:8765.",
+          "isRequired": false
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "tool": "manual",
+      "version": "0.5.3"
+    }
+  }
+}
