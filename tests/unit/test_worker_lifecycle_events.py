@@ -79,9 +79,9 @@ def test_distinct_hosts_each_register_once(client, logs_dir):
 
 
 def test_sweep_marks_workers_offline_emits_event(client, logs_dir):
-    import jobd.app as cli_mod
     from sqlalchemy import update
 
+    import jobd.app as cli_mod
     from jobd.db import Worker
 
     client.post("/heartbeat", json=_heartbeat_payload(host="host-a"))
@@ -113,9 +113,9 @@ def test_sweep_marks_workers_offline_emits_event(client, logs_dir):
 
 
 def test_sweep_does_not_re_emit_for_already_offline_worker(client, logs_dir):
-    import jobd.app as cli_mod
     from sqlalchemy import update
 
+    import jobd.app as cli_mod
     from jobd.db import Worker
 
     client.post("/heartbeat", json=_heartbeat_payload(host="host-b"))

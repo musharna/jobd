@@ -14,6 +14,7 @@ cgroup-v2 layout, missing user@.service, etc.) undetected.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -95,15 +96,13 @@ def test_cgroup_walk_finds_and_kills_live_scope_pid():
         )
     finally:
         # Defensive: belt-and-suspenders cleanup if anything escaped.
-        try:
+        with contextlib.suppress(Exception):
             subprocess.run(
                 ["systemctl", "--user", "stop", unit],
                 check=False,
                 capture_output=True,
                 timeout=5,
             )
-        except Exception:
-            pass
         try:
             proc.wait(timeout=5)
         except Exception:

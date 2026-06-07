@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Callable
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import typer
+
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
 
 app = typer.Typer(help="Submit and monitor jobs on jobd.")
@@ -448,7 +449,7 @@ def _worker_health_banner(client: JobdClient) -> None:
     if not workers:
         typer.secho("⚠ no workers registered — nothing will dispatch", fg="yellow")
         return
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     bad: list[str] = []
     for w in workers:
         hb = w.get("last_heartbeat")
@@ -672,7 +673,7 @@ def preempt(job_id: int):
             job = c.preempt(job_id)
         except BrokerRefusal as e:
             typer.secho(f"refused ({e.status_code}): {e.detail}", fg="red", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
         typer.echo(json.dumps(job, default=str))
 
 
@@ -694,7 +695,7 @@ def preempt_blockers(
             r = c.post(f"/jobs/{job_id}/preempt-blockers", params={"force": force})
         except BrokerRefusal as e:
             typer.secho(f"refused ({e.status_code}): {e.detail}", fg="red", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
         body = r.json()
         if body.get("signaled") is None:
             typer.secho(f"no blocker signaled: {body.get('reason')}", fg="yellow")
@@ -825,7 +826,7 @@ def delete_worker(host: str):
             result = c.delete_worker(host)
         except BrokerRefusal as e:
             typer.secho(f"refused ({e.status_code}): {e.detail}", fg="red", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
         typer.echo(json.dumps(result, default=str))
 
 
@@ -938,7 +939,7 @@ def _parse_since(s: str) -> timedelta:
 
 
 def _filter_recent(jobs: list[dict], since: timedelta) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - since
+    cutoff = datetime.now(UTC) - since
     out: list[dict] = []
     for j in jobs:
         ts = j.get("submitted_at")
@@ -949,7 +950,7 @@ def _filter_recent(jobs: list[dict], since: timedelta) -> list[dict]:
         except ValueError:
             continue
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         if dt >= cutoff:
             out.append(j)
     return out

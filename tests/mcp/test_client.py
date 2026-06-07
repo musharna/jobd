@@ -1,7 +1,8 @@
 import httpx
 import pytest
 import respx
-from jobd.client import BrokerUnreachable, BrokerServerError, BrokerRefusal, JobdClient
+
+from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
 
 
 def test_broker_unreachable_is_exception():

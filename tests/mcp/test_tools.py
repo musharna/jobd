@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import httpx
 import respx
+
 from jobd.client import JobdClient
 from jobd.mcp.tools import jobd_submit
 
@@ -447,7 +448,7 @@ def test_jobd_list_summarizes_jobs():
 
 @respx.mock
 def test_jobd_workers_healthy_when_recent_heartbeat():
-    recent = datetime.now(timezone.utc).isoformat()
+    recent = datetime.now(UTC).isoformat()
     respx.get("http://broker.test/workers").mock(
         return_value=httpx.Response(
             200, json={"workers": [{"host": "desktop", "last_heartbeat": recent}]}
@@ -463,7 +464,7 @@ def test_jobd_workers_healthy_when_recent_heartbeat():
 
 @respx.mock
 def test_jobd_workers_degraded_when_stale():
-    old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    old = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     respx.get("http://broker.test/workers").mock(
         return_value=httpx.Response(
             200, json={"workers": [{"host": "desktop", "last_heartbeat": old}]}

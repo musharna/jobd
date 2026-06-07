@@ -1,4 +1,5 @@
 import pytest
+
 from jobd.client import BrokerRefusal
 from jobd.mcp.errors import map_broker_refusal
 

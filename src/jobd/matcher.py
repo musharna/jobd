@@ -8,7 +8,6 @@ from typing import Protocol
 
 from jobd.models import JobRequires
 
-
 SAFETY_MARGIN_VRAM_GB = 1.0
 SAFETY_MARGIN_RAM_GB = 1.0
 OVERSUBSCRIBE_CPU_ALLOWANCE = 2
@@ -58,10 +57,7 @@ def _selectors_match(req: JobRequires | None, w: WorkerSnapshot) -> bool:
     if req.gpu is not None and req.gpu != w.gpu:
         return False
     w_tags = set(w.tags)
-    for t in req.needs:
-        if t not in w_tags:
-            return False
-    return True
+    return all(t in w_tags for t in req.needs)
 
 
 def effective_vram_request_gb(job: QueuedJob) -> float:
@@ -109,7 +105,7 @@ def fits_on_worker(job: QueuedJob, w: WorkerSnapshot) -> bool:
             return False
     if job.ram_gb > w.free_ram_gb - SAFETY_MARGIN_RAM_GB:
         return False
-    if job.cpus > w.idle_cpus + OVERSUBSCRIBE_CPU_ALLOWANCE:
+    if job.cpus > w.idle_cpus + OVERSUBSCRIBE_CPU_ALLOWANCE:  # noqa: SIM103 — parallel guard-clause check
         return False
     return True
 

@@ -1,10 +1,9 @@
 """Tests for YAML config loaders."""
 
-
 from jobd.config import (
-    load_projects,
-    load_profiles,
     load_classifier_rules,
+    load_profiles,
+    load_projects,
     resolve_priority,
     resolve_profile,
 )

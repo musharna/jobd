@@ -254,9 +254,10 @@ def test_delete_worker_409_when_online(client):
 def test_delete_offline_worker_succeeds(client):
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Worker
-    from sqlalchemy import update
 
     client.post(
         "/heartbeat",
@@ -601,8 +602,9 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
     """A job assigned to a worker whose heartbeat went silent >5min must be re-queued."""
     from datetime import UTC, datetime, timedelta
 
-    from jobd import app as app_mod
     from sqlalchemy import update
+
+    from jobd import app as app_mod
 
     # Worker heartbeats once
     client.post(
@@ -705,9 +707,10 @@ def test_running_job_on_dead_worker_orphaned_and_cascades(client):
     dependents are cascade-cancelled so /wait can return."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Worker
-    from sqlalchemy import update
 
     parent_id = _start_job_on_worker(
         client, "ghost", {"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
@@ -747,9 +750,10 @@ def test_running_idempotent_job_on_dead_worker_requeued(client):
     (>90s for idempotent) requeues it rather than orphaning it."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Worker
-    from sqlalchemy import update
 
     job_id = _start_job_on_worker(
         client,
@@ -863,9 +867,10 @@ def test_no_requires_job_never_gets_warning_on_empty_fleet(client):
     """A job with no requires block is matcheable by definition — empty fleet != mismatch."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     # No heartbeats — empty fleet
     r = client.post(
@@ -890,9 +895,10 @@ def test_warning_clears_when_matching_worker_appears(client):
     """Warning set on unmatcheable job clears once a capable worker heartbeats."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     client.post(
         "/heartbeat",
@@ -954,9 +960,10 @@ def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
     """A job with requires.idempotent=true reclaims after 90s, not 5min."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Worker
-    from sqlalchemy import update
 
     client.post(
         "/heartbeat",
@@ -1845,9 +1852,10 @@ def test_submit_preflight_offline_worker_satisfies_pin(client):
     don't false-positive a typo when desktop is rebooting."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Worker
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "desktop")
     # Mark offline by aging last_heartbeat past OFFLINE_AFTER_SECONDS.
@@ -2013,9 +2021,10 @@ def test_sweep_blocked_warning_after_5min_with_nonpreemptible_blocker(client):
     """#38: queued >5min with all eligible workers running non-preemptible jobs."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     blocker = client.post(
@@ -2063,9 +2072,10 @@ def test_sweep_auto_preempts_when_blocker_is_preemptible(client):
     string)."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     blocker = client.post(
@@ -2126,9 +2136,10 @@ def test_sweep_no_auto_preempt_when_blocker_runtime_below_floor(client):
     the sweeper does not signal it. Avoids trashing freshly-started work."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     blocker = client.post(
@@ -2173,9 +2184,10 @@ def test_sweep_no_auto_preempt_when_blocker_priority_not_lower(client):
     strictly higher priority."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     blocker = client.post(
@@ -2224,9 +2236,10 @@ def test_sweep_auto_preempt_does_not_double_fire(client):
     repeated sweeper passes."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     blocker = client.post(
@@ -2534,9 +2547,10 @@ def test_sweep_clears_blocked_warning_when_blocker_finishes(client):
     """#38: once the non-preemptible blocker completes, the queue-age warning clears."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     blocker = client.post(
@@ -2581,9 +2595,10 @@ def test_sweep_preserves_will_queue_behind_warning(client):
     """The matcheable-clear path must not wipe submit-time 'will queue behind' warnings."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     client.post(
@@ -2627,9 +2642,10 @@ def test_auto_preempt_emits_jsonl_event_from_sweeper(client, tmp_path):
     and queue-age."""
     from datetime import UTC, datetime, timedelta
 
+    from sqlalchemy import update
+
     from jobd import app as app_mod
     from jobd.db import Job
-    from sqlalchemy import update
 
     _heartbeat_caps(client, "solo")
     blocker = client.post(

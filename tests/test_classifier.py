@@ -1,4 +1,5 @@
 """Tests for the classifier rule engine."""
+
 from pathlib import Path
 
 import yaml

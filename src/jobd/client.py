@@ -136,7 +136,7 @@ class JobdClient:
         timeout (the /wait endpoint may idle for hours)."""
         return self._client.stream(method, f"{self.base_url}{path}", timeout=timeout)
 
-    def __enter__(self) -> "JobdClient":
+    def __enter__(self) -> JobdClient:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

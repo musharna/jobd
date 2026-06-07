@@ -5,14 +5,13 @@ Covers docs/plans/projects-yaml.md §7 ``test_explain.py`` test list 1-4.
 
 from __future__ import annotations
 
-
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from jobd.app import build_app
 from jobd.db import Job
-from sqlalchemy import select
 
 
 @pytest.fixture
@@ -79,8 +78,9 @@ def test_explain_returns_resolved_body_without_job(client_with_defaults):
     assert body["submit_warning"] is None
 
     # Confirm no Job row was created.
-    from jobd import app as app_mod
     from sqlalchemy.orm import Session
+
+    from jobd import app as app_mod
 
     engine = app_mod._engine_for_testing()
     with Session(engine) as s:

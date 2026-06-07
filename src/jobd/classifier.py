@@ -1,4 +1,5 @@
 """Command classifier: decides whether a shell command is heavy."""
+
 from __future__ import annotations
 
 import re

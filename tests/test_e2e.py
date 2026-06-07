@@ -2,6 +2,7 @@
 
 Run manually: `JOBD_E2E=1 pytest tests/test_e2e.py -v`
 """
+
 import os
 import time
 
@@ -26,8 +27,13 @@ def test_worker_is_alive(client):
     assert r.status_code == 200
     sub = client.post(
         "/submit",
-        json={"cmd": ["echo", "alive"], "cwd": "/tmp", "project": "project-a",
-              "profile": "cpu-quick", "host_pin": "any"},
+        json={
+            "cmd": ["echo", "alive"],
+            "cwd": "/tmp",
+            "project": "project-a",
+            "profile": "cpu-quick",
+            "host_pin": "any",
+        },
     )
     job_id = sub.json()["id"]
     deadline = time.time() + 30
@@ -48,9 +54,13 @@ def test_five_real_jobs(client):
     for i in range(5):
         sub = client.post(
             "/submit",
-            json={"cmd": ["bash", "-c", f"echo job {i}; sleep 1; echo done {i}"],
-                  "cwd": "/tmp", "project": "project-a",
-                  "profile": "cpu-quick", "host_pin": "any"},
+            json={
+                "cmd": ["bash", "-c", f"echo job {i}; sleep 1; echo done {i}"],
+                "cwd": "/tmp",
+                "project": "project-a",
+                "profile": "cpu-quick",
+                "host_pin": "any",
+            },
         )
         job_ids.append(sub.json()["id"])
 
@@ -58,7 +68,7 @@ def test_five_real_jobs(client):
     while time.time() < deadline:
         states = [client.get(f"/jobs/{i}").json()["state"] for i in job_ids]
         if all(s in ("completed", "failed") for s in states):
-            mapping = dict(zip(job_ids, states))
+            mapping = dict(zip(job_ids, states, strict=False))
             assert all(s == "completed" for s in states), f"mixed states: {mapping}"
             return
         time.sleep(2)

@@ -25,7 +25,6 @@ from jobd.estimator import (
 )
 from jobd.models import JobState
 
-
 # ---------------- cmd_head ----------------
 
 

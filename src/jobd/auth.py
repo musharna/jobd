@@ -46,9 +46,7 @@ def _is_allowed_source(host: str) -> bool:
     if addr.is_loopback:
         return True
     # ipaddress can't put an IPv6 addr in an IPv4 network — narrow the test.
-    if isinstance(addr, ipaddress.IPv4Address) and addr in _TAILNET:
-        return True
-    return False
+    return isinstance(addr, ipaddress.IPv4Address) and addr in _TAILNET
 
 
 class TailnetACLMiddleware(BaseHTTPMiddleware):

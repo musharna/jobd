@@ -83,8 +83,9 @@ def test_tailnet_acl_blocks_via_middleware(monkeypatch):
 def test_require_token_rejects_missing_header(monkeypatch):
     monkeypatch.setenv("JOBD_API_TOKEN", "s3cret")
     monkeypatch.delenv("JOBD_ALLOW_NO_AUTH", raising=False)
-    from jobd.auth import _check_token
     from fastapi import HTTPException
+
+    from jobd.auth import _check_token
 
     with pytest.raises(HTTPException) as exc:
         _check_token(None)
@@ -95,8 +96,9 @@ def test_require_token_rejects_missing_header(monkeypatch):
 def test_require_token_rejects_wrong_token(monkeypatch):
     monkeypatch.setenv("JOBD_API_TOKEN", "s3cret")
     monkeypatch.delenv("JOBD_ALLOW_NO_AUTH", raising=False)
-    from jobd.auth import _check_token
     from fastapi import HTTPException
+
+    from jobd.auth import _check_token
 
     with pytest.raises(HTTPException) as exc:
         _check_token("Bearer wrong")

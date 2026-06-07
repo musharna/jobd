@@ -20,8 +20,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import httpx
 import psutil
@@ -785,7 +785,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                         else:
                             grace_s = 60
 
-                        def _kill_after_grace():
+                        def _kill_after_grace(sig=sig, grace_s=grace_s):
                             if proc.poll() is None:
                                 print(
                                     f"[worker] job {job_id}: {sig} grace {grace_s}s "
