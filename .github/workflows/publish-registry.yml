@@ -2,11 +2,18 @@ name: Publish to MCP Registry
 # Submits server.json to the official MCP registry via GitHub Actions OIDC
 # (mcp-publisher login github-oidc) — no device flow, no stored credentials.
 # The OIDC token's repository_owner ("musharna") grants the io.github.musharna/*
-# namespace. Fires automatically on a published release, and can be triggered
-# manually (workflow_dispatch) to (re)publish the current version.
+# namespace.
+#
+# Triggered by the `vX.Y.Z` tag push (the same event that fires release.yml) —
+# NOT by `release: published`. A GitHub release created by release.yml runs as
+# the default GITHUB_TOKEN, and GitHub suppresses workflow triggers from events
+# raised by GITHUB_TOKEN (recursion prevention), so a `release: published`
+# trigger here would silently never fire. The tag push is a real user push and
+# does trigger workflows. The wait-for-PyPI step below handles the race with
+# release.yml's parallel PyPI upload. workflow_dispatch stays for backfills.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 jobs:
   registry-publish:
