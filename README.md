@@ -14,6 +14,8 @@
 
 </div>
 
+mcp-name: io.github.musharna/jobd
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/musharna/jobd/main/docs/assets/demo.svg" alt="jobd in action: submit a GPU job, watch it route to a worker with free VRAM and stream back, then inspect the full lifecycle" width="100%">
 </p>
