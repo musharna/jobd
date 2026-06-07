@@ -12,10 +12,10 @@ V1 design:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from typer.testing import CliRunner
@@ -20,7 +20,7 @@ class _FakeResp:
 
 
 def _now_iso(offset_seconds: int = 0) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).isoformat()
+    return (datetime.now(UTC) + timedelta(seconds=offset_seconds)).isoformat()
 
 
 def _job(

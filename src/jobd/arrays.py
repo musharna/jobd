@@ -65,7 +65,7 @@ def sweep_member_subs(axes: Sequence[tuple[str, Sequence[str]]]) -> list[dict[st
     value_lists = [list(vs) for _, vs in axes]
     out: list[dict[str, str]] = []
     for i, combo in enumerate(itertools.product(*value_lists)):
-        subs = dict(zip(keys, combo))
+        subs = dict(zip(keys, combo, strict=False))
         subs["i"] = str(i)
         out.append(subs)
     return out

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-
 from jobd import gpu_holder_probe
 
 

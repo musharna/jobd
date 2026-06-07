@@ -80,3 +80,19 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# E/F (default) plus import-sorting, bugbear, pyupgrade, and simplify.
+# E501 (line-too-long) is intentionally left to the formatter — `ruff format`
+# wraps code; E501 would otherwise only nag about long strings/comments/URLs.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer requires typer.Argument()/typer.Option() as argument defaults — these
+# are not the mutable-default antipattern B008 targets.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.ruff.lint.per-file-ignores]
+# Nested `with patch.object(...)` is a readable, idiomatic test pattern.
+"tests/**" = ["SIM117"]

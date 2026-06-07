@@ -1,7 +1,7 @@
 """Tests for the matcher — pure logic, no DB."""
 
-from datetime import datetime, timedelta, UTC
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from jobd.matcher import (
     GPU_IMPLICIT_FLOOR_GB,

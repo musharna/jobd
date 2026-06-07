@@ -1,11 +1,11 @@
 """CLI surface for job arrays: --count, --array filter, `status A<id>`."""
 
-import job_cli.cli as cli_mod
 import pytest
 import typer
-from job_cli.cli import _parse_array_token, _parse_sweep_axes
 from typer.testing import CliRunner
 
+import job_cli.cli as cli_mod
+from job_cli.cli import _parse_array_token, _parse_sweep_axes
 from tests.test_cli import _FakePostClient
 
 runner = CliRunner()

@@ -12,6 +12,7 @@ Layered overrides (later wins):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import shutil
@@ -19,7 +20,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
-
 
 _POWER_SUPPLY_ROOT = Path("/sys/class/power_supply")
 
@@ -96,10 +96,8 @@ def _max_cuda_vram_gb() -> int:
                     best = gb
             return best
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 pynvml.nvmlShutdown()
-            except Exception:
-                pass
     except Exception:
         return 0
 

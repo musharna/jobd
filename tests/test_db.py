@@ -18,7 +18,7 @@ def test_init_db_creates_tables(tmp_db_url):
 
 
 def test_job_round_trip(tmp_db_url):
-    from datetime import datetime, UTC
+    from datetime import UTC, datetime
 
     engine = create_engine(tmp_db_url)
     init_db(engine)
@@ -44,7 +44,8 @@ def test_job_round_trip(tmp_db_url):
 
 
 def test_worker_unique_host(tmp_db_url):
-    from datetime import datetime, UTC
+    from datetime import UTC, datetime
+
     import pytest
     from sqlalchemy.exc import IntegrityError
 

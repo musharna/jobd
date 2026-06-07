@@ -11,10 +11,10 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from jobd.app import build_app
 from jobd.db import Job
-from sqlalchemy import select
 
 
 @pytest.fixture

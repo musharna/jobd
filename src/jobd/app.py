@@ -20,15 +20,14 @@ from types import SimpleNamespace
 
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.orm import sessionmaker
+from sse_starlette.sse import EventSourceResponse
 
 from jobd import __version__
 from jobd import events as _events
 from jobd.arrays import index_subs, render_cmd, render_env, sweep_member_subs
 from jobd.auth import install_tailnet_acl, require_token
-from sqlalchemy import create_engine, event, select
-from sqlalchemy.orm import sessionmaker
-from sse_starlette.sse import EventSourceResponse
-
 from jobd.config import (
     ProjectEntry,
     load_classifier_rules,
@@ -1223,7 +1222,7 @@ def build_app(
                 return False
             if job_id is not None and row.get("job_id") != job_id:
                 return False
-            if source is not None and row.get("source") != source:
+            if source is not None and row.get("source") != source:  # noqa: SIM103 — parallel guard-clause filter
                 return False
             return True
 

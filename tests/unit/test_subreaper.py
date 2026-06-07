@@ -12,12 +12,13 @@ GPU context still held, launcher long dead).
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 
 import pytest
 
-from jobd import subreaper, cgroup_walk
+from jobd import cgroup_walk, subreaper
 
 
 def test_set_child_subreaper_on_linux_returns_true():
@@ -173,11 +174,7 @@ def test_sweep_reparented_orphans_real_fork():
         assert pid not in out2
     finally:
         # Clean up: SIGKILL + waitpid so we don't leak a zombie.
-        try:
+        with contextlib.suppress(OSError):
             _os.kill(pid, _signal.SIGKILL)
-        except OSError:
-            pass
-        try:
+        with contextlib.suppress(OSError):
             _os.waitpid(pid, 0)
-        except OSError:
-            pass

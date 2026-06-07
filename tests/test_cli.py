@@ -1,5 +1,7 @@
 """CLI tests — smoke only; deeper API tests are in test_api.py."""
 
+from datetime import UTC
+
 from typer.testing import CliRunner
 
 from job_cli.cli import app
@@ -129,10 +131,11 @@ def test_status_terminal_propagates_exit_code(monkeypatch):
 
 def test_list_banner_silent_when_all_fresh(monkeypatch):
     """`job list` with only fresh workers → no banner."""
-    import job_cli.cli as cli_mod
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    recent = datetime.now(timezone.utc).isoformat()
+    import job_cli.cli as cli_mod
+
+    recent = datetime.now(UTC).isoformat()
     workers = [{"host": "desktop", "last_heartbeat": recent, "state": "online"}]
 
     class FakeClient:
@@ -155,10 +158,11 @@ def test_list_banner_silent_when_all_fresh(monkeypatch):
 
 def test_list_banner_warns_on_stale_worker(monkeypatch):
     """`job list` with a 120s-stale heartbeat → banner."""
-    import job_cli.cli as cli_mod
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    stale = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    import job_cli.cli as cli_mod
+
+    stale = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
     workers = [{"host": "laptop", "last_heartbeat": stale, "state": "online"}]
 
     class FakeClient:
@@ -205,6 +209,7 @@ def test_list_banner_warns_on_no_workers(monkeypatch):
 def test_submit_builds_requires_from_flags(monkeypatch):
     """--needs / --arch / --os / --gpu should populate the requires block."""
     from typer.testing import CliRunner
+
     import job_cli.cli as cli_mod
 
     captured: dict = {}
@@ -748,6 +753,7 @@ def test_ping_healthy_json(monkeypatch):
 def test_ping_unreachable_exits_2(monkeypatch):
     """Connection failure → exit 2 with error surfaced; JSON variant shape preserved."""
     import json as _json
+
     from jobd.client import BrokerUnreachable
 
     cli_mod = _patch_ping_client(

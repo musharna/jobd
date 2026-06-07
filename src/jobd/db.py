@@ -12,7 +12,11 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+)
+from sqlalchemy import (
     inspect as _inspect,
+)
+from sqlalchemy import (
     text as _text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column

@@ -9,7 +9,7 @@ field names. All translation lives in `translate.py`.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from jobd.client import JobdClient
 from jobd.mcp.translate import (
@@ -290,8 +290,8 @@ def _heartbeat_age_s(iso_ts: str) -> float:
         iso_ts = iso_ts[:-1] + "+00:00"
     dt = datetime.fromisoformat(iso_ts)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - dt).total_seconds()
+        dt = dt.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - dt).total_seconds()
 
 
 def jobd_workers(client: JobdClient, args: dict) -> dict:

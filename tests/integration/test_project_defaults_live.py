@@ -12,6 +12,7 @@ Pydantic models disagree across processes.
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 import pytest
@@ -79,7 +80,5 @@ def test_project_defaults_applied_to_db_row():
                 assert job["preemptible"] == resolved["effective_preemptible"]["value"]
         finally:
             # Clean up: cancel before any worker picks it up.
-            try:
+            with contextlib.suppress(Exception):
                 c.post(f"/jobs/{job['id']}/cancel")
-            except Exception:
-                pass
