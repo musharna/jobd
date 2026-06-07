@@ -4,6 +4,12 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-06-07
+
+### Fixed
+
+- **Broker-side wall-clock backstop in the RUNNING reaper.** A job whose worker crashed mid-run and then restarted _within_ `DEAD_WORKER_SECONDS` (300s) could be stranded in `RUNNING` forever: `max_wall_s` was only enforced worker-side (`job_worker.poll_signals` SIGTERMs at `max_wall_s`), and that per-job monitor dies with the worker. The restarted worker has no memory of the job, so it never kills it and never posts `/complete`; the broker's reaper saw a live heartbeat again and left the job running. The reaper now also orphans any RUNNING job that has blown past `max_wall_s + checkpoint_grace_s + 120s` regardless of worker liveness (`termination_reason="wall_clock_exceeded"`), cascading to dependents like the existing `worker_died` path. The 120s grace keeps the broker strictly looser than a healthy worker (which terminates + reports within seconds of `max_wall_s`), so it never races one. Jobs submitted without `max_wall_s` are unaffected by design.
+
 ## [0.5.3] — 2026-06-07
 
 ### Added
