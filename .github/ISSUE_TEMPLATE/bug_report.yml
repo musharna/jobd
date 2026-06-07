@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a bug in jobd (broker, worker, CLI, or MCP server)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please do **not** report security vulnerabilities here —
+        see [SECURITY.md](../SECURITY.md) for private disclosure.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: I submitted a job with `job submit ...` and the worker ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component?
+      multiple: true
+      options:
+        - broker (jobd)
+        - worker (jobd-worker)
+        - CLI (job)
+        - MCP server (jobd-mcp)
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: jobd version
+      description: Output of `job --version` (or the installed package version).
+      placeholder: "0.5.3"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      description: e.g. Ubuntu 24.04, macOS 14, WSL2.
+    validations:
+      required: true
+  - type: dropdown
+    id: auth-mode
+    attributes:
+      label: Auth mode
+      options:
+        - token-protected (JOBD_API_TOKEN set)
+        - no-auth (JOBD_ALLOW_NO_AUTH=1)
+        - not sure
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands, including the submit/route flags involved.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Broker/worker logs or `job logs <id>` output. Redact tokens.
+      render: shell
+    validations:
+      required: false
