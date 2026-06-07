@@ -810,6 +810,9 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     token_tail_len = len(checkpoint_token) - 1
     token_buf = b""
 
+    # stdout is always a pipe here (Popen above passes stdout=subprocess.PIPE),
+    # so this never trips at runtime; it narrows IO[bytes] | None for the reader.
+    assert proc.stdout is not None
     try:
         while True:
             chunk = proc.stdout.read(4096)

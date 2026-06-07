@@ -40,8 +40,6 @@ jobs:
       - name: Tests (excluding live broker)
         run: uv run pytest -m "not live" -q
 
-      # Informational: the codebase is mid-typing-adoption, so mypy is reported
-      # but does not gate the build. Tighten to a hard gate once it's clean.
-      - name: Types (mypy, non-blocking)
+      # mypy is clean and now gates the build: type regressions fail CI.
+      - name: Types (mypy)
         run: uv run mypy src/jobd src/job_cli
-        continue-on-error: true

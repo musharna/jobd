@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -20,6 +21,9 @@ from sqlalchemy import (
     text as _text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+if TYPE_CHECKING:
+    from jobd.models import JobRequires
 
 
 class Base(DeclarativeBase):
@@ -71,7 +75,7 @@ class Job(Base):
     array_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
-    def requires(self):
+    def requires(self) -> JobRequires | None:
         """Parse requires_json to JobRequires | None for matcher Protocol.
 
         Malformed JSON is treated as null so a corrupt row can't crash the

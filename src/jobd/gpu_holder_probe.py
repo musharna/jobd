@@ -53,7 +53,7 @@ def _nvml_processes() -> list[tuple[int, int, int]]:
     Mirrors jobd/worker/job_worker.py:nvidia_processes but tagged per-GPU.
     """
     try:
-        import pynvml  # type: ignore
+        import pynvml
 
         pynvml.nvmlInit()
     except Exception as e:

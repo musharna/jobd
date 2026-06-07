@@ -54,6 +54,7 @@ dev = [
     "respx>=0.20",
     "ruff>=0.3",
     "mypy>=1.8",
+    "types-PyYAML",
 ]
 mcp = ["mcp>=1.0", "httpx>=0.27"]
 
@@ -76,6 +77,11 @@ asyncio_mode = "auto"
 markers = [
     "live: hits the real jobd broker; skipped unless RUN_LIVE_JOBD=1",
 ]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 100
