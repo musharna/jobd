@@ -782,6 +782,99 @@ def test_running_idempotent_job_on_dead_worker_requeued(client):
     assert got["started_at"] is None
 
 
+def test_running_job_past_wall_clock_orphaned_despite_live_worker(client):
+    """RUNNING reaper wall-clock backstop: a job whose worker is still
+    heartbeating but whose max_wall_s + grace has elapsed is orphaned with
+    termination_reason='wall_clock_exceeded' — not left RUNNING forever.
+
+    Mechanism: worker-side enforcement (SIGTERM at max_wall_s in
+    job_worker.poll_signals) only lives in the worker's per-job monitor. If the
+    worker crashes mid-run and restarts within DEAD_WORKER_SECONDS, the new
+    worker has no memory of the job, never enforces its wall clock, and never
+    posts /complete; the broker sees a live worker and leaves the job RUNNING
+    forever. Regression for stranded job 1364 (desktop host-power crash
+    2026-06-03)."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Job, Worker
+
+    job_id = _start_job_on_worker(
+        client,
+        "alive",
+        {"cmd": ["true"], "cwd": "/tmp", "project": "project-a", "max_wall_s": 900},
+    )
+    # A queued dependent so we also prove the wall-clock orphan cascades.
+    child = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/tmp",
+            "project": "project-a",
+            "depends_on": [job_id],
+        },
+    )
+    child_id = child.json()["id"]
+
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        # Worker is HEALTHY (fresh heartbeat) — the dead-worker reaper would NOT
+        # fire. Only the wall-clock backstop should.
+        conn.execute(
+            update(Worker).where(Worker.host == "alive").values(last_heartbeat=datetime.now(UTC))
+        )
+        # Job started far past max_wall_s + grace (naive UTC, as stored).
+        conn.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(started_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=4))
+        )
+
+    app_mod._sweep_once()
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["state"] == "orphaned", got
+    assert got["termination_reason"] == "wall_clock_exceeded", got
+    assert got["finished_at"] is not None
+    child_got = client.get(f"/jobs/{child_id}").json()
+    assert child_got["state"] == "cancelled", child_got
+
+
+def test_running_job_within_wall_clock_left_running(client):
+    """Anti-vacuity for the wall-clock backstop: a RUNNING job on a live worker
+    that is still well within max_wall_s is left RUNNING (the backstop must not
+    reap healthy in-progress jobs)."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Job, Worker
+
+    job_id = _start_job_on_worker(
+        client,
+        "alive",
+        {"cmd": ["true"], "cwd": "/tmp", "project": "project-a", "max_wall_s": 900},
+    )
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Worker).where(Worker.host == "alive").values(last_heartbeat=datetime.now(UTC))
+        )
+        conn.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(started_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=60))
+        )
+
+    app_mod._sweep_once()
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["state"] == "running", got
+
+
 def test_submitted_env_round_trips_to_worker(client):
     """P0.3 (CRIT M1): env submitted with a job is stored and returned on the
     /next-job dispatch payload (and /jobs/{id}) so the worker can apply it.

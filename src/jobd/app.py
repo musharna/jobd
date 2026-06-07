@@ -83,6 +83,13 @@ TERMINAL_STATES = {
 DEAD_WORKER_SECONDS = 300  # 5 min
 IDEMPOTENT_RECLAIM_SECONDS = 90
 OFFLINE_AFTER_SECONDS = 120
+# Broker-side wall-clock backstop grace (RUNNING reaper). Worker-side
+# enforcement (job_worker.poll_signals) SIGTERMs at exactly max_wall_s and
+# reports within seconds. The broker only needs to act when that enforcement
+# never lands (the worker crashed mid-run and restarted with no memory of the
+# job). This grace keeps the broker strictly looser than a healthy worker so it
+# never races one — it fires only on a genuinely stranded job. job 1364 (2026-06).
+WALL_CLOCK_BACKSTOP_GRACE_SECONDS = 120
 # Audit 2026-05-18 (runtime-zombies S6): shorter threshold than OFFLINE_AFTER
 # so a crashed-mid-run worker stops being matcher-eligible quickly. Probe
 # finding: 2 stale workers on server. Configurable via env so operators can
@@ -1559,11 +1566,41 @@ def build_app(
             # already had side effects, so we transition them to ORPHANED (a
             # failed-side terminal state that cascades to dependents) rather
             # than silently re-running a job that may not be re-runnable.
-            orphan_records: list[tuple[int, str, str | None, datetime | None]] = []
+            orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
             running = (
                 session.execute(select(Job).where(Job.state == JobState.RUNNING)).scalars().all()
             )
             for j in running:
+                # Wall-clock backstop (independent of worker liveness). Worker-
+                # side enforcement (job_worker.poll_signals SIGTERMs at
+                # max_wall_s) lives only in the worker's per-job monitor; if the
+                # worker crashed mid-run and restarted with no memory of the
+                # job, that enforcement never lands and no /complete is ever
+                # posted, so the job is stranded RUNNING forever even though the
+                # worker is heartbeating again. A healthy worker would have
+                # terminated + reported within seconds of max_wall_s, far inside
+                # the grace, so this never races one. wall_clock_exceeded is a
+                # terminal "ran too long" condition, so orphan regardless of
+                # idempotency (re-running would just blow the same wall clock).
+                # Regression: stranded job 1364 (desktop host-power crash 2026-06).
+                if j.max_wall_s is not None and j.started_at is not None:
+                    grace = WALL_CLOCK_BACKSTOP_GRACE_SECONDS + (j.checkpoint_grace_s or 0)
+                    if (now - j.started_at).total_seconds() > j.max_wall_s + grace:
+                        last_hb = None
+                        if j.worker is not None:
+                            wk = session.execute(
+                                select(Worker).where(Worker.host == j.worker)
+                            ).scalar_one_or_none()
+                            last_hb = wk.last_heartbeat if wk is not None else None
+                        j.state = JobState.ORPHANED.value
+                        j.finished_at = now
+                        j.termination_reason = "wall_clock_exceeded"
+                        j.signal = None
+                        _cascade_on_parent_terminal(session, j, logs_dir)
+                        orphan_records.append(
+                            (j.id, j.project, j.worker, last_hb, "wall_clock_exceeded")
+                        )
+                        continue
                 reclaim_seconds = DEAD_WORKER_SECONDS
                 idempotent = False
                 if j.requires_json and j.requires_json != "{}":
@@ -1593,13 +1630,13 @@ def build_app(
                     j.termination_reason = "worker_died"
                     j.signal = None
                     _cascade_on_parent_terminal(session, j, logs_dir)
-                    orphan_records.append((j.id, j.project, j.worker, last_hb))
+                    orphan_records.append((j.id, j.project, j.worker, last_hb, "worker_died"))
 
             session.commit()
             # Reclaims/requeues and orphan cascades above may have made jobs
             # dispatchable — wake any long-polling workers.
             _wake_dispatchers()
-            for jid, proj, wkr, last_hb in orphan_records:
+            for jid, proj, wkr, last_hb, reason in orphan_records:
                 _emit_event(
                     logs_dir,
                     "job_orphaned",
@@ -1608,7 +1645,7 @@ def build_app(
                     project=proj,
                     worker=wkr,
                     last_heartbeat=last_hb.isoformat() if last_hb else None,
-                    termination_reason="worker_died",
+                    termination_reason=reason,
                 )
             for host, last_hb in going_offline_records:
                 _emit_event(
