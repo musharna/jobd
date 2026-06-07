@@ -20,6 +20,8 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _COMPOSE = _REPO_ROOT / "docker-compose.yml"
+_SERVER_JSON = _REPO_ROOT / "server.json"
+_PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
 # docker-compose env interpolation with a default: ${JOBD_HOST:-127.0.0.1}
 _INTERP_WITH_DEFAULT = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*:-(?P<default>.*)\}$")
@@ -46,6 +48,36 @@ def _host_is_safe(host: str) -> bool:
     if addr.is_loopback:
         return True
     return isinstance(addr, ipaddress.IPv4Address) and addr in ipaddress.ip_network("100.64.0.0/10")
+
+
+def test_server_json_version_matches_pyproject():
+    """server.json carries its own version fields (the MCP registry schema
+    requires them), but the registry rejects a re-publish of an already-listed
+    version. A release that bumps pyproject but forgets server.json fails the
+    `Publish to MCP Registry` workflow with `cannot publish duplicate version`
+    — silently, after the tag is already cut (incident: v0.5.4, 2026-06-07).
+    Pin every version field in server.json to the pyproject version so the
+    drift fails CI before the tag instead of the registry after it."""
+    import json
+    import tomllib
+
+    proj_version = tomllib.loads(_PYPROJECT.read_text())["project"]["version"]
+    server = json.loads(_SERVER_JSON.read_text())
+
+    versions = {("<root>", server.get("version"))}
+    for i, pkg in enumerate(server.get("packages", [])):
+        versions.add((f"packages[{i}]", pkg.get("version")))
+    meta = server.get("_meta", {}).get("io.modelcontextprotocol.registry/publisher-provided", {})
+    if "version" in meta:
+        versions.add(("_meta.publisher-provided", meta["version"]))
+
+    mismatched = {loc: v for loc, v in versions if v != proj_version}
+    assert not mismatched, (
+        f"server.json version field(s) {mismatched} != pyproject version "
+        f"{proj_version!r}. Bump every version in server.json in lockstep with "
+        "pyproject before tagging, or the MCP registry publish fails on a "
+        "duplicate-version error after the release tag is already pushed."
+    )
 
 
 def test_compose_file_exists():
