@@ -50,7 +50,40 @@ HEARTBEAT_INTERVAL_S = 5.0
 SIGNAL_POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 30.0
 
+# Bounded retry for the terminal /complete POST. The endpoint is idempotent
+# (returns current info if the job is already terminal), so re-POSTing after a
+# transient network error is safe and avoids losing the job's final state.
+_COMPLETE_RETRY_BACKOFF_S = (1, 2, 4, 8)  # sleeps BETWEEN 5 attempts (~15s worst case)
+# Bound the post-SIGKILL wait so a D-state / frozen-mount process can't wedge
+# the worker slot forever (bare proc.wait() can block indefinitely).
+_POST_KILL_WAIT_S = 30
+
 _CAPS = _detect_caps()
+
+# `tracked_pids` is mutated by job threads (add at dispatch, discard at
+# finalize) while the heartbeat thread snapshots it for NVML foreign-VRAM
+# accounting. A plain set copy isn't atomic w.r.t. concurrent add/discard, so
+# every read/write goes through this lock via the helpers below.
+_tracked_pids_lock = threading.Lock()
+
+
+def _tracked_pids_add(tracked_pids: set[int], pid: int) -> None:
+    with _tracked_pids_lock:
+        tracked_pids.add(pid)
+
+
+def _tracked_pids_discard(tracked_pids: set[int], pid: int) -> None:
+    with _tracked_pids_lock:
+        tracked_pids.discard(pid)
+
+
+def _tracked_pids_snapshot(tracked_pids: set[int]) -> set[int]:
+    """Return a consistent copy of `tracked_pids` for the heartbeat read path.
+
+    Hold time is minimal — copy under lock, compute (NVML/cgroup walks) outside.
+    """
+    with _tracked_pids_lock:
+        return set(tracked_pids)
 
 
 def _post_event(client, event, *, job_id=None, project=None, **payload):
@@ -148,7 +181,7 @@ def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
     Best-effort: cgroup reads race with systemd teardown; on any error we fall
     back to the tracked_pids we already have (never fewer than the old behavior).
     """
-    owned = set(tracked_pids)
+    owned = _tracked_pids_snapshot(tracked_pids)
     if not _REAPER_OK:
         return owned
     with _in_flight_lock:
@@ -381,6 +414,9 @@ def _detect_mount_roots() -> list[str]:
 
 
 def resource_snapshot(tracked_pids: set[int]) -> dict:
+    # Snapshot the tracked-pid set under its lock so a concurrent job-thread
+    # add/discard can't tear the copy the NVML foreign-VRAM accounting reads.
+    tracked_pids = _tracked_pids_snapshot(tracked_pids)
     vm = psutil.virtual_memory()
     # psutil.getloadavg() is cross-platform (os.getloadavg() raises OSError on
     # Windows). On Windows psutil emulates the load average over a rolling
@@ -483,6 +519,54 @@ def _missing_launcher_path(cmd: list[str], cwd: str) -> str | None:
     if not os.access(resolved, os.X_OK):
         return resolved
     return None
+
+
+def _post_complete_with_retry(client, job_id, payload, *, sleep=time.sleep) -> None:
+    """POST the terminal /complete payload with bounded exponential backoff.
+
+    5 attempts, sleeping 1/2/4/8s between them (~15s worst-case). The endpoint
+    is idempotent, so a re-POST after a transient failure is safe. After the
+    final failure, keep the historical behavior: log and continue. `sleep` is
+    injectable so tests don't actually wait.
+    """
+    attempts = len(_COMPLETE_RETRY_BACKOFF_S) + 1
+    for i in range(attempts):
+        try:
+            client.post(f"/jobs/{job_id}/complete", json=payload, timeout=10.0)
+            return
+        except Exception as e:
+            print(
+                f"[worker] complete POST error for job {job_id} (attempt {i + 1}/{attempts}): {e}",
+                file=sys.stderr,
+            )
+            if i < len(_COMPLETE_RETRY_BACKOFF_S):
+                sleep(_COMPLETE_RETRY_BACKOFF_S[i])
+
+
+def _wait_after_kill(proc, job_id, *, timeout=_POST_KILL_WAIT_S) -> int:
+    """proc.wait() bounded after a SIGKILL. If the kill doesn't land (D-state,
+    frozen mount) the bare wait blocks forever and wedges the slot; cap it and
+    fall through with rc=-9 so the normal completion path still runs."""
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(
+            f"[worker] job {job_id}: process unresponsive {timeout}s after SIGKILL, "
+            "abandoning wait (rc=-9)",
+            file=sys.stderr,
+        )
+        return -9
+
+
+def _cancel_kill_timers(timers: list[threading.Timer], lock: threading.Lock) -> None:
+    """Cancel every pending SIGKILL-escalation Timer and drain the list, so a
+    job that exited on its own doesn't leave a Timer thread alive (holding the
+    proc closure) for up to grace_s."""
+    with lock:
+        pending = list(timers)
+        timers.clear()
+    for t in pending:
+        t.cancel()
 
 
 def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
@@ -639,7 +723,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # cgroup. Without it, a multi-process GPU job inflated unregistered_vram_gb
     # (spurious contention) and, at max_concurrent>1, made the worker refuse its
     # own second job. (RTX 5090 verified, 2026-06-01.)
-    tracked_pids.add(proc.pid)
+    _tracked_pids_add(tracked_pids, proc.pid)
     # Tell the broker the subprocess is live: assigned -> running. Best-effort:
     # if the POST fails the job still runs and /complete will land the terminal
     # state. The broker idempotently no-ops if the state isn't ASSIGNED.
@@ -663,6 +747,12 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # in this surface (BACKLOG smoke piece 2; user picked worker-only).
     first_output_timeout_s = _env_int("JOBD_WORKER_FIRST_OUTPUT_TIMEOUT_S")
     first_output_landed = [False]
+
+    # SIGKILL-escalation timers scheduled by poll_signals (one per cancel/preempt
+    # signal). Cancelled once the process exits so the timer thread doesn't
+    # linger for up to grace_s holding the proc closure alive.
+    kill_timers: list[threading.Timer] = []
+    kill_timers_lock = threading.Lock()
 
     def _signal_workload(sig_name: str) -> None:
         """SIGTERM/SIGKILL the workload. When wrapped in a systemd scope we
@@ -794,7 +884,10 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                                 )
                                 _signal_workload("KILL")
 
-                        threading.Timer(grace_s, _kill_after_grace).start()
+                        kill_timer = threading.Timer(grace_s, _kill_after_grace)
+                        with kill_timers_lock:
+                            kill_timers.append(kill_timer)
+                        kill_timer.start()
                         return
             except Exception:
                 pass
@@ -851,7 +944,11 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         rc = proc.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         _signal_workload("KILL")
-        rc = proc.wait()
+        rc = _wait_after_kill(proc, job_id)
+
+    # Process has exited (or been abandoned): cancel any pending SIGKILL-
+    # escalation timers so their threads don't linger holding the proc closure.
+    _cancel_kill_timers(kill_timers, kill_timers_lock)
 
     if got_signal["signal"] == "preempt" and checkpoint_state["complete"]:
         try:
@@ -859,7 +956,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         except Exception as e:
             print(f"[worker] /checkpoint-complete POST error: {e}", file=sys.stderr)
 
-    tracked_pids.discard(proc.pid)
+    _tracked_pids_discard(tracked_pids, proc.pid)
 
     # Audit 2026-05-18 (runtime-zombies S4): cgroup-walk reap. Anything
     # still alive in the per-job scope cgroup after the workload exits is
@@ -901,7 +998,9 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # stays unconditional, so scope-wrapped jobs lose no cleanup.
     if _REAPER_OK and _is_solo_in_flight():
         try:
-            killed = _subreaper.sweep_and_kill_reparented_orphans(set(tracked_pids))
+            killed = _subreaper.sweep_and_kill_reparented_orphans(
+                _tracked_pids_snapshot(tracked_pids)
+            )
             if killed:
                 print(
                     f"[worker] job {job_id}: subreaper /proc-sweep reaped "
@@ -934,17 +1033,10 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     elif rc != 0:
         final_state = "failed"
 
-    try:
-        complete_payload = {"exit_code": rc, "final_state": final_state}
-        if termination_reason["reason"] is not None:
-            complete_payload["termination_reason"] = termination_reason["reason"]
-        client.post(
-            f"/jobs/{job_id}/complete",
-            json=complete_payload,
-            timeout=10.0,
-        )
-    except Exception as e:
-        print(f"[worker] complete POST error: {e}", file=sys.stderr)
+    complete_payload = {"exit_code": rc, "final_state": final_state}
+    if termination_reason["reason"] is not None:
+        complete_payload["termination_reason"] = termination_reason["reason"]
+    _post_complete_with_retry(client, job_id, complete_payload)
 
 
 def main():
