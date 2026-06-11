@@ -103,6 +103,13 @@ TERMINAL_STATES = {
 DEAD_WORKER_SECONDS = 300  # 5 min
 IDEMPOTENT_RECLAIM_SECONDS = 90
 OFFLINE_AFTER_SECONDS = 120
+# SIGTERM-drain Phase 2 (docs/plans/sigterm-drain.md): heartbeat reconcile.
+# A claimed (ASSIGNED/RUNNING) job must be absent from this many CONSECUTIVE
+# in_flight_job_ids reports, and be at least this old since its claim, before
+# it gets the worker-died disposition. The age floor plus the debounce cover
+# the /next-job -> first-report and /complete-in-flight races.
+RECONCILE_MISS_THRESHOLD = 2
+RECONCILE_MIN_AGE_SECONDS = 60
 # Broker-side wall-clock backstop grace (RUNNING reaper). Worker-side
 # enforcement (job_worker.poll_signals) SIGTERMs at exactly max_wall_s and
 # reports within seconds. The broker only needs to act when that enforcement
@@ -1037,6 +1044,13 @@ def build_app(
             worker.max_concurrent = hb.max_concurrent
             worker.running = hb.running
             worker.state = "online"
+            orphan_records: list[tuple[int, str]] = []
+            cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
+            requeued: list[int] = []
+            if hb.in_flight_job_ids is not None:
+                orphan_records, cascade_records, requeued = _reconcile_worker_in_flight(
+                    session, hb.host, set(hb.in_flight_job_ids), logs_dir
+                )
             session.commit()
         if is_first_heartbeat:
             _emit_event(
@@ -1051,6 +1065,20 @@ def build_app(
                 os=hb.os,
                 mount_roots=list(hb.mount_roots),
             )
+        for jid, proj in orphan_records:
+            _emit_event(
+                logs_dir,
+                "job_orphaned",
+                source="broker",
+                job_id=jid,
+                project=proj,
+                worker=hb.host,
+                termination_reason="worker_restarted",
+            )
+        for parent_id, parent_state, cascaded in cascade_records:
+            _emit_cascade_cancellations(logs_dir, cascaded, parent_id, parent_state)
+        if requeued:
+            _wake_dispatchers()
         return {"ok": True}
 
     @app.get("/workers", response_model=list[WorkerInfo])
@@ -1982,6 +2010,80 @@ def _emit_cascade_cancellations(
             parent_job=parent_id,
             parent_state=parent_state,
         )
+
+
+def _reconcile_worker_in_flight(
+    session,
+    host: str,
+    reported: set[int],
+    logs_dir: Path,
+) -> tuple[list[tuple[int, str]], list[tuple[int, str, list[tuple[int, str]]]], list[int]]:
+    """SIGTERM-drain Phase 2: reconcile a worker's reported in-flight set
+    against broker-side claims (docs/plans/sigterm-drain.md).
+
+    A worker that died without draining (SIGKILL, crash, power loss) restarts
+    within seconds under Restart=on-failure and heartbeats again — refreshing
+    the liveness clock the dead-worker reaper keys on — while knowing nothing
+    about the jobs it was running. Those jobs would strand in RUNNING/ASSIGNED
+    forever. Any job claimed by `host`, older than RECONCILE_MIN_AGE_SECONDS
+    since its claim, and missing from RECONCILE_MISS_THRESHOLD consecutive
+    reports gets the worker-died disposition: ASSIGNED jobs requeue (the
+    workload never started, so no side effects — this also recovers a lost
+    /next-job response, which the heartbeat-keyed reaper never catches);
+    idempotent RUNNING jobs requeue; non-idempotent RUNNING jobs go ORPHANED
+    with termination_reason="worker_restarted" and cascade to dependents.
+
+    Mutates job rows only — the caller commits, then emits the returned
+    (orphan_records, cascade_records, requeued_ids).
+    """
+    now = datetime.now(UTC).replace(tzinfo=None)
+    orphan_records: list[tuple[int, str]] = []
+    cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
+    requeued: list[int] = []
+    claimed = (
+        session.execute(
+            select(Job).where(
+                Job.state.in_([JobState.ASSIGNED.value, JobState.RUNNING.value]),
+                Job.worker == host,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for j in claimed:
+        if j.id in reported:
+            if j.reconcile_misses:
+                j.reconcile_misses = 0
+            continue
+        if j.started_at is None or (now - j.started_at).total_seconds() < RECONCILE_MIN_AGE_SECONDS:
+            continue
+        j.reconcile_misses = (j.reconcile_misses or 0) + 1
+        if j.reconcile_misses < RECONCILE_MISS_THRESHOLD:
+            continue
+        idempotent = False
+        if j.requires_json and j.requires_json != "{}":
+            try:
+                req = JobRequires.model_validate_json(j.requires_json)
+                if req.idempotent:
+                    idempotent = True
+            except Exception:
+                pass
+        if j.state == JobState.ASSIGNED.value or idempotent:
+            j.state = JobState.QUEUED.value
+            j.worker = None
+            j.started_at = None
+            j.reconcile_misses = 0
+            requeued.append(j.id)
+        else:
+            # String value (not the enum) so the cascade's membership test fires.
+            j.state = JobState.ORPHANED.value
+            j.finished_at = now
+            j.termination_reason = "worker_restarted"
+            j.signal = None
+            cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+            cascade_records.append((j.id, j.state, cascaded))
+            orphan_records.append((j.id, j.project))
+    return orphan_records, cascade_records, requeued
 
 
 def _find_preemptible_candidate(

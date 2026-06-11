@@ -247,6 +247,15 @@ def _running_count() -> int:
         return len(_in_flight)
 
 
+def _in_flight_ids() -> list[int]:
+    """Sorted in-flight job ids for the heartbeat `in_flight_job_ids` report —
+    the broker reconciles its ASSIGNED/RUNNING claims for this host against
+    it, catching jobs a restarted worker no longer knows about (SIGTERM-drain
+    Phase 2, docs/plans/sigterm-drain.md)."""
+    with _in_flight_lock:
+        return sorted(_in_flight.keys())
+
+
 def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
     """The full set of GPU pids this worker owns, for NVML foreign-VRAM exclusion.
 
@@ -541,6 +550,7 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
         "mount_roots": _detect_mount_roots(),
         "max_concurrent": _max_concurrent_jobs(),
         "running": _running_count(),
+        "in_flight_job_ids": _in_flight_ids(),
     }
 
 

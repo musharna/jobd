@@ -45,6 +45,12 @@ Per-job grace during a drain is `min(checkpoint_grace_s, JOBD_WORKER_DRAIN_GRACE
 worker mid-drain. Expect `systemctl stop` to take up to ~35 s before the drain
 even starts (the worker may be inside a `/next-job` long-poll).
 
+If a worker dies WITHOUT draining (SIGKILL, crash, power loss), the broker's
+heartbeat reconcile cleans up: the restarted worker reports its (empty)
+in-flight set, and after 2 consecutive heartbeats (~10 s) any stranded claim
+older than 60 s is requeued (ASSIGNED, or RUNNING + idempotent) or orphaned
+with `termination_reason=worker_restarted` (RUNNING, non-idempotent).
+
 ```bash
 systemctl --user stop job-worker        # graceful drain (SIGTERM)
 # … do maintenance …

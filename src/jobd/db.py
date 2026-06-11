@@ -73,6 +73,10 @@ class Job(Base):
     array_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
     array_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     array_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # SIGTERM-drain Phase 2: consecutive heartbeats whose in_flight_job_ids
+    # report omitted this claimed job. Reset on every report that includes it;
+    # at RECONCILE_MISS_THRESHOLD the job gets the worker-died disposition.
+    reconcile_misses: Mapped[int] = mapped_column(Integer, default=0)
 
     @property
     def requires(self) -> JobRequires | None:
@@ -154,6 +158,7 @@ _JOB_ADDS = [
     ("array_id", "INTEGER"),
     ("array_index", "INTEGER"),
     ("array_size", "INTEGER"),
+    ("reconcile_misses", "INTEGER DEFAULT 0"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),
