@@ -48,7 +48,12 @@ SUBMIT_INPUT = {
 JOB_ID_ONLY = {
     "type": "object",
     "required": ["job_id"],
-    "properties": {"job_id": {"type": "integer"}},
+    "properties": {
+        "job_id": {
+            "type": "integer",
+            "description": "Numeric job id as returned by jobd_submit or shown in jobd_list.",
+        }
+    },
 }
 
 STATUS_INPUT = {
@@ -69,8 +74,16 @@ LOGS_INPUT = {
     "type": "object",
     "required": ["job_id"],
     "properties": {
-        "job_id": {"type": "integer"},
-        "tail_bytes": {"type": "integer", "default": 8192, "maximum": 1048576},
+        "job_id": {
+            "type": "integer",
+            "description": "Numeric job id whose captured output to read.",
+        },
+        "tail_bytes": {
+            "type": "integer",
+            "default": 8192,
+            "maximum": 1048576,
+            "description": "How many bytes from the END of the log to return (server caps reads at 1 MiB). Raise for context, lower for a quick liveness peek.",
+        },
     },
 }
 
@@ -98,10 +111,18 @@ LIST_INPUT = {
             "type": "array",
             "items": {"type": "string"},
             "default": ["queued", "assigned", "running"],
-            "description": "States to include. Currently only the first is forwarded to the broker (single state_filter).",
+            "description": "States to include — any of: queued, assigned, running, completed, failed, cancelled, preempted, orphaned, scheduling_timeout. Currently only the first is forwarded to the broker (single state_filter).",
         },
-        "project": {"type": "string"},
-        "limit": {"type": "integer", "default": 50, "maximum": 200},
+        "project": {
+            "type": "string",
+            "description": "Restrict to one project's jobs (the --project value used at submit).",
+        },
+        "limit": {
+            "type": "integer",
+            "default": 50,
+            "maximum": 200,
+            "description": "Advisory cap on returned jobs (the broker currently returns its default window).",
+        },
     },
 }
 
