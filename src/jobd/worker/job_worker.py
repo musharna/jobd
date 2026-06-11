@@ -241,6 +241,72 @@ def _graceful_shutdown(client, job_threads: list[threading.Thread]) -> dict:
     return summary
 
 
+_STALE_SCOPE_RE = re.compile(r"^jobd-\d+\.scope$")
+
+
+def _sweep_stale_scopes() -> list[str]:
+    """Kill leftover jobd-<id>.scope units from a previous worker incarnation
+    (SIGTERM-drain Phase 3, docs/plans/sigterm-drain.md).
+
+    Scopes live outside the worker service's cgroup, so workloads survive an
+    undrained worker death. The broker's heartbeat reconcile then requeues
+    their (idempotent) jobs — and a re-dispatch would double-execute against
+    the still-running old workload. Sweeping at startup, before the first
+    poll, closes that window. Any jobd-*.scope alive before this worker has
+    dispatched anything is by definition stale: one jobd worker per user
+    session (current deployment model).
+    """
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return []
+    try:
+        out = subprocess.run(
+            [
+                systemctl,
+                "--user",
+                "list-units",
+                "--type=scope",
+                "--all",
+                "--plain",
+                "--no-legend",
+                "jobd-*.scope",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout
+    except Exception as e:
+        print(f"[worker] stale-scope sweep: list-units failed: {e}", file=sys.stderr)
+        return []
+    swept: list[str] = []
+    for line in out.splitlines():
+        fields = line.split()
+        unit = fields[0] if fields else ""
+        if not _STALE_SCOPE_RE.match(unit):
+            continue
+        try:
+            scope_path = _cgroup_walk.resolve_user_scope_path(unit)
+            if scope_path is not None:
+                killed = _cgroup_walk.kill_scope(scope_path)
+            else:
+                killed = []
+                subprocess.run(
+                    [systemctl, "--user", "kill", "--signal=KILL", unit],
+                    check=False,
+                    timeout=5,
+                )
+        except Exception as e:
+            print(f"[worker] stale-scope sweep: {unit}: {e}", file=sys.stderr)
+            continue
+        swept.append(unit)
+        print(
+            f"[worker] stale-scope sweep: killed {unit} ({len(killed)} pid(s))",
+            file=sys.stderr,
+        )
+    return swept
+
+
 def _running_count() -> int:
     """Live count of in-flight jobs, for the heartbeat `running` slot field."""
     with _in_flight_lock:
@@ -1195,12 +1261,20 @@ def main():
     if _REAPER_OK:
         _subreaper.set_child_subreaper()
 
+    # Phase 3: kill workloads a previous (undrained) incarnation left behind
+    # BEFORE the first poll — their jobs may have been requeued by the
+    # broker's heartbeat reconcile and could otherwise re-dispatch here while
+    # the old process still runs.
+    swept_scopes = _sweep_stale_scopes()
+
     tracked_pids: set[int] = set()
     stop_event = threading.Event()
 
     _token = os.environ.get("JOBD_API_TOKEN", "").strip()
     _headers = {"Authorization": f"Bearer {_token}"} if _token else {}
     client = httpx.Client(base_url=args.jobd_url, timeout=60.0, headers=_headers)
+    if swept_scopes:
+        _post_event(client, "stale_scope_sweep", host=hostname(), units=swept_scopes)
     hb = threading.Thread(
         target=heartbeat_loop, args=(client, tracked_pids, stop_event), daemon=True
     )
