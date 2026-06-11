@@ -130,6 +130,7 @@ _LONGPOLL_RECHECK_S = 10.0
 UNMATCHEABLE_THRESHOLD_SECONDS = 60
 QUEUE_BLOCKED_THRESHOLD_SECONDS = 300  # 5 min: above this, surface load-blocker
 AUTO_PREEMPT_MIN_RUNTIME_SECONDS = 300  # don't auto-preempt jobs that just started
+MAX_LOG_CHUNK_BYTES = 10 * 1024 * 1024  # 10 MiB cap per /log append
 
 _UNMATCHEABLE_WARNING_PREFIX = "no matching worker —"
 _BLOCKED_WARNING_PREFIX = "queue-age "
@@ -610,7 +611,12 @@ def build_app(
 
     @app.post("/jobs/{job_id}/log")
     async def append_log(job_id: int, request: Request):
+        with SessionLocal() as session:
+            if session.get(Job, job_id) is None:
+                raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
         body = await request.body()
+        if len(body) > MAX_LOG_CHUNK_BYTES:
+            raise HTTPException(status_code=413, detail="log chunk too large")
         log_file = logs_dir / f"{job_id}.log"
         with log_file.open("ab") as f:
             f.write(body)
@@ -696,7 +702,7 @@ def build_app(
             # that the job is terminal). Otherwise a future reclaim/retry would
             # see a stale cancel signal and die on startup.
             job.signal = None
-            _cascade_on_parent_terminal(session, job, logs_dir)
+            cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
             session.commit()
             session.refresh(job)
             wall_s = None
@@ -714,6 +720,7 @@ def build_app(
                 termination_reason=job.termination_reason,
                 worker=job.worker,
             )
+            _emit_cascade_cancellations(logs_dir, cascaded, job_id, job.state)
             # Terminal transition frees a slot and may unblock dependents — wake.
             _wake_dispatchers()
             return _to_info(job)
@@ -725,6 +732,7 @@ def build_app(
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
             cancel_event_kw: dict | None
+            cascaded: list[tuple[int, str]] = []
             if job.state in (JobState.RUNNING, JobState.ASSIGNED):
                 prior_state = job.state.value if hasattr(job.state, "value") else job.state
                 job.signal = "cancel"
@@ -733,7 +741,7 @@ def build_app(
                 prior_state = job.state.value if hasattr(job.state, "value") else job.state
                 job.state = JobState.CANCELLED
                 job.finished_at = datetime.now(UTC)
-                _cascade_on_parent_terminal(session, job, logs_dir)
+                cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
                 cancel_event_kw = dict(prior_state=prior_state, by="user")
             else:
                 # terminal-state cancel is a no-op; don't emit
@@ -749,6 +757,7 @@ def build_app(
                     project=job.project,
                     **cancel_event_kw,
                 )
+                _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.CANCELLED.value)
                 # A cancel can unblock depends_on_any_exit dependents — wake.
                 _wake_dispatchers()
             return _to_info(job)
@@ -1594,6 +1603,7 @@ def build_app(
             # failed-side terminal state that cascades to dependents) rather
             # than silently re-running a job that may not be re-runnable.
             orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
+            cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
             running = (
                 session.execute(select(Job).where(Job.state == JobState.RUNNING)).scalars().all()
             )
@@ -1623,7 +1633,8 @@ def build_app(
                         j.finished_at = now
                         j.termination_reason = "wall_clock_exceeded"
                         j.signal = None
-                        _cascade_on_parent_terminal(session, j, logs_dir)
+                        cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                        cascade_records.append((j.id, j.state, cascaded))
                         orphan_records.append(
                             (j.id, j.project, j.worker, last_hb, "wall_clock_exceeded")
                         )
@@ -1656,7 +1667,8 @@ def build_app(
                     j.finished_at = now
                     j.termination_reason = "worker_died"
                     j.signal = None
-                    _cascade_on_parent_terminal(session, j, logs_dir)
+                    cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                    cascade_records.append((j.id, j.state, cascaded))
                     orphan_records.append((j.id, j.project, j.worker, last_hb, "worker_died"))
 
             session.commit()
@@ -1674,6 +1686,8 @@ def build_app(
                     last_heartbeat=last_hb.isoformat() if last_hb else None,
                     termination_reason=reason,
                 )
+            for parent_id, parent_state, cascaded in cascade_records:
+                _emit_cascade_cancellations(logs_dir, cascaded, parent_id, parent_state)
             for host, last_hb in going_offline_records:
                 _emit_event(
                     logs_dir,
@@ -1884,6 +1898,7 @@ _DEPENDS_TERMINAL_ANY = {
     JobState.CANCELLED.value,
     JobState.PREEMPTED.value,
     JobState.ORPHANED.value,
+    JobState.SCHEDULING_TIMEOUT.value,
 }
 
 
@@ -1893,9 +1908,9 @@ def _deps_satisfied(job: Job, session) -> bool:
 
     Policy:
       - depends_on_any_exit=False (default): parents must reach COMPLETED.
-        If any parent is FAILED/CANCELLED/ORPHANED/PREEMPTED, the child will
-        be cascade-cancelled elsewhere — return False here so the matcher
-        doesn't dispatch it while the cascade is still pending.
+        If any parent is FAILED/CANCELLED/ORPHANED/PREEMPTED/SCHEDULING_TIMEOUT,
+        the child will be cascade-cancelled elsewhere — return False here so the
+        matcher doesn't dispatch it while the cascade is still pending.
       - depends_on_any_exit=True: any terminal state unblocks.
     """
     deps = json.loads(job.depends_on_json or "[]")
@@ -1912,21 +1927,22 @@ def _deps_satisfied(job: Job, session) -> bool:
     return True
 
 
-def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[int]:
+def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[tuple[int, str]]:
     """When parent reaches a failed-side terminal state, cancel children that
-    did not opt into depends_on_any_exit. Returns the list of cancelled ids.
-
-    Emits a `job_cancelled` event with `by='cascade'` for each child it
-    cancels (schema-v2)."""
+    did not opt into depends_on_any_exit. Returns (child_id, project) for each
+    cancelled child so the caller can emit `job_cancelled` events with
+    `by='cascade'` (schema-v2) AFTER its commit."""
     if parent.state not in {
         JobState.FAILED.value,
         JobState.CANCELLED.value,
         JobState.ORPHANED.value,
         JobState.PREEMPTED.value,
+        JobState.SCHEDULING_TIMEOUT.value,
     }:
         return []
-    now = datetime.now(UTC)
-    cancelled: list[int] = []
+    # SQLite stores datetimes as naive UTC; keep finished_at/warning_at naive.
+    now = datetime.now(UTC).replace(tzinfo=None)
+    cancelled: list[tuple[int, str]] = []
     candidates = (
         session.execute(select(Job).where(Job.state == JobState.QUEUED.value)).scalars().all()
     )
@@ -1936,24 +1952,36 @@ def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[in
         deps = json.loads(child.depends_on_json or "[]")
         if parent.id not in deps:
             continue
-        prior_state = child.state  # was QUEUED
         child.state = JobState.CANCELLED.value
         child.finished_at = now
         child.warning = f"parent_failed: {parent.id} → {parent.state}"
         child.warning_at = now
-        cancelled.append(child.id)
+        cancelled.append((child.id, child.project))
+    return cancelled
+
+
+def _emit_cascade_cancellations(
+    logs_dir: Path,
+    cancelled: list[tuple[int, str]],
+    parent_id: int,
+    parent_state: str,
+) -> None:
+    """Emit one `job_cancelled` event (by='cascade') per child cancelled by
+    `_cascade_on_parent_terminal`. Call this AFTER the caller's commit so a
+    failed commit can't leave events.jsonl claiming a cancel the DB never
+    recorded."""
+    for child_id, child_project in cancelled:
         _emit_event(
             logs_dir,
             "job_cancelled",
             source="broker",
-            job_id=child.id,
-            project=child.project,
-            prior_state=prior_state,
+            job_id=child_id,
+            project=child_project,
+            prior_state=JobState.QUEUED.value,
             by="cascade",
-            parent_job=parent.id,
-            parent_state=parent.state,
+            parent_job=parent_id,
+            parent_state=parent_state,
         )
-    return cancelled
 
 
 def _find_preemptible_candidate(
