@@ -1,6 +1,6 @@
 """Tests for the /resolve dry-run endpoint and the CLI --explain flag.
 
-Covers docs/plans/projects-yaml.md §7 ``test_explain.py`` test list 1-4.
+Covers docs/projects-yaml.md §7 ``test_explain.py`` test list 1-4.
 """
 
 from __future__ import annotations

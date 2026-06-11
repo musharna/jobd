@@ -18,7 +18,7 @@ def test_job_submit_minimal():
     assert req.profile is None
     assert req.priority_delta == 0
     # preemptible is now bool|None: None means "fall through to project /
-    # profile / global" — see docs/plans/projects-yaml.md §6.
+    # profile / global" — see docs/projects-yaml.md §6.
     assert req.preemptible is None
 
 
