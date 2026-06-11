@@ -309,17 +309,14 @@ def build_app(
         Useful primarily when running directly on a worker; otherwise
         call the function from the worker process.
 
-        TODO (spec-review S5): the Job DB row has no `pid` column today —
-        the broker only stores `worker` (host) per job, not the per-job
-        PID set. Until the worker reports back its per-job PIDs via
-        heartbeat or /complete, we pass an empty `known_pids` set; the
-        field shape is right but every row will surface as `known=False`.
+        The broker has no per-job PID inventory yet, so every row surfaces
+        as `known=False` for now (see #7).
         """
         from jobd.gpu_holder_probe import probe_gpu_holders
 
-        # Broker has no per-job PID inventory yet (see TODO above). Pass
-        # an empty set so the response shape is correct and consumers can
-        # already filter on `known` once the broker starts populating it.
+        # No per-job PID inventory yet (see #7). Pass an empty set so the
+        # response shape is correct and consumers can already filter on
+        # `known` once the broker starts populating it.
         known_pids: set[int] = set()
         return [
             {
