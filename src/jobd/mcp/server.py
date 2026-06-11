@@ -44,7 +44,7 @@ _TOOLS = [
     ),
     (
         "jobd_logs",
-        "Tail the captured stdout/stderr of a job (broker streams logs to disk).",
+        "Tail the captured stdout/stderr of a job (workers stream output to the broker's per-job log as it runs). Returns log_tail (last tail_bytes, default 8 KiB, max 1 MiB) plus size_bytes/returned_bytes/truncated — works for running AND finished jobs. Use to check progress mid-run, diagnose a failure's traceback, or grab a job's final output.",
         LOGS_INPUT,
         t.jobd_logs,
     ),
@@ -60,16 +60,21 @@ _TOOLS = [
         PREEMPT_INPUT,
         t.jobd_preempt,
     ),
-    ("jobd_list", "List queue + recent jobs with counts.", LIST_INPUT, t.jobd_list),
+    (
+        "jobd_list",
+        "List jobs on the broker with per-state counts. Defaults to the active set (queued/assigned/running); filter by state (e.g. ['failed']) or project to find past runs. Each row is a compact summary: job_id, project, state, host, exit_code, queued_at, started_at — call jobd_job_get for a job's full record. Use to answer 'what is running / queued right now?' or to locate a job id you've lost.",
+        LIST_INPUT,
+        t.jobd_list,
+    ),
     (
         "jobd_workers",
-        "Fleet snapshot with health rollup (healthy|degraded|empty).",
+        "Fleet snapshot: every registered worker with state (online/stale/offline), live capacity ad (free_vram_gb, unregistered_vram_gb, free_ram_gb, idle_cpus), capability tags (cuda tiers, arch/os), slot usage (running/max_concurrent), and last_heartbeat — plus an overall health rollup (healthy|degraded|empty). Use before submitting GPU work to see what's free, or to diagnose why a job isn't being dispatched.",
         WORKERS_INPUT,
         t.jobd_workers,
     ),
     (
         "jobd_job_get",
-        "Full JobInfo for a single job_id (deps, signals, profile, mount_roots, fast_path).",
+        "Full JobInfo record for one job_id — everything jobd_status returns plus scheduling internals: depends_on + cascade policy (depends_on_any_exit), pending cancel/preempt signal, resolved profile, requires (gpu/tags/idempotent), host pin, fast_path, timeouts, and termination_reason. Use when debugging WHY a job routed/failed/stalled; prefer jobd_status for a quick state check.",
         JOB_ID_ONLY,
         t.jobd_job_get,
     ),
