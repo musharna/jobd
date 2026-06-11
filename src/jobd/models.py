@@ -275,6 +275,10 @@ class WorkerHeartbeat(BaseModel):
     # the broker's heartbeat reconcile skips it entirely. An empty list is a
     # real claim of "nothing in flight" and DOES reconcile.
     in_flight_job_ids: list[int] | None = None
+    # Issue #7 (per-job PID inventory): {job_id: [pids]} — each job's
+    # top-level pid plus its live scope-cgroup pids. Feeds /gpu-holders'
+    # known/job_id/worker attribution. None = old worker that doesn't report.
+    in_flight_pids: dict[str, list[int]] | None = None
 
 
 class NextJobQuery(BaseModel):

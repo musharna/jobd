@@ -322,6 +322,49 @@ def _in_flight_ids() -> list[int]:
         return sorted(_in_flight.keys())
 
 
+# Issue #7 (per-job PID inventory): job_id -> top-level Popen pid, registered
+# by run_job right after Popen. The heartbeat report expands each entry with
+# the job's live scope-cgroup pids — the same ownership boundary
+# _effective_owned_pids uses — so the broker can tag probed GPU holders as
+# jobd-owned (`/gpu-holders` known/job_id/worker fields).
+_in_flight_pids: dict[int, int] = {}
+_in_flight_pids_lock = threading.Lock()
+
+
+def _register_in_flight_pid(job_id: int, pid: int) -> None:
+    with _in_flight_pids_lock:
+        _in_flight_pids[job_id] = pid
+
+
+def _unregister_in_flight_pid(job_id: int) -> None:
+    with _in_flight_pids_lock:
+        _in_flight_pids.pop(job_id, None)
+
+
+def _in_flight_pid_map() -> dict[str, list[int]]:
+    """{job_id: [pids]} for the heartbeat `in_flight_pids` report — the
+    top-level Popen pid plus the job's live scope-cgroup pids. Keys are
+    strings (JSON object keys). Best-effort on the cgroup read, mirroring
+    _effective_owned_pids."""
+    with _in_flight_pids_lock:
+        items = list(_in_flight_pids.items())
+    out: dict[str, list[int]] = {}
+    for jid, pid in items:
+        pids = [pid]
+        if _REAPER_OK:
+            try:
+                scope_path = _cgroup_walk.resolve_user_scope_path(f"jobd-{jid}.scope")
+                if scope_path is not None:
+                    pids.extend(p for p in _cgroup_walk.list_scope_pids(scope_path) if p != pid)
+            except Exception as e:
+                print(
+                    f"[worker] in-flight pid map: cgroup read failed for job {jid}: {e}",
+                    file=sys.stderr,
+                )
+        out[str(jid)] = pids
+    return out
+
+
 def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
     """The full set of GPU pids this worker owns, for NVML foreign-VRAM exclusion.
 
@@ -617,6 +660,7 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
         "max_concurrent": _max_concurrent_jobs(),
         "running": _running_count(),
         "in_flight_job_ids": _in_flight_ids(),
+        "in_flight_pids": _in_flight_pid_map(),
     }
 
 
@@ -907,6 +951,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # (spurious contention) and, at max_concurrent>1, made the worker refuse its
     # own second job. (RTX 5090 verified, 2026-06-01.)
     _tracked_pids_add(tracked_pids, proc.pid)
+    _register_in_flight_pid(job_id, proc.pid)
     # Tell the broker the subprocess is live: assigned -> running. Best-effort:
     # if the POST fails the job still runs and /complete will land the terminal
     # state. The broker idempotently no-ops if the state isn't ASSIGNED.
@@ -1166,6 +1211,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             print(f"[worker] /checkpoint-complete POST error: {e}", file=sys.stderr)
 
     _unregister_drain_hook(job_id)
+    _unregister_in_flight_pid(job_id)
     _tracked_pids_discard(tracked_pids, proc.pid)
 
     # Audit 2026-05-18 (runtime-zombies S4): cgroup-walk reap. Anything
@@ -1300,6 +1346,7 @@ def main():
             print(f"[worker] run_job error: {e}", file=sys.stderr)
         finally:
             _unregister_drain_hook(int(job["id"]))
+            _unregister_in_flight_pid(int(job["id"]))
             _unregister_in_flight(int(job["id"]))
 
     job_threads: list[threading.Thread] = []

@@ -175,9 +175,27 @@ def test_broker_gpu_holders_endpoint(tmp_path, monkeypatch):
     r = client.get("/gpu-holders")
     assert r.status_code == 200
     rows = r.json()
+    # job_id/worker are the #7 attribution fields — null with no worker
+    # having reported a per-job PID inventory.
     assert rows == [
-        {"pid": 111, "gpu_id": 0, "mem_mb": 512, "source": "both", "known": False},
-        {"pid": 222, "gpu_id": None, "mem_mb": None, "source": "fuser", "known": False},
+        {
+            "pid": 111,
+            "gpu_id": 0,
+            "mem_mb": 512,
+            "source": "both",
+            "known": False,
+            "job_id": None,
+            "worker": None,
+        },
+        {
+            "pid": 222,
+            "gpu_id": None,
+            "mem_mb": None,
+            "source": "fuser",
+            "known": False,
+            "job_id": None,
+            "worker": None,
+        },
     ]
 
 
