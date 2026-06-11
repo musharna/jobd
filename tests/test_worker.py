@@ -1034,6 +1034,24 @@ def test_resource_snapshot_reports_slot_usage(monkeypatch):
         _reset_in_flight()
 
 
+def test_resource_snapshot_reports_in_flight_job_ids(monkeypatch):
+    """SIGTERM-drain Phase 2: every heartbeat carries the worker's in-flight
+    job ids so the broker can reconcile claims a restarted worker no longer
+    knows about (docs/plans/sigterm-drain.md). Sorted for determinism."""
+    _reset_in_flight()
+    try:
+        monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 30.0)
+        monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [])
+        snap = job_worker.resource_snapshot(set())
+        assert snap["in_flight_job_ids"] == []
+        job_worker._register_in_flight({"id": 972, "vram_gb": 0, "ram_gb": 0, "cpus": 1})
+        job_worker._register_in_flight({"id": 971, "vram_gb": 0, "ram_gb": 0, "cpus": 1})
+        snap = job_worker.resource_snapshot(set())
+        assert snap["in_flight_job_ids"] == [971, 972]
+    finally:
+        _reset_in_flight()
+
+
 def test_effective_owned_pids_unions_scope_cgroup_pids(tmp_path, monkeypatch):
     """A scope-wrapped job's real CUDA pids live in its cgroup, not in
     tracked_pids (which holds the systemd-run client pid). The owned set must
