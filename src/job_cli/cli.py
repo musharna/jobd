@@ -176,7 +176,7 @@ def submit(
     }
     # Only include preemptible if the user explicitly passed --preemptible /
     # --no-preemptible. Sending nothing lets the broker fall through to the
-    # project default per docs/plans/projects-yaml.md §3. Sending an explicit
+    # project default per docs/projects-yaml.md §3. Sending an explicit
     # bool still wins.
     if preemptible is not None:
         body["preemptible"] = preemptible

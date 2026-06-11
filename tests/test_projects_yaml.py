@@ -1,6 +1,6 @@
 """Tests for projects.yaml defaults: load + persist round-trip.
 
-Covers docs/plans/projects-yaml.md §7 test list 1-6. The
+Covers docs/projects-yaml.md §7 test list 1-6. The
 ``test_persist_projects_round_trip`` test is the critical regression for the
 silent-defaults-erase bug: any change to ``_persist_projects`` MUST keep this
 test green.

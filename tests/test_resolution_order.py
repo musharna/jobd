@@ -1,6 +1,6 @@
 """Tests for project-defaults resolution at submit time.
 
-Covers docs/plans/projects-yaml.md §7 test list 1-9. Exercises the broker's
+Covers docs/projects-yaml.md §7 test list 1-9. Exercises the broker's
 POST /submit handler: CLI flag > project default > profile default >
 global. Each test asserts the persisted Job row reflects the right value.
 """

@@ -340,7 +340,7 @@ def build_app(
                 raise HTTPException(status_code=404, detail=f"unknown profile: {req.profile}")
 
         priority = resolve_priority(state["projects"], req.project, req.priority_delta)
-        # Per docs/plans/projects-yaml.md §3, resolution order is:
+        # Per docs/projects-yaml.md §3, resolution order is:
         # CLI > project_default > profile > global. The `req.<field>` here is
         # the CLI-side value; project defaults sit just below.
         proj_defaults = resolve_project_defaults(state["projects"], req.project)
@@ -1868,7 +1868,7 @@ def _entry_to_yaml_dict(entry: ProjectEntry) -> dict:
     Critical: emit the ``defaults:`` block whenever it carries non-zero
     values. Older code dropped defaults on every ``set_project_priority``
     or ``nudge_project_priority`` call, silently erasing them after one
-    nudge — see docs/plans/projects-yaml.md §8 round-trip canary test.
+    nudge — see docs/projects-yaml.md §8 round-trip canary test.
     """
     out: dict = {"priority": entry.priority}
     d = entry.defaults
