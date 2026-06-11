@@ -20,7 +20,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import httpx
@@ -153,6 +153,94 @@ def _unregister_in_flight(job_id: int) -> None:
         _in_flight.pop(job_id, None)
 
 
+# SIGTERM drain (docs/plans/sigterm-drain.md). `_drain_event` flips once when
+# shutdown begins and is never cleared in production. `_drain_hooks` maps
+# job_id -> callable(reason, grace_cap_s) that routes the job through its
+# preempt machinery; run_job registers its hook right after Popen and
+# unregisters at finalize. The hook map and the flag together close the
+# dispatch/registration gap race: drain sets the flag BEFORE invoking hooks,
+# and run_job re-checks the flag right after registering (plus refuses to
+# Popen at all once draining).
+_drain_event = threading.Event()
+_drain_hooks: dict[int, Callable[[str, float], None]] = {}
+_drain_hooks_lock = threading.Lock()
+
+DRAIN_GRACE_DEFAULT_S = 60.0
+DRAIN_JOIN_MARGIN_S = 15.0
+
+
+def _drain_grace_s() -> float:
+    """Per-job grace budget during a drain (JOBD_WORKER_DRAIN_GRACE_S,
+    default 60). Caps each job's checkpoint_grace_s so a 300s checkpoint
+    window can't pin shutdown past the systemd stop budget — raising this
+    requires raising TimeoutStopSec in job-worker.service in step."""
+    raw = os.environ.get("JOBD_WORKER_DRAIN_GRACE_S", "").strip()
+    if not raw:
+        return DRAIN_GRACE_DEFAULT_S
+    try:
+        v = float(raw)
+    except ValueError:
+        return DRAIN_GRACE_DEFAULT_S
+    return v if v > 0 else DRAIN_GRACE_DEFAULT_S
+
+
+def _register_drain_hook(job_id: int, hook: Callable[[str, float], None]) -> None:
+    with _drain_hooks_lock:
+        _drain_hooks[job_id] = hook
+
+
+def _unregister_drain_hook(job_id: int) -> None:
+    with _drain_hooks_lock:
+        _drain_hooks.pop(job_id, None)
+
+
+def drain_in_flight(
+    job_threads: list[threading.Thread],
+    *,
+    grace_s: float,
+    join_margin_s: float = DRAIN_JOIN_MARGIN_S,
+) -> dict:
+    """Signal every in-flight job through its drain hook, then join the job
+    threads against one shared deadline (grace + margin). Threads still alive
+    at the deadline are abandoned — counted, logged by the caller, and left
+    for the broker's reconcile backstop. Returns {"signaled", "aborted"}."""
+    _drain_event.set()
+    with _drain_hooks_lock:
+        hooks = list(_drain_hooks.items())
+    for jid, hook in hooks:
+        try:
+            hook("worker_shutdown", grace_s)
+        except Exception as e:
+            print(f"[worker] drain hook for job {jid} failed: {e}", file=sys.stderr)
+    deadline = time.monotonic() + grace_s + join_margin_s
+    for t in job_threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    aborted = sum(1 for t in job_threads if t.is_alive())
+    return {"signaled": len(hooks), "aborted": aborted}
+
+
+def _make_shutdown_handler(stop_event: threading.Event):
+    """Flag-only SIGTERM/SIGINT handler. The handler runs in the main thread,
+    which may be inside an httpx call on the shared client — re-entering the
+    client here can deadlock on its pool lock, and sys.exit() kills daemon job
+    threads without running their finally blocks (workload never signaled,
+    /complete never posted). All real shutdown work happens after the poll
+    loop observes stop_event."""
+
+    def _handler(_signum, _frame):
+        stop_event.set()
+
+    return _handler
+
+
+def _graceful_shutdown(client, job_threads: list[threading.Thread]) -> dict:
+    """Drain in-flight jobs, then post the worker_shutdown audit event with
+    the drain summary. Runs in the main thread after the poll loop exits."""
+    summary = drain_in_flight(job_threads, grace_s=_drain_grace_s())
+    _post_event(client, "worker_shutdown", host=hostname(), **summary)
+    return summary
+
+
 def _running_count() -> int:
     """Live count of in-flight jobs, for the heartbeat `running` slot field."""
     with _in_flight_lock:
@@ -229,17 +317,18 @@ def _reserve_and_dispatch(
     registered inside the worker thread, so between ``t.start()`` and the thread
     scheduling, the gate could re-poll and overcommit.
 
-    With ``max_concurrent > 1`` the job runs in a daemon thread (which
-    unregisters it in a ``finally``); otherwise it runs inline. ``run_in_thread``
-    is the callable that executes the job and unregisters it when done.
+    The job ALWAYS runs in a daemon thread, even at ``max_concurrent == 1``.
+    Inline execution would park the main thread inside proc.stdout.read() for
+    the whole job, so a SIGTERM drain could not start until the job ended
+    naturally (docs/plans/sigterm-drain.md). Bounded shutdown comes from the
+    drain deadline plus systemd's stop-timeout KILL, not thread daemonness.
+    ``run_in_thread`` is the callable that executes the job and unregisters it
+    when done.
     """
     _register_in_flight(job)
-    if max_concurrent > 1:
-        t = threading.Thread(target=run_in_thread, args=(job,), daemon=True)
-        t.start()
-        job_threads.append(t)
-    else:
-        run_in_thread(job)
+    t = threading.Thread(target=run_in_thread, args=(job,), daemon=True)
+    t.start()
+    job_threads.append(t)
 
 
 def hostname() -> str:
@@ -573,6 +662,24 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     job_id = job["id"]
     cmd = job["cmd"]
     cwd = job["cwd"]
+
+    # SIGTERM drain: a job claimed just before the drain flag flipped must not
+    # start a workload the drain can no longer see. Complete it as
+    # preempted/worker_shutdown so the broker record doesn't strand in
+    # ASSIGNED (docs/plans/sigterm-drain.md, dispatch-side gap race).
+    if _drain_event.is_set():
+        print(f"[worker] job {job_id}: refusing to start, worker is draining", file=sys.stderr)
+        _post_complete_with_retry(
+            client,
+            job_id,
+            {
+                "exit_code": None,
+                "final_state": "preempted",
+                "termination_reason": "worker_shutdown",
+            },
+        )
+        return
+
     env = os.environ.copy()
 
     # Apply caller-submitted env vars (`job["env"]`) so `--env FOO=bar` actually
@@ -780,6 +887,39 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         except Exception as e:
             print(f"[worker] proc.send_signal {sig_name} error: {e}", file=sys.stderr)
 
+    termination_initiated = threading.Event()
+
+    def _initiate_termination(kind: str, reason: str | None, grace_s: float) -> None:
+        """Route the workload into the cancel/preempt kill path: record the
+        signal, SIGTERM, and schedule the SIGKILL escalation. Idempotent —
+        first caller wins (a broker signal and a worker drain can race).
+
+        SIGKILL escalation: if the workload ignores SIGTERM (badly-behaved
+        handler, native code in a critical section), the stdout-read loop
+        blocks forever and the post-loop proc.wait(timeout=grace) never gets
+        a chance to fire. The Timer force-kills so grace_s actually bounds
+        the wait."""
+        if termination_initiated.is_set():
+            return
+        termination_initiated.set()
+        got_signal["signal"] = kind
+        if reason is not None:
+            termination_reason["reason"] = reason
+        _signal_workload("TERM")
+
+        def _kill_after_grace():
+            if proc.poll() is None:
+                print(
+                    f"[worker] job {job_id}: {kind} grace {grace_s}s expired, sending SIGKILL",
+                    file=sys.stderr,
+                )
+                _signal_workload("KILL")
+
+        kill_timer = threading.Timer(grace_s, _kill_after_grace)
+        with kill_timers_lock:
+            kill_timers.append(kill_timer)
+        kill_timer.start()
+
     def poll_signals():
         while not stop_signal.is_set():
             now = time.monotonic()
@@ -862,36 +1002,29 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 if r.status_code == 200:
                     sig = r.json().get("signal")
                     if sig in ("cancel", "preempt"):
-                        got_signal["signal"] = sig
-                        _signal_workload("TERM")
-                        # SIGKILL escalation: if the workload ignores SIGTERM
-                        # (badly-behaved handler, native code in a critical
-                        # section), the stdout-read loop blocks forever and
-                        # the post-loop proc.wait(timeout=grace) never gets a
-                        # chance to fire. Schedule a Timer to force-kill so
-                        # checkpoint_grace_s actually bounds the wait.
                         if sig == "preempt":
                             grace_s = checkpoint_grace_s if checkpoint_grace_s is not None else 60
                         else:
                             grace_s = 60
-
-                        def _kill_after_grace(sig=sig, grace_s=grace_s):
-                            if proc.poll() is None:
-                                print(
-                                    f"[worker] job {job_id}: {sig} grace {grace_s}s "
-                                    f"expired, sending SIGKILL",
-                                    file=sys.stderr,
-                                )
-                                _signal_workload("KILL")
-
-                        kill_timer = threading.Timer(grace_s, _kill_after_grace)
-                        with kill_timers_lock:
-                            kill_timers.append(kill_timer)
-                        kill_timer.start()
+                        _initiate_termination(sig, None, grace_s)
                         return
             except Exception:
                 pass
             stop_signal.wait(SIGNAL_POLL_INTERVAL_S)
+
+    def _drain_hook(reason: str, grace_cap_s: float) -> None:
+        """Drain entry point: preempt this job with the job's own grace capped
+        by the drain budget, so one slow checkpoint can't pin shutdown past
+        the systemd stop timeout."""
+        job_grace = float(checkpoint_grace_s if checkpoint_grace_s is not None else 60)
+        _initiate_termination("preempt", reason, min(job_grace, grace_cap_s))
+
+    _register_drain_hook(job_id, _drain_hook)
+    # Gap race (drain flag flipped between the top-of-run_job check and the
+    # registration above): the drain's hook snapshot may have missed us, so
+    # self-terminate now that the flag is visible.
+    if _drain_event.is_set():
+        _drain_hook("worker_shutdown", _drain_grace_s())
 
     sig_thread = threading.Thread(target=poll_signals, daemon=True)
     sig_thread.start()
@@ -956,6 +1089,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         except Exception as e:
             print(f"[worker] /checkpoint-complete POST error: {e}", file=sys.stderr)
 
+    _unregister_drain_hook(job_id)
     _tracked_pids_discard(tracked_pids, proc.pid)
 
     # Audit 2026-05-18 (runtime-zombies S4): cgroup-walk reap. Anything
@@ -1062,11 +1196,7 @@ def main():
     )
     hb.start()
 
-    def shutdown(_signum, _frame):
-        stop_event.set()
-        _post_event(client, "worker_shutdown", host=hostname())
-        sys.exit(0)
-
+    shutdown = _make_shutdown_handler(stop_event)
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
@@ -1085,6 +1215,7 @@ def main():
         except Exception as e:
             print(f"[worker] run_job error: {e}", file=sys.stderr)
         finally:
+            _unregister_drain_hook(int(job["id"]))
             _unregister_in_flight(int(job["id"]))
 
     job_threads: list[threading.Thread] = []
@@ -1182,6 +1313,15 @@ def main():
         except Exception as e:
             print(f"[worker] poll error: {e}", file=sys.stderr)
             time.sleep(5)
+
+    # stop_event set (SIGTERM/SIGINT): drain in-flight jobs in this thread —
+    # the only place the shared client is safe to use during shutdown.
+    print("[worker] stop requested — draining in-flight jobs", file=sys.stderr)
+    summary = _graceful_shutdown(client, job_threads)
+    print(
+        f"[worker] drain complete: signaled={summary['signaled']} aborted={summary['aborted']}",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

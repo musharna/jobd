@@ -22,6 +22,15 @@ Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 ExecStart=%h/jobd-worker/.venv/bin/jobd-worker
 Restart=on-failure
 RestartSec=10
+# SIGTERM drain (docs/plans/sigterm-drain.md): TERM only the worker process
+# at stop — the default control-group mode would also TERM fast-path job
+# children at t=0, racing the drain and mislabeling them `failed` instead of
+# `preempted`. The cgroup-wide KILL at TimeoutStopSec remains the backstop.
+KillMode=mixed
+# Stop budget = worst-case long-poll latency (~35s) + drain grace (default
+# 60s, JOBD_WORKER_DRAIN_GRACE_S) + margin. Raising the drain grace requires
+# raising this in step or systemd SIGKILLs the worker mid-drain.
+TimeoutStopSec=150
 StandardOutput=journal
 StandardError=journal
 
