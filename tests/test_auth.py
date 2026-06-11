@@ -163,6 +163,7 @@ def test_no_auth_with_nonloopback_host_warns(monkeypatch, caplog):
     """P2.3: JOBD_ALLOW_NO_AUTH=1 + a non-loopback bind logs a startup warning —
     it exposes an unauthenticated RCE endpoint to the tailnet."""
     monkeypatch.delenv("JOBD_API_TOKEN", raising=False)
+    monkeypatch.delenv("JOBD_DISABLE_TAILNET_ACL", raising=False)
     monkeypatch.setenv("JOBD_ALLOW_NO_AUTH", "1")
     monkeypatch.setenv("JOBD_HOST", "100.64.0.5")
     from jobd.auth import assert_auth_configured
