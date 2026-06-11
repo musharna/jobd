@@ -1153,29 +1153,42 @@ def test_reserve_and_dispatch_registers_before_returning_threaded():
         _reset_in_flight()
 
 
-def test_reserve_and_dispatch_inline_runs_and_unregisters():
-    """max_concurrent == 1 runs the job inline (no thread); the reservation is
-    held during the run and dropped after."""
+def test_reserve_and_dispatch_single_slot_also_threads():
+    """SIGTERM-drain prerequisite: even at max_concurrent == 1 the job must run
+    in a worker thread, never inline in the poll loop. Inline execution parks
+    the main thread inside proc.stdout.read() for the whole job, so a drain
+    can't start until the job ends naturally (docs/plans/sigterm-drain.md)."""
     _reset_in_flight()
+    started = threading.Event()
+    release = threading.Event()
     ran: list = []
 
     def fake_run(job):
-        with job_worker._in_flight_lock:
-            assert int(job["id"]) in job_worker._in_flight  # held during run
+        started.set()
+        release.wait(5)  # if this ran inline, _reserve_and_dispatch would hang
         ran.append(int(job["id"]))
         job_worker._unregister_in_flight(int(job["id"]))
 
+    threads: list = []
     try:
         job_worker._reserve_and_dispatch(
             {"id": 941, "vram_gb": 8.0, "ram_gb": 4.0, "cpus": 2},
             max_concurrent=1,
-            job_threads=[],
+            job_threads=threads,
             run_in_thread=fake_run,
         )
+        # Returned while the job is still running — therefore not inline.
+        assert len(threads) == 1
+        with job_worker._in_flight_lock:
+            assert 941 in job_worker._in_flight  # reservation already visible
+        assert started.wait(5), "worker thread never started"
+        release.set()
+        threads[0].join(5)
         assert ran == [941]
         with job_worker._in_flight_lock:
             assert 941 not in job_worker._in_flight
     finally:
+        release.set()
         _reset_in_flight()
 
 

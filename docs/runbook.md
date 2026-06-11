@@ -31,9 +31,19 @@ worker's heartbeat passes the dead-worker cutoff.
 
 ## Drain / restart a worker
 
-Workers handle `SIGTERM` gracefully: the daemon stops claiming new jobs and
-emits a `worker_shutdown` event. In-flight jobs are NOT killed by the stop — let
-them finish, or `job preempt`/`job cancel` them first.
+Workers handle `SIGTERM` with a full drain (docs/plans/sigterm-drain.md): the
+daemon stops claiming new jobs, preempts every in-flight job (SIGTERM to the
+workload, checkpoint window honored, SIGKILL after the grace), waits for each
+to post `/complete`, then emits a `worker_shutdown` event with a
+`signaled`/`aborted` summary and exits 0. Drained jobs land as `preempted`
+with `termination_reason=worker_shutdown` — resume them via the normal
+checkpoint convention (docs/preemption.md).
+
+Per-job grace during a drain is `min(checkpoint_grace_s, JOBD_WORKER_DRAIN_GRACE_S)`
+(default 60 s). If you raise `JOBD_WORKER_DRAIN_GRACE_S`, raise
+`TimeoutStopSec` in job-worker.service in step, or systemd will SIGKILL the
+worker mid-drain. Expect `systemctl stop` to take up to ~35 s before the drain
+even starts (the worker may be inside a `/next-job` long-poll).
 
 ```bash
 systemctl --user stop job-worker        # graceful drain (SIGTERM)
