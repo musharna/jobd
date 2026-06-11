@@ -83,7 +83,7 @@ def _check_token(authorization: str | None) -> None:
     """
     if not _token_required():
         return
-    expected = os.environ.get("JOBD_API_TOKEN", "")
+    expected = os.environ.get("JOBD_API_TOKEN", "").strip()
     if not expected:
         # assert_auth_configured() should have caught this at startup; if we
         # got here in production, fail-closed rather than fail-open.
@@ -120,9 +120,18 @@ def _is_loopback_host(host: str) -> bool:
 
 def assert_auth_configured() -> None:
     """Raise RuntimeError at startup if neither JOBD_API_TOKEN nor JOBD_ALLOW_NO_AUTH=1 is set."""
+    host = os.environ.get("JOBD_HOST", "127.0.0.1")
     if os.environ.get("JOBD_ALLOW_NO_AUTH", "") == "1":
-        host = os.environ.get("JOBD_HOST", "127.0.0.1")
         if not _is_loopback_host(host):
+            if _acl_disabled():
+                raise RuntimeError(
+                    "JOBD_ALLOW_NO_AUTH=1 + JOBD_DISABLE_TAILNET_ACL=1 + non-loopback "
+                    f"JOBD_HOST={host} would expose an UNAUTHENTICATED broker to the "
+                    "network with no access control at all — anyone who can reach it "
+                    "can run arbitrary commands on your workers. Refusing to start. "
+                    "Set JOBD_API_TOKEN, drop JOBD_DISABLE_TAILNET_ACL, or bind "
+                    "JOBD_HOST to 127.0.0.1."
+                )
             logging.getLogger("jobd.auth").warning(
                 "JOBD_ALLOW_NO_AUTH=1 with non-loopback JOBD_HOST=%s — the broker is "
                 "UNAUTHENTICATED and reachable beyond localhost. Anyone who can reach "
@@ -131,6 +140,14 @@ def assert_auth_configured() -> None:
                 host,
             )
         return
+    if _acl_disabled() and not _is_loopback_host(host):
+        logging.getLogger("jobd.auth").warning(
+            "JOBD_DISABLE_TAILNET_ACL=1 with non-loopback JOBD_HOST=%s — the broker's "
+            "source-IP ACL is OFF; only the bearer token gates access. Anyone who can "
+            "reach the host and holds the token can run arbitrary commands on your "
+            "workers. Drop JOBD_DISABLE_TAILNET_ACL or bind JOBD_HOST to 127.0.0.1.",
+            host,
+        )
     if not os.environ.get("JOBD_API_TOKEN", "").strip():
         raise RuntimeError(
             "JOBD_API_TOKEN env var is required to start the broker. "
