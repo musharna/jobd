@@ -296,28 +296,39 @@ def build_app(
         return {"status": "ok", "version": __version__}
 
     @app.get("/gpu-holders")
-    def gpu_holders():
+    def gpu_holders(host: str | None = None):
         """Audit 2026-05-18 (runtime-zombies S5): dual-signal GPU-holder
         probe. NVML compute-apps unioned with `fuser -v /dev/nvidia*` so
         the desktop-inference_server failure mode (NVML returns [N/A], only
         fuser sees the process) is observable.
 
-        Returns [{pid, gpu_id, mem_mb, source, known}]. source ∈ {nvml,
-        fuser, both}. `known` is True when the PID corresponds to a
-        currently-running jobd job. Note: this is broker-local — it
-        probes the BROKER host, which is almost never the GPU host.
-        Useful primarily when running directly on a worker; otherwise
-        call the function from the worker process.
+        Returns [{pid, gpu_id, mem_mb, source, known, job_id, worker}].
+        source ∈ {nvml, fuser, both}. `known` is True when the PID appears
+        in a worker's heartbeat-reported per-job PID inventory (#7);
+        job_id/worker say which job claims it. Note: the probe is
+        broker-local — it probes the BROKER host, which is almost never the
+        GPU host. Useful primarily when running directly on a worker.
 
-        The broker has no per-job PID inventory yet, so every row surfaces
-        as `known=False` for now (see #7).
+        PIDs are host-local, so pass `?host=<worker>` to consult only that
+        worker's inventory. The default consults every online worker, which
+        can mis-attribute on a numeric pid collision across hosts — fine on
+        a broker+worker single host, caveat emptor on a fleet.
         """
         from jobd.gpu_holder_probe import probe_gpu_holders
 
-        # No per-job PID inventory yet (see #7). Pass an empty set so the
-        # response shape is correct and consumers can already filter on
-        # `known` once the broker starts populating it.
-        known_pids: set[int] = set()
+        pid_owner: dict[int, tuple[int, str]] = {}
+        with SessionLocal() as session:
+            q = select(Worker).where(Worker.state == "online")
+            if host is not None:
+                q = q.where(Worker.host == host)
+            for w in session.execute(q).scalars():
+                try:
+                    inventory = json.loads(w.in_flight_pids_json or "{}")
+                except ValueError:
+                    continue
+                for jid, pids in inventory.items():
+                    for p in pids:
+                        pid_owner.setdefault(int(p), (int(jid), w.host))
         return [
             {
                 "pid": h.pid,
@@ -325,8 +336,10 @@ def build_app(
                 "mem_mb": h.mem_mb,
                 "source": h.source,
                 "known": h.known,
+                "job_id": pid_owner[h.pid][0] if h.pid in pid_owner else None,
+                "worker": pid_owner[h.pid][1] if h.pid in pid_owner else None,
             }
-            for h in probe_gpu_holders(known_pids=known_pids)
+            for h in probe_gpu_holders(known_pids=set(pid_owner))
         ]
 
     # response_model=None: dry-run returns a plan dict, live returns JobInfo.
@@ -1041,6 +1054,8 @@ def build_app(
             worker.max_concurrent = hb.max_concurrent
             worker.running = hb.running
             worker.state = "online"
+            if hb.in_flight_pids is not None:
+                worker.in_flight_pids_json = json.dumps(hb.in_flight_pids)
             orphan_records: list[tuple[int, str]] = []
             cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
             requeued: list[int] = []

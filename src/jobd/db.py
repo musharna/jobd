@@ -122,6 +122,9 @@ class Worker(Base):
     # worker (pre-field heartbeat) reads as single-slot, idle.
     max_concurrent: Mapped[int] = mapped_column(Integer, default=1)
     running: Mapped[int] = mapped_column(Integer, default=0)
+    # Issue #7: latest reported {job_id: [pids]} inventory for this worker.
+    # Refreshed every heartbeat; consumed by /gpu-holders attribution.
+    in_flight_pids_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class BypassLog(Base):
@@ -169,6 +172,7 @@ _WORKER_ADDS = [
     ("mount_roots_json", "TEXT DEFAULT '[]'"),
     ("max_concurrent", "INTEGER DEFAULT 1"),
     ("running", "INTEGER DEFAULT 0"),
+    ("in_flight_pids_json", "TEXT DEFAULT '{}'"),
 ]
 
 
