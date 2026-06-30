@@ -455,3 +455,22 @@ def test_preflight_offline_worker_still_counts():
     snaps = [_w("desktop", aliases=["any-gpu"])]  # caller passes ALL workers
     msg = submit_preflight(None, "desktop", snaps)
     assert msg is None
+
+
+def test_worker_snapshot_carries_mount_roots():
+    from jobd.matcher import WorkerSnapshot
+    w = WorkerSnapshot(
+        host="laptop", host_aliases=["any"], free_vram_gb=20.0,
+        unregistered_vram_gb=0.0, free_ram_gb=16.0, idle_cpus=8,
+        mount_roots=["/home", "/tmp"],
+    )
+    assert w.mount_roots == ["/home", "/tmp"]
+
+
+def test_worker_snapshot_mount_roots_defaults_empty():
+    from jobd.matcher import WorkerSnapshot
+    w = WorkerSnapshot(
+        host="x", host_aliases=[], free_vram_gb=0.0, unregistered_vram_gb=0.0,
+        free_ram_gb=8.0, idle_cpus=4,
+    )
+    assert w.mount_roots == []
