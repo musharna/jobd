@@ -34,6 +34,7 @@ class WorkerSnapshot:
     os: str = "unknown"
     gpu: bool = False
     tags: list[str] = field(default_factory=list)
+    mount_roots: list[str] = field(default_factory=list)
 
 
 class QueuedJob(Protocol):
@@ -272,6 +273,71 @@ def submit_preflight(
     if bits:
         return f"unsatisfiable: no known worker for {scope} provides {', '.join(bits)}"
     return f"unsatisfiable: no known worker for {scope} matches requires"
+
+
+def _covers(w: WorkerSnapshot, cwd: str) -> bool:
+    """True iff the worker advertises a mount_root that prefixes cwd.
+
+    Empty mount_roots = the worker doesn't advertise (old worker) = unknown;
+    treated as 'can't assert', never as 'can't cover'.
+    """
+    return bool(w.mount_roots) and any(cwd.startswith(r) for r in w.mount_roots)
+
+
+def cwd_routability(
+    cwd: str, host_pin: str, all_known_workers: list[WorkerSnapshot]
+) -> tuple[bool, str] | None:
+    """Submit-time mount_roots reachability check for `cwd`.
+
+    Returns None when routable or undecidable; (True, msg) for a hard deny
+    (the caller should 400); (False, msg) for a soft warning (fold into the
+    submit warnings). Generalizes the /mnt/c guard: it covers any host-local
+    prefix a worker fails to advertise.
+
+    Workers with empty mount_roots are 'unknown' and excluded from the deny
+    decision, so stale/old workers never cause a false reject. A cwd under a
+    prefix EVERY worker advertises (e.g. /home) is considered routable here —
+    the worker-side os.path.isdir check (B) is the layer that catches a
+    host-local path under a shared prefix (e.g. a git worktree).
+
+    Both the pinned and the any-pin "no worker covers this prefix" cases hard
+    deny (400): if at least one worker advertises mount_roots and NONE covers
+    the cwd, the job can't run anywhere, so failing fast at submit beats a
+    silent QUEUED sit (the worker-side check B never fires because no worker
+    ever claims it). `all_known_workers` includes offline rows (last-known
+    mount_roots), so a host that ever advertised a covering root keeps the job
+    routable even while it's down.
+    """
+    # Workers that actually advertise something (can participate in the decision).
+    advertising = [w for w in all_known_workers if w.mount_roots]
+    if not advertising:
+        return None  # nobody advertises roots -> can't assert anything
+
+    if host_pin != "any":
+        pinned = [w for w in advertising if host_pin in (w.host, *w.host_aliases)]
+        if not pinned:
+            return None  # pinned host doesn't advertise roots (or unknown) -> defer
+        if any(_covers(w, cwd) for w in pinned):
+            return None
+        roots = sorted({r for w in pinned for r in w.mount_roots})
+        return (
+            True,
+            f"cwd {cwd!r} is under no mount_root of host_pin={host_pin!r} "
+            f"(roots: {roots}). Pass --host <a-host-that-has-it>, or stage the "
+            f"data under a path that host advertises.",
+        )
+
+    # host_pin == "any": hard deny if NO advertising worker covers it — the job
+    # is unroutable everywhere and would otherwise sit QUEUED silently (B never
+    # fires because no worker claims it).
+    if any(_covers(w, cwd) for w in advertising):
+        return None
+    return (
+        True,
+        f"cwd {cwd!r} is under no known worker's mount_roots; no host can run it. "
+        f"Pass --host <the-host-that-has-it>, or stage under a "
+        f"shared path (e.g. /tmp).",
+    )
 
 
 def gpu_contention_warning(

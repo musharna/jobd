@@ -50,6 +50,7 @@ from jobd.estimator import (
 )
 from jobd.matcher import (
     WorkerSnapshot,
+    cwd_routability,
     eligible_workers,
     gpu_contention_warning,
     selectors_only_match,
@@ -445,9 +446,22 @@ def build_app(
             ser_warn = _serialization_warning(requires, host_pin, snapshots, session)
             gpu_warn = gpu_contention_warning(requires, host_pin, snapshots)
             preflight_warn = submit_preflight(requires, host_pin, all_snapshots)
+            cwd_route = cwd_routability(req.cwd, host_pin, all_snapshots)
+            cwd_route_warn: str | None = None
+            if cwd_route is not None:
+                is_hard, cwd_msg = cwd_route
+                if is_hard:
+                    raise HTTPException(status_code=400, detail=cwd_msg)
+                cwd_route_warn = cwd_msg
             warnings = [
                 w
-                for w in (unknown_project_warning, preflight_warn, ser_warn, gpu_warn)
+                for w in (
+                    unknown_project_warning,
+                    preflight_warn,
+                    cwd_route_warn,
+                    ser_warn,
+                    gpu_warn,
+                )
                 if w is not None
             ]
             warning_text = "; ".join(warnings) if warnings else None
@@ -935,6 +949,73 @@ def build_app(
                     ),
                 )
             prior_worker = job.worker
+
+            if payload.reason == "cwd_missing":
+                # The worker found the job's cwd absent on its host (e.g. a git
+                # worktree that lives only on another machine). Record this host in
+                # the job's exclusion set so the matcher won't re-offer it here,
+                # then re-route — or fail cwd_unreachable if no eligible worker is
+                # left that could have the path (instead of looping forever).
+                excluded = _excluded_workers(job)
+                if prior_worker and prior_worker not in excluded:
+                    excluded.append(prior_worker)
+                job.excluded_workers_json = json.dumps(excluded)
+                req: JobRequires | None = None
+                if job.requires_json and job.requires_json != "{}":
+                    try:
+                        req = JobRequires.model_validate_json(job.requires_json)
+                    except Exception:
+                        req = None
+                # Eligibility for the re-route/terminal decision uses ONLINE
+                # workers only: if the host that has the cwd is offline right now,
+                # we fail fast (cwd_unreachable) rather than park the job QUEUED
+                # waiting on a host that may never return — the user resubmits once
+                # the host is back. (A momentarily-flapping host is the cost; the
+                # alternative is the silent-queue this whole feature exists to kill.)
+                online = (
+                    session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
+                )
+                snapshots = _build_snapshots(list(online))
+                elig = [
+                    w
+                    for w in eligible_workers(req, job.host_pin, snapshots)
+                    if w.host not in excluded
+                ]
+                _emit_event(
+                    logs_dir,
+                    "cwd_refused",
+                    source="broker",
+                    job_id=job_id,
+                    project=job.project,
+                    worker=prior_worker,
+                    cwd=payload.cwd,
+                )
+                if not elig:
+                    job.state = JobState.FAILED
+                    job.worker = None
+                    job.termination_reason = "cwd_unreachable"
+                    session.commit()
+                    try:
+                        with (logs_dir / f"{job_id}.log").open("a") as lf:
+                            lf.write(
+                                f"[broker] cwd {payload.cwd!r} exists on no eligible "
+                                f"worker (excluded: {excluded}); failing "
+                                f"cwd_unreachable\n"
+                            )
+                    except OSError:
+                        pass
+                    session.refresh(job)
+                    return _to_info(job)
+                job.state = JobState.QUEUED
+                job.worker = None
+                job.started_at = None
+                session.commit()
+                # Job is back in QUEUED, excluding the refusing host — re-route it.
+                _wake_dispatchers()
+                session.refresh(job)
+                return _to_info(job)
+
+            # --- default: gpu_contention (unchanged) ---
             job.state = JobState.QUEUED
             job.worker = None
             job.started_at = None
@@ -1170,6 +1251,10 @@ def build_app(
                 # jobs eligible).
                 if mount_roots:
                     queued = [j for j in queued if any(j.cwd.startswith(r) for r in mount_roots)]
+                # Drop jobs this host already refused for a missing cwd (B): the
+                # per-job exclusion set guarantees a refused job re-routes to a
+                # host that has the path and never hot-loops back here.
+                queued = [j for j in queued if q.host not in _excluded_workers(j)]
                 w = WorkerSnapshot(
                     host=q.host,
                     host_aliases=aliases,
@@ -2191,6 +2276,11 @@ def _serialization_warning(
     return f"will queue behind job {busy.id} on {only.host}"
 
 
+def _excluded_workers(job: Job) -> list[str]:
+    """Hosts that refused this job for a missing cwd (back-compat: NULL/"[]" -> [])."""
+    return json.loads(job.excluded_workers_json or "[]")
+
+
 def _build_snapshots(workers: list[Worker]) -> list[WorkerSnapshot]:
     return [
         WorkerSnapshot(
@@ -2204,6 +2294,7 @@ def _build_snapshots(workers: list[Worker]) -> list[WorkerSnapshot]:
             os=w.os,
             gpu=w.gpu,
             tags=json.loads(w.tags_json or "[]"),
+            mount_roots=json.loads(w.mount_roots_json or "[]"),
         )
         for w in workers
     ]
