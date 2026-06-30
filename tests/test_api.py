@@ -3018,3 +3018,10 @@ def test_submit_warns_any_pin_uncovered_cwd_but_accepts(client):
     assert r.status_code == 200
     body = r.json()
     assert body.get("warning") and "/scratch/run1" in body["warning"]
+
+
+def test_job_orm_has_excluded_workers_column():
+    """B: the per-job cwd-refusal exclusion set column exists on the ORM."""
+    from jobd.db import Job
+
+    assert hasattr(Job, "excluded_workers_json")
