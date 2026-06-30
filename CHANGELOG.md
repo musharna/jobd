@@ -2,7 +2,7 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.5.6] — 2026-06-30
 
 ### Fixed
 
