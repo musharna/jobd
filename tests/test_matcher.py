@@ -459,9 +459,14 @@ def test_preflight_offline_worker_still_counts():
 
 def test_worker_snapshot_carries_mount_roots():
     from jobd.matcher import WorkerSnapshot
+
     w = WorkerSnapshot(
-        host="laptop", host_aliases=["any"], free_vram_gb=20.0,
-        unregistered_vram_gb=0.0, free_ram_gb=16.0, idle_cpus=8,
+        host="laptop",
+        host_aliases=["any"],
+        free_vram_gb=20.0,
+        unregistered_vram_gb=0.0,
+        free_ram_gb=16.0,
+        idle_cpus=8,
         mount_roots=["/home", "/tmp"],
     )
     assert w.mount_roots == ["/home", "/tmp"]
@@ -469,46 +474,61 @@ def test_worker_snapshot_carries_mount_roots():
 
 def test_worker_snapshot_mount_roots_defaults_empty():
     from jobd.matcher import WorkerSnapshot
+
     w = WorkerSnapshot(
-        host="x", host_aliases=[], free_vram_gb=0.0, unregistered_vram_gb=0.0,
-        free_ram_gb=8.0, idle_cpus=4,
+        host="x",
+        host_aliases=[],
+        free_vram_gb=0.0,
+        unregistered_vram_gb=0.0,
+        free_ram_gb=8.0,
+        idle_cpus=4,
     )
     assert w.mount_roots == []
 
 
 def _wmr(host, roots, aliases=None):
     from jobd.matcher import WorkerSnapshot
+
     return WorkerSnapshot(
-        host=host, host_aliases=aliases or ["any"], free_vram_gb=10.0,
-        unregistered_vram_gb=0.0, free_ram_gb=16.0, idle_cpus=8,
+        host=host,
+        host_aliases=aliases or ["any"],
+        free_vram_gb=10.0,
+        unregistered_vram_gb=0.0,
+        free_ram_gb=16.0,
+        idle_cpus=8,
         mount_roots=roots,
     )
 
 
 def test_cwd_routability_pinned_host_no_cover_hard_deny():
     from jobd.matcher import cwd_routability
+
     workers = [_wmr("desktop", ["/home", "/tmp"])]
     out = cwd_routability("/mnt/d/data/x", "desktop", workers)
     assert out is not None and out[0] is True
     assert "/mnt/d/data/x" in out[1]
 
 
-def test_cwd_routability_any_pin_no_cover_soft_warning():
+def test_cwd_routability_any_pin_no_cover_hard_deny():
+    # any-pin cwd no advertising worker covers -> hard deny (unroutable anywhere).
     from jobd.matcher import cwd_routability
+
     workers = [_wmr("gt76", ["/home", "/tmp"]), _wmr("msi", ["/home"])]
     out = cwd_routability("/scratch/run1", "any", workers)
-    assert out is not None and out[0] is False
+    assert out is not None and out[0] is True
     assert "/scratch/run1" in out[1]
 
 
 def test_cwd_routability_covered_returns_none():
     from jobd.matcher import cwd_routability
+
     workers = [_wmr("laptop", ["/home", "/mnt/c"])]
     assert cwd_routability("/home/u/proj", "any", workers) is None
 
 
 def test_cwd_routability_empty_mount_roots_is_unknown_no_reject():
     from jobd.matcher import cwd_routability
+
     # worker advertises nothing (old worker) -> unknown, never reject
     workers = [_wmr("legacy", [])]
     assert cwd_routability("/anything/at/all", "any", workers) is None
@@ -519,6 +539,7 @@ def test_cwd_routability_worktree_under_home_NOT_caught_by_A():
     # Documents the A/B split: every worker advertises /home, so the prefix
     # probe passes a worktree cwd. B (worker-side isdir) is what catches it.
     from jobd.matcher import cwd_routability
+
     workers = [_wmr("laptop", ["/home"]), _wmr("desktop", ["/home"])]
     cwd = "/home/u/proj/.claude/worktrees/wt"
     assert cwd_routability(cwd, "any", workers) is None

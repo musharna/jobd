@@ -299,6 +299,14 @@ def cwd_routability(
     prefix EVERY worker advertises (e.g. /home) is considered routable here —
     the worker-side os.path.isdir check (B) is the layer that catches a
     host-local path under a shared prefix (e.g. a git worktree).
+
+    Both the pinned and the any-pin "no worker covers this prefix" cases hard
+    deny (400): if at least one worker advertises mount_roots and NONE covers
+    the cwd, the job can't run anywhere, so failing fast at submit beats a
+    silent QUEUED sit (the worker-side check B never fires because no worker
+    ever claims it). `all_known_workers` includes offline rows (last-known
+    mount_roots), so a host that ever advertised a covering root keeps the job
+    routable even while it's down.
     """
     # Workers that actually advertise something (can participate in the decision).
     advertising = [w for w in all_known_workers if w.mount_roots]
@@ -319,13 +327,15 @@ def cwd_routability(
             f"data under a path that host advertises.",
         )
 
-    # host_pin == "any": warn only if NO advertising worker covers it.
+    # host_pin == "any": hard deny if NO advertising worker covers it — the job
+    # is unroutable everywhere and would otherwise sit QUEUED silently (B never
+    # fires because no worker claims it).
     if any(_covers(w, cwd) for w in advertising):
         return None
     return (
-        False,
-        f"cwd {cwd!r} is under no known worker's mount_roots; it may sit queued "
-        f"or fail to route. Pass --host <the-host-that-has-it>, or stage under a "
+        True,
+        f"cwd {cwd!r} is under no known worker's mount_roots; no host can run it. "
+        f"Pass --host <the-host-that-has-it>, or stage under a "
         f"shared path (e.g. /tmp).",
     )
 

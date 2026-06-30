@@ -1716,6 +1716,22 @@ def test_next_job_skips_job_with_cwd_outside_worker_mount_roots(client):
             "mount_roots": ["/home", "/tmp"],
         },
     )
+    # A second worker DOES cover /mnt/d so the submit is routable (the realistic
+    # fleet state). The submit-time cwd_routability probe hard-denies an any-pin
+    # cwd that NO known worker covers; here laptop covers it, so submit succeeds
+    # and we exercise the /next-job filter for the non-covering desktop-vm.
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "laptop",
+            "free_vram_gb": 20,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 30,
+            "idle_cpus": 8,
+            "host_aliases": [],
+            "mount_roots": ["/mnt/d"],
+        },
+    )
     r = client.post(
         "/submit",
         json={
@@ -3014,7 +3030,9 @@ def test_submit_hard_denies_pinned_cwd_without_mount_root(client):
     assert "/mnt/d/data/x" in r.text
 
 
-def test_submit_warns_any_pin_uncovered_cwd_but_accepts(client):
+def test_submit_hard_denies_any_pin_uncovered_cwd(client):
+    # any-pin cwd under no worker's mount_roots is unroutable everywhere -> 400,
+    # not a silent QUEUED sit (B never fires because no worker claims it).
     _register_worker(client, host="gt76", mount_roots=["/home", "/tmp"])
     r = client.post(
         "/submit",
@@ -3025,9 +3043,8 @@ def test_submit_warns_any_pin_uncovered_cwd_but_accepts(client):
             "host_pin": "any",
         },
     )
-    assert r.status_code == 200
-    body = r.json()
-    assert body.get("warning") and "/scratch/run1" in body["warning"]
+    assert r.status_code == 400
+    assert "/scratch/run1" in r.text
 
 
 def test_job_orm_has_excluded_workers_column():
