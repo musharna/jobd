@@ -949,6 +949,67 @@ def build_app(
                     ),
                 )
             prior_worker = job.worker
+
+            if payload.reason == "cwd_missing":
+                # The worker found the job's cwd absent on its host (e.g. a git
+                # worktree that lives only on another machine). Record this host in
+                # the job's exclusion set so the matcher won't re-offer it here,
+                # then re-route — or fail cwd_unreachable if no eligible worker is
+                # left that could have the path (instead of looping forever).
+                excluded = _excluded_workers(job)
+                if prior_worker and prior_worker not in excluded:
+                    excluded.append(prior_worker)
+                job.excluded_workers_json = json.dumps(excluded)
+                req: JobRequires | None = None
+                if job.requires_json and job.requires_json != "{}":
+                    try:
+                        req = JobRequires.model_validate_json(job.requires_json)
+                    except Exception:
+                        req = None
+                online = (
+                    session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
+                )
+                snapshots = _build_snapshots(list(online))
+                elig = [
+                    w
+                    for w in eligible_workers(req, job.host_pin, snapshots)
+                    if w.host not in excluded
+                ]
+                _emit_event(
+                    logs_dir,
+                    "cwd_refused",
+                    source="broker",
+                    job_id=job_id,
+                    project=job.project,
+                    worker=prior_worker,
+                    cwd=payload.cwd,
+                )
+                if not elig:
+                    job.state = JobState.FAILED
+                    job.worker = None
+                    job.termination_reason = "cwd_unreachable"
+                    session.commit()
+                    try:
+                        with (logs_dir / f"{job_id}.log").open("a") as lf:
+                            lf.write(
+                                f"[broker] cwd {payload.cwd!r} exists on no eligible "
+                                f"worker (excluded: {excluded}); failing "
+                                f"cwd_unreachable\n"
+                            )
+                    except OSError:
+                        pass
+                    session.refresh(job)
+                    return _to_info(job)
+                job.state = JobState.QUEUED
+                job.worker = None
+                job.started_at = None
+                session.commit()
+                # Job is back in QUEUED, excluding the refusing host — re-route it.
+                _wake_dispatchers()
+                session.refresh(job)
+                return _to_info(job)
+
+            # --- default: gpu_contention (unchanged) ---
             job.state = JobState.QUEUED
             job.worker = None
             job.started_at = None
@@ -1184,6 +1245,10 @@ def build_app(
                 # jobs eligible).
                 if mount_roots:
                     queued = [j for j in queued if any(j.cwd.startswith(r) for r in mount_roots)]
+                # Drop jobs this host already refused for a missing cwd (B): the
+                # per-job exclusion set guarantees a refused job re-routes to a
+                # host that has the path and never hot-loops back here.
+                queued = [j for j in queued if q.host not in _excluded_workers(j)]
                 w = WorkerSnapshot(
                     host=q.host,
                     host_aliases=aliases,
