@@ -66,6 +66,11 @@ class Job(Base):
     scheduling_timeout_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
     termination_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
     submitted_via: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Hosts that refused this job for a missing cwd (B / cwd-probe): the matcher
+    # won't re-offer it to them, so a host-local cwd re-routes to a host that has
+    # the path instead of hot-looping. JSON list; "[]" default, NULL-tolerant
+    # (an ALTER-added column on the live DB reads NULL -> []).
+    excluded_workers_json: Mapped[str] = mapped_column(Text, default="[]")
     # Phase 3 (job arrays): all NULL for a standalone job. A member is a normal
     # job plus these grouping columns; array_id is the first member's job id, so
     # `job status A<id>` / `job list --array A<id>` resolve without a new id
@@ -157,6 +162,7 @@ _JOB_ADDS = [
     ("checkpoint_grace_s", "INTEGER"),
     ("termination_reason", "VARCHAR(50)"),
     ("submitted_via", "VARCHAR(10)"),
+    ("excluded_workers_json", "TEXT DEFAULT '[]'"),
     ("scheduling_timeout_s", "INTEGER"),
     ("array_id", "INTEGER"),
     ("array_index", "INTEGER"),

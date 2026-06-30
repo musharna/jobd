@@ -2205,6 +2205,11 @@ def _serialization_warning(
     return f"will queue behind job {busy.id} on {only.host}"
 
 
+def _excluded_workers(job: Job) -> list[str]:
+    """Hosts that refused this job for a missing cwd (back-compat: NULL/"[]" -> [])."""
+    return json.loads(job.excluded_workers_json or "[]")
+
+
 def _build_snapshots(workers: list[Worker]) -> list[WorkerSnapshot]:
     return [
         WorkerSnapshot(
