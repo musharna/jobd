@@ -812,6 +812,30 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     if submitted_env:
         env.update({str(k): str(v) for k, v in submitted_env.items()})
 
+    # Pre-dispatch cwd-exists check. A host-local cwd (e.g. a git worktree that
+    # lives only on another host) is absent here even though the broker's coarse
+    # mount_roots prefix filter (/home) passed the job to us. Refuse admission so
+    # the broker re-routes to a host that has the path — instead of cd-failing to
+    # exit 127. The broker excludes this host for this job, so it won't be
+    # re-offered here (no hot loop).
+    if not os.path.isdir(cwd):
+        print(
+            f"[worker] job {job_id}: cwd missing here ({cwd}); refusing admission",
+            file=sys.stderr,
+        )
+        try:
+            client.post(
+                f"/jobs/{job_id}/refuse-admission",
+                json={"reason": "cwd_missing", "cwd": cwd},
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(
+                f"[worker] cwd-missing refuse post failed for job {job_id}: {e}",
+                file=sys.stderr,
+            )
+        return
+
     # Pre-dispatch launcher-exists check. Without this, a missing absolute-
     # or relative-path script silently exits 127 inside the systemd-run
     # scope and the user only finds out at the next manual `job list`
