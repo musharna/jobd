@@ -2204,6 +2204,7 @@ def _build_snapshots(workers: list[Worker]) -> list[WorkerSnapshot]:
             os=w.os,
             gpu=w.gpu,
             tags=json.loads(w.tags_json or "[]"),
+            mount_roots=json.loads(w.mount_roots_json or "[]"),
         )
         for w in workers
     ]

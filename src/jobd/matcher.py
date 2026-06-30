@@ -34,6 +34,7 @@ class WorkerSnapshot:
     os: str = "unknown"
     gpu: bool = False
     tags: list[str] = field(default_factory=list)
+    mount_roots: list[str] = field(default_factory=list)
 
 
 class QueuedJob(Protocol):
