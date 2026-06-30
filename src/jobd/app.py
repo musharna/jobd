@@ -966,6 +966,12 @@ def build_app(
                         req = JobRequires.model_validate_json(job.requires_json)
                     except Exception:
                         req = None
+                # Eligibility for the re-route/terminal decision uses ONLINE
+                # workers only: if the host that has the cwd is offline right now,
+                # we fail fast (cwd_unreachable) rather than park the job QUEUED
+                # waiting on a host that may never return — the user resubmits once
+                # the host is back. (A momentarily-flapping host is the cost; the
+                # alternative is the silent-queue this whole feature exists to kill.)
                 online = (
                     session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
                 )

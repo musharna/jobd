@@ -3001,20 +3001,30 @@ def _register_worker(client, host, mount_roots, host_aliases=None):
 def test_submit_hard_denies_pinned_cwd_without_mount_root(client):
     # Register a worker whose mount_roots do NOT cover the cwd, pinned to it.
     _register_worker(client, host="desktop", mount_roots=["/home", "/tmp"])
-    r = client.post("/submit", json={
-        "cmd": ["true"], "cwd": "/mnt/d/data/x",
-        "project": "project-a", "host_pin": "desktop",
-    })
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/mnt/d/data/x",
+            "project": "project-a",
+            "host_pin": "desktop",
+        },
+    )
     assert r.status_code == 400
     assert "/mnt/d/data/x" in r.text
 
 
 def test_submit_warns_any_pin_uncovered_cwd_but_accepts(client):
     _register_worker(client, host="gt76", mount_roots=["/home", "/tmp"])
-    r = client.post("/submit", json={
-        "cmd": ["true"], "cwd": "/scratch/run1",
-        "project": "project-a", "host_pin": "any",
-    })
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/scratch/run1",
+            "project": "project-a",
+            "host_pin": "any",
+        },
+    )
     assert r.status_code == 200
     body = r.json()
     assert body.get("warning") and "/scratch/run1" in body["warning"]
@@ -3030,15 +3040,28 @@ def test_job_orm_has_excluded_workers_column():
 def _submit_and_assign(client, cwd, worker, mount_roots=None, host_pin="any"):
     """Submit a job and claim it on `worker` via /next-job -> returns job id (ASSIGNED)."""
     mr = mount_roots if mount_roots is not None else ["/home"]
-    r = client.post("/submit", json={
-        "cmd": ["true"], "cwd": cwd, "project": "project-a", "host_pin": host_pin,
-    })
+    r = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": cwd,
+            "project": "project-a",
+            "host_pin": host_pin,
+        },
+    )
     assert r.status_code == 200, r.text
     jid = r.json()["id"]
-    got = client.post("/next-job", json={
-        "host": worker, "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-        "free_ram_gb": 28.0, "idle_cpus": 10, "mount_roots": mr,
-    }).json()
+    got = client.post(
+        "/next-job",
+        json={
+            "host": worker,
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+            "mount_roots": mr,
+        },
+    ).json()
     assert got is not None and got["id"] == jid, f"claim failed: {got}"
     return jid
 
@@ -3048,21 +3071,34 @@ def test_refuse_admission_cwd_missing_records_exclusion_and_requeues(client):
     _register_worker(client, host="desktop", mount_roots=["/home"])
     cwd = "/home/u/p/.claude/worktrees/wt"
     jid = _submit_and_assign(client, cwd=cwd, worker="desktop")
-    r = client.post(f"/jobs/{jid}/refuse-admission",
-                    json={"reason": "cwd_missing", "cwd": cwd})
+    r = client.post(f"/jobs/{jid}/refuse-admission", json={"reason": "cwd_missing", "cwd": cwd})
     assert r.status_code == 200, r.text
-    assert r.json()["state"] == "queued"          # laptop remains -> re-queued
+    assert r.json()["state"] == "queued"  # laptop remains -> re-queued
     # desktop is excluded: a poll as desktop must not re-offer the job
-    got = client.post("/next-job", json={
-        "host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-        "free_ram_gb": 28.0, "idle_cpus": 10, "mount_roots": ["/home"],
-    }).json()
+    got = client.post(
+        "/next-job",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+            "mount_roots": ["/home"],
+        },
+    ).json()
     assert got is None or got["id"] != jid
     # laptop still gets it
-    got2 = client.post("/next-job", json={
-        "host": "laptop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-        "free_ram_gb": 28.0, "idle_cpus": 10, "mount_roots": ["/home"],
-    }).json()
+    got2 = client.post(
+        "/next-job",
+        json={
+            "host": "laptop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+            "mount_roots": ["/home"],
+        },
+    ).json()
     assert got2 is not None and got2["id"] == jid
 
 
@@ -3070,8 +3106,7 @@ def test_refuse_admission_cwd_missing_terminal_when_no_eligible_left(client):
     _register_worker(client, host="desktop", mount_roots=["/home"])
     cwd = "/home/u/p/wt"
     jid = _submit_and_assign(client, cwd=cwd, worker="desktop")
-    r = client.post(f"/jobs/{jid}/refuse-admission",
-                    json={"reason": "cwd_missing", "cwd": cwd})
+    r = client.post(f"/jobs/{jid}/refuse-admission", json={"reason": "cwd_missing", "cwd": cwd})
     assert r.status_code == 200, r.text
     info = r.json()
     assert info["state"] == "failed"
@@ -3081,8 +3116,7 @@ def test_refuse_admission_cwd_missing_terminal_when_no_eligible_left(client):
 def test_refuse_admission_gpu_contention_unchanged(client):
     _register_worker(client, host="desktop", mount_roots=["/home"])
     jid = _submit_and_assign(client, cwd="/home/u/p", worker="desktop")
-    r = client.post(f"/jobs/{jid}/refuse-admission",
-                    json={"required_gb": 20.0, "free_gb": 2.0})
+    r = client.post(f"/jobs/{jid}/refuse-admission", json={"required_gb": 20.0, "free_gb": 2.0})
     assert r.status_code == 200, r.text
     assert r.json()["state"] == "queued"
 
@@ -3093,8 +3127,16 @@ def test_next_job_skips_excluded_worker(client):
     cwd = "/home/u/p/wt2"
     jid = _submit_and_assign(client, cwd=cwd, worker="desktop")
     client.post(f"/jobs/{jid}/refuse-admission", json={"reason": "cwd_missing", "cwd": cwd})
-    got = client.post("/next-job", json={
-        "host": "desktop", "free_vram_gb": 30.0, "unregistered_vram_gb": 0.0,
-        "free_ram_gb": 28.0, "idle_cpus": 10, "mount_roots": ["/home"],
-    }).json()
-    assert got is None or got["id"] != jid
+    got = client.post(
+        "/next-job",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+            "mount_roots": ["/home"],
+        },
+    ).json()
+    # Only one job exists and desktop is excluded -> desktop gets nothing.
+    assert got is None
