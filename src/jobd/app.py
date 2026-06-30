@@ -50,6 +50,7 @@ from jobd.estimator import (
 )
 from jobd.matcher import (
     WorkerSnapshot,
+    cwd_routability,
     eligible_workers,
     gpu_contention_warning,
     selectors_only_match,
@@ -445,9 +446,22 @@ def build_app(
             ser_warn = _serialization_warning(requires, host_pin, snapshots, session)
             gpu_warn = gpu_contention_warning(requires, host_pin, snapshots)
             preflight_warn = submit_preflight(requires, host_pin, all_snapshots)
+            cwd_route = cwd_routability(req.cwd, host_pin, all_snapshots)
+            cwd_route_warn: str | None = None
+            if cwd_route is not None:
+                is_hard, cwd_msg = cwd_route
+                if is_hard:
+                    raise HTTPException(status_code=400, detail=cwd_msg)
+                cwd_route_warn = cwd_msg
             warnings = [
                 w
-                for w in (unknown_project_warning, preflight_warn, ser_warn, gpu_warn)
+                for w in (
+                    unknown_project_warning,
+                    preflight_warn,
+                    cwd_route_warn,
+                    ser_warn,
+                    gpu_warn,
+                )
                 if w is not None
             ]
             warning_text = "; ".join(warnings) if warnings else None

@@ -2980,3 +2980,41 @@ def test_submit_vram_gb_zero_uses_profile_default(client, tmp_path):
         },
     ).json()
     assert info["vram_gb"] == 0.0
+
+
+def _register_worker(client, host, mount_roots, host_aliases=None):
+    """Register/heartbeat a worker advertising the given mount_roots."""
+    return client.post(
+        "/heartbeat",
+        json={
+            "host": host,
+            "free_vram_gb": 20,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 30,
+            "idle_cpus": 8,
+            "host_aliases": host_aliases or [],
+            "mount_roots": mount_roots,
+        },
+    )
+
+
+def test_submit_hard_denies_pinned_cwd_without_mount_root(client):
+    # Register a worker whose mount_roots do NOT cover the cwd, pinned to it.
+    _register_worker(client, host="desktop", mount_roots=["/home", "/tmp"])
+    r = client.post("/submit", json={
+        "cmd": ["true"], "cwd": "/mnt/d/data/x",
+        "project": "project-a", "host_pin": "desktop",
+    })
+    assert r.status_code == 400
+    assert "/mnt/d/data/x" in r.text
+
+
+def test_submit_warns_any_pin_uncovered_cwd_but_accepts(client):
+    _register_worker(client, host="gt76", mount_roots=["/home", "/tmp"])
+    r = client.post("/submit", json={
+        "cmd": ["true"], "cwd": "/scratch/run1",
+        "project": "project-a", "host_pin": "any",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("warning") and "/scratch/run1" in body["warning"]
