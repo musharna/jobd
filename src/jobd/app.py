@@ -432,9 +432,26 @@ def build_app(
 
         with SessionLocal() as session:
             for dep_id in req.depends_on:
-                if session.get(Job, dep_id) is None:
+                parent = session.get(Job, dep_id)
+                if parent is None:
                     raise HTTPException(
                         status_code=400, detail=f"depends_on refers to missing job: {dep_id}"
+                    )
+                # A default-policy (non-any-exit) child needs the parent to
+                # reach COMPLETED. If the parent is ALREADY in a failed-side
+                # terminal, it never will — and no future transition fires the
+                # cascade to cancel this child, so it would strand in QUEUED
+                # forever. Reject at submit instead. (any-exit children are fine:
+                # any terminal parent satisfies their dep.)
+                if not req.depends_on_any_exit and parent.state in _FAILED_SIDE_TERMINAL:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"depends_on parent {dep_id} is already {parent.state} "
+                            "(a failed-side terminal); a default-policy dependent would "
+                            "never dispatch. Resubmit the parent, or pass "
+                            "depends_on_any_exit to proceed on any terminal state."
+                        ),
                     )
             now = datetime.now(UTC)
             # Warnings are routing-derived (requires / host_pin / live capacity),
@@ -1037,6 +1054,11 @@ def build_app(
                     job.state = JobState.FAILED
                     job.worker = None
                     job.termination_reason = "cwd_unreachable"
+                    # cwd_unreachable is a failed-side terminal: the job never
+                    # ran, so its default-policy dependents can't proceed and
+                    # must cascade-cancel (audit 2026-07-01 H2 — this path used
+                    # to strand them in QUEUED forever).
+                    cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
                     session.commit()
                     try:
                         with (logs_dir / f"{job_id}.log").open("a") as lf:
@@ -1047,6 +1069,9 @@ def build_app(
                             )
                     except OSError:
                         pass
+                    _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.FAILED.value)
+                    if cascaded:
+                        _wake_dispatchers()
                     session.refresh(job)
                     return _to_info(job)
                 job.state = JobState.QUEUED
@@ -1659,6 +1684,11 @@ def build_app(
         now = datetime.now(UTC).replace(tzinfo=None)
         going_offline_records: list[tuple[str, datetime | None]] = []
         scheduling_timeout_records: list[tuple[int, str, int]] = []
+        # Declared up here (not at the running-reclaim loop) so the
+        # scheduling_timeout cascade above can append to them too; all emitted
+        # once after the single commit below.
+        orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
+        cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
         with SessionLocal() as session:
             # Audit 2026-05-18 (runtime-zombies S3): expire queued jobs whose
             # caller-supplied scheduling_timeout_s elapsed. Hatchet pattern,
@@ -1697,12 +1727,19 @@ def build_app(
                 )
                 if not won:
                     continue
-                # Audit 2026-05-18 spec-review (S3 fix): no cascade on
-                # scheduling-timeout. Spec called only for the queued-job
-                # auto-cancel; cascading silently failed dependents of jobs
-                # that never even dispatched — out of scope. Real failures
-                # (jobs that ran and crashed) still cascade via the worker
-                # /complete + worker-reclaim paths above/below.
+                # Cascade over the timed-out parent: it never dispatched, so it
+                # can never produce the output a default-policy dependent needs.
+                # Without this the child strands in QUEUED forever — the matcher
+                # won't dispatch it (deps unsatisfied) and nothing else cancels
+                # it. any-exit dependents are unblocked separately by
+                # _deps_satisfied. Reverses the 2026-05-18 S3 "out of scope"
+                # call, which left non-any-exit children stranded (audit
+                # 2026-07-01 H2; the deps test only passed by calling the hook
+                # manually).
+                session.refresh(j)  # sync ORM state so the cascade sees the terminal
+                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                if cascaded:
+                    cascade_records.append((j.id, j.state, cascaded))
                 scheduling_timeout_records.append((j.id, j.project, int(j.scheduling_timeout_s)))
             # Mark workers offline past threshold (split SELECT-then-set so we
             # can emit one worker_offline event per transitioning worker).
@@ -1784,8 +1821,8 @@ def build_app(
             # already had side effects, so we transition them to ORPHANED (a
             # failed-side terminal state that cascades to dependents) rather
             # than silently re-running a job that may not be re-runnable.
-            orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
-            cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
+            # (orphan_records / cascade_records declared at the top of the sweep
+            # so the scheduling_timeout cascade shares them.)
             running = (
                 session.execute(select(Job).where(Job.state == JobState.RUNNING)).scalars().all()
             )
@@ -2082,6 +2119,10 @@ _DEPENDS_TERMINAL_ANY = {
     JobState.ORPHANED.value,
     JobState.SCHEDULING_TIMEOUT.value,
 }
+# Failed-side terminal states: a parent here can never produce the output a
+# default-policy (non-any-exit) child needs, so the child is cascade-cancelled.
+# Everything terminal except COMPLETED.
+_FAILED_SIDE_TERMINAL = _DEPENDS_TERMINAL_ANY - _DEPENDS_TERMINAL
 
 
 def _deps_satisfied(job: Job, session) -> bool:
@@ -2129,35 +2170,53 @@ def _cas_state(session, job_id: int, expected: tuple[JobState, ...], **values) -
 
 
 def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[tuple[int, str]]:
-    """When parent reaches a failed-side terminal state, cancel children that
-    did not opt into depends_on_any_exit. Returns (child_id, project) for each
-    cancelled child so the caller can emit `job_cancelled` events with
-    `by='cascade'` (schema-v2) AFTER its commit."""
-    if parent.state not in {
-        JobState.FAILED.value,
-        JobState.CANCELLED.value,
-        JobState.ORPHANED.value,
-        JobState.PREEMPTED.value,
-        JobState.SCHEDULING_TIMEOUT.value,
-    }:
+    """When `parent` reaches a failed-side terminal state, transitively cancel
+    the QUEUED descendants that did not opt into depends_on_any_exit. Returns
+    (child_id, project) for every cancelled job so the caller can emit
+    `job_cancelled` events (by='cascade', schema-v2) AFTER its commit.
+
+    Transitive: a cancelled child is itself a failed-side terminal, so its own
+    default-policy children must cascade too. In A<-B<-C, A failing cancels B,
+    and B's cancellation must cancel C — the old single-level pass stranded C in
+    QUEUED forever. Fan-in is handled by the depends_on membership test: a
+    non-any-exit child needs ALL parents COMPLETED, so any one failing cancels
+    it. Diamonds are safe — each job is cancelled at most once (`processed`)."""
+    if parent.state not in _FAILED_SIDE_TERMINAL:
         return []
     # SQLite stores datetimes as naive UTC; keep finished_at/warning_at naive.
     now = datetime.now(UTC).replace(tzinfo=None)
-    cancelled: list[tuple[int, str]] = []
+    # Index the currently-QUEUED default-policy children by every parent id they
+    # depend on. Built once from a snapshot: the traversal only cancels rows
+    # (shrinking the live QUEUED set), never adds, so the snapshot stays a valid
+    # superset and no row is re-queried mid-cascade.
     candidates = (
         session.execute(select(Job).where(Job.state == JobState.QUEUED.value)).scalars().all()
     )
+    children_by_parent: dict[int, list[Job]] = {}
     for child in candidates:
         if child.depends_on_any_exit:
             continue
-        deps = json.loads(child.depends_on_json or "[]")
-        if parent.id not in deps:
-            continue
-        child.state = JobState.CANCELLED.value
-        child.finished_at = now
-        child.warning = f"parent_failed: {parent.id} → {parent.state}"
-        child.warning_at = now
-        cancelled.append((child.id, child.project))
+        for dep_id in json.loads(child.depends_on_json or "[]"):
+            children_by_parent.setdefault(dep_id, []).append(child)
+    cancelled: list[tuple[int, str]] = []
+    processed: set[int] = set()
+    # (parent_id, parent_state) frontier — the state annotates each child's
+    # warning so it names the actual failed ancestor.
+    frontier: list[tuple[int, object]] = [(parent.id, parent.state)]
+    while frontier:
+        pid, pstate = frontier.pop()
+        for child in children_by_parent.get(pid, []):
+            if child.id in processed:
+                continue
+            processed.add(child.id)
+            child.state = JobState.CANCELLED.value
+            child.finished_at = now
+            child.warning = f"parent_failed: {pid} → {pstate}"
+            child.warning_at = now
+            cancelled.append((child.id, child.project))
+            # The cancelled child is now a failed-side terminal; cascade to its
+            # own default-policy children.
+            frontier.append((child.id, JobState.CANCELLED.value))
     return cancelled
 
 
