@@ -52,6 +52,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.1",
+    "pytest-timeout>=2.2",
     "respx>=0.20",
     "ruff>=0.3",
     "mypy>=1.8",
@@ -75,6 +76,11 @@ packages = ["src/jobd", "src/job_cli"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Bound any single hung test (a stuck subprocess/socket/watchdog) so CI fails
+# in minutes instead of stalling to GitHub's 6h job kill. Generous vs the
+# slowest real test (~50s: the meta-test that reruns the suite as a subprocess).
+# Per-test override: @pytest.mark.timeout(N).
+timeout = 300
 markers = [
     "live: hits the real jobd broker; skipped unless RUN_LIVE_JOBD=1",
 ]

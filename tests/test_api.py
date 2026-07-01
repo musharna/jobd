@@ -664,6 +664,65 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
     assert got["worker"] is None
 
 
+def test_sweeper_reclaim_clears_pending_signal(client):
+    """M1: a job assigned to a dead worker with a pending cancel signal must be
+    re-queued with signal cleared. Otherwise the fresh worker it re-dispatches
+    to reads the stale 'cancel' on its first /signal poll and kills the re-run."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Worker
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    job_id = client.post(
+        "/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
+    ).json()["id"]
+    client.post(
+        "/next-job",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+    # A cancel while ASSIGNED stamps a pending 'cancel' signal (worker not seen yet).
+    client.post(f"/jobs/{job_id}/cancel")
+    assert client.get(f"/jobs/{job_id}/signal").json()["signal"] == "cancel"
+
+    # Worker goes silent past the reclaim threshold; sweep re-queues the job.
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Worker)
+            .where(Worker.host == "ghost")
+            .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=6))
+        )
+    app_mod._sweep_once()
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["state"] == "queued", got
+    # The stale signal must be gone so the re-dispatch isn't killed on poll.
+    assert client.get(f"/jobs/{job_id}/signal").json()["signal"] is None
+
+
 def _start_job_on_worker(client, host, job_json):
     """Helper: heartbeat a worker, submit a job, claim it, and POST /started so
     the job reaches RUNNING. Returns the job id."""

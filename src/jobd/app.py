@@ -1077,6 +1077,10 @@ def build_app(
                 job.state = JobState.QUEUED
                 job.worker = None
                 job.started_at = None
+                # Clear any pending cancel/preempt signal (M1): a requeue sends
+                # the job to a FRESH worker, and a stale signal would make that
+                # worker SIGTERM the re-run on its first /signal poll.
+                job.signal = None
                 session.commit()
                 # Job is back in QUEUED, excluding the refusing host — re-route it.
                 _wake_dispatchers()
@@ -1087,6 +1091,8 @@ def build_app(
             job.state = JobState.QUEUED
             job.worker = None
             job.started_at = None
+            # Clear any pending signal (M1) — see the cwd_missing branch above.
+            job.signal = None
             session.commit()
             _emit_event(
                 logs_dir,
@@ -1812,6 +1818,10 @@ def build_app(
                     j.state = JobState.QUEUED
                     j.worker = None
                     j.started_at = None
+                    # Clear a pending cancel/preempt signal (M1): the reclaim
+                    # re-dispatches to a fresh worker, which would otherwise
+                    # honor the stale signal and kill the re-run on first poll.
+                    j.signal = None
 
             # Pre-launch CRIT-2: reclaim RUNNING jobs whose worker has died.
             # A worker crash mid-run otherwise strands the job in RUNNING
@@ -1879,6 +1889,7 @@ def build_app(
                     j.state = JobState.QUEUED
                     j.worker = None
                     j.started_at = None
+                    j.signal = None  # M1: clear stale signal before re-dispatch
                 else:
                     # Set the string value (not the enum) so the cascade's
                     # `parent.state in {...value}` membership test fires.
@@ -2305,6 +2316,9 @@ def _reconcile_worker_in_flight(
             j.worker = None
             j.started_at = None
             j.reconcile_misses = 0
+            # M1: clear a stale cancel/preempt signal so the fresh worker this
+            # requeue re-dispatches to doesn't honor it and kill the re-run.
+            j.signal = None
             requeued.append(j.id)
         else:
             # String value (not the enum) so the cascade's membership test fires.
