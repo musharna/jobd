@@ -2,6 +2,13 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Watchdog kills now escalate to SIGKILL (audit 2026-07-01, H1).** The wall / idle / first-output watchdogs in `job_worker.py` sent a single `SIGTERM` and returned from `poll_signals` without arming a kill timer. A workload that ignores SIGTERM while holding its stdout open (native code in a critical section, or a child holding the pipe) blocked the stdout-read loop forever, so the post-loop `proc.wait(timeout=grace)` escalation was never reached — the job pinned its slot (e.g. a GPU) indefinitely and later cancels went unpolled. All three watchdogs now route through `_initiate_termination`, the same idempotent path the broker cancel/preempt signal uses, which SIGTERMs and schedules the SIGKILL escalation (grace `WATCHDOG_KILL_GRACE_S`, 60s).
+- **`job wait` / `job status --watch` / MCP `wait=true` no longer hang on preempted/orphaned/scheduling_timeout jobs (audit 2026-07-01, Quality-1).** The terminal-state set was defined five times across the broker, CLI, and MCP surfaces, and three copies (`cli.py` single-job `TERMINAL_STATES`, `mcp/tools.py` `_TERMINAL`) were the narrow `{completed, failed, cancelled}` — so any wait loop spun until its timeout when a job reached one of the three newer terminal states. All copies now import a single canonical `TERMINAL_STATES` / `TERMINAL_FAIL_STATES` from `models.py` (frozensets of `JobState`; StrEnum membership works on both raw API status strings and enum values).
+
 ## [0.5.7] — 2026-07-01
 
 ### Added

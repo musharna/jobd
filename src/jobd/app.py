@@ -58,6 +58,7 @@ from jobd.matcher import (
 )
 from jobd.metrics import build_metrics_app
 from jobd.models import (
+    TERMINAL_STATES,
     AdmissionRefusal,
     ClassifyRequest,
     ClassifyResult,
@@ -92,15 +93,6 @@ class BrokerState(TypedDict):
     logs_dir: Path
     dispatch_skip_state: dict[int, str]
 
-
-TERMINAL_STATES = {
-    JobState.COMPLETED,
-    JobState.FAILED,
-    JobState.CANCELLED,
-    JobState.PREEMPTED,
-    JobState.ORPHANED,
-    JobState.SCHEDULING_TIMEOUT,
-}
 
 DEAD_WORKER_SECONDS = 300  # 5 min
 IDEMPOTENT_RECLAIM_SECONDS = 90

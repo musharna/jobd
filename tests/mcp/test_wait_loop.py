@@ -71,6 +71,63 @@ def test_submit_wait_returns_terminal_with_logs():
 
 
 @respx.mock
+def test_submit_wait_treats_preempted_as_terminal():
+    """wait=True must return as soon as the job reaches ANY terminal state,
+    including preempted/orphaned/scheduling_timeout. The old local _TERMINAL
+    listed only {completed, failed, cancelled}, so a preempted job was never
+    recognized as done and wait=True polled until MAX_WAIT_S. Guards the
+    unified models.TERMINAL_STATES import."""
+    respx.post("http://broker.test/submit").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "job_id": 8,
+                "state": "queued",
+                "project": "p",
+                "host_pin": "any",
+                "queued_at": "t",
+            },
+        )
+    )
+    # Single status read: already preempted. If _TERMINAL were incomplete the
+    # wait loop would spin past this and eventually time out instead.
+    respx.get("http://broker.test/jobs/8").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "job_id": 8,
+                "state": "preempted",
+                "exit_code": None,
+                "started_at": "t",
+                "finished_at": "t2",
+            },
+        )
+    )
+    respx.get("http://broker.test/jobs/8/output").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "tail": "",
+                "size_bytes": 0,
+                "returned_bytes": 0,
+                "truncated": False,
+                "has_log": False,
+            },
+        )
+    )
+
+    client = JobdClient(base_url="http://broker.test")
+    with patch("jobd.mcp.tools.time.sleep") as sleep_mock:
+        out = jobd_submit(
+            client,
+            {"command": "x", "project": "p", "cwd": "/x", "wait": True, "wait_timeout_s": 30},
+        )
+    assert out["state"] == "preempted"
+    assert not out.get("timed_out")
+    assert sleep_mock.call_count == 0, "should not poll once the job is already terminal"
+
+
+@respx.mock
 def test_submit_wait_returns_timeout_when_running():
     respx.post("http://broker.test/submit").mock(
         return_value=httpx.Response(
