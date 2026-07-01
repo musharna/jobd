@@ -493,6 +493,16 @@ def compute_unregistered_vram(
     return round(mib / 1024.0, 2)
 
 
+def compute_owned_vram(nvidia_procs: Iterable[tuple[int, int]], owned_pids: set[int]) -> float:
+    """VRAM (GB) actually held right now by this worker's own jobd job pids —
+    the mirror of compute_unregistered_vram. Used to avoid double-counting an
+    in-flight job's reservation: NVML free already reflects VRAM the job has
+    allocated, so only the still-unallocated part of its ad should be reserved
+    on top (M6)."""
+    mib = sum(used for pid, used in nvidia_procs if pid in owned_pids)
+    return round(mib / 1024.0, 2)
+
+
 def gpu_admission_check(required_gb: float, tracked_pids: set[int]) -> dict:
     """Live GPU contention check at the moment of decision.
 
@@ -637,22 +647,27 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
     idle_cpus = max(0, int(cpu_count - load1))
     raw_free_vram = nvidia_free_vram_gb()
     raw_free_ram = round(vm.available / (1024**3), 2)
-    # #42: subtract sum of in-flight ads so the broker matcher only sees
-    # true-available capacity. Without this, a worker running one 24 GB
-    # job still reports its full GPU as free (the foreign-PID accounting
-    # below catches the live VRAM, but tracked_pids = jobd-owned PIDs are
-    # subtracted from `unregistered`, not `free`). The live admission gate
-    # at /next-job (#41) remains the safety net for overstated ads.
+    # #42 + M6: reserve only the *unallocated* portion of in-flight jobs' VRAM
+    # ads. raw_free_vram (NVML) already reflects VRAM a running job has
+    # allocated, so subtracting its full ad on top double-counts and idles
+    # capacity the GPU actually has (M6: a steady multi-slot worker understated
+    # free VRAM by Σ(ads)). Reserve max(0, ad - already_allocated): the startup
+    # window (job spawned, CUDA not yet initialized → owned_vram≈0) still gets
+    # the full reservation so a second big job can't overcommit; a steady job
+    # reserves ~0 because NVML already covers it. The live admission gate at
+    # /next-job (#41) remains the safety net for overstated ads.
+    nvidia_procs = nvidia_processes()
+    owned_pids = _effective_owned_pids(tracked_pids)
     alloc_vram, alloc_ram, alloc_cpus = _allocations_total()
-    free_vram = max(0.0, round(raw_free_vram - alloc_vram, 2))
+    owned_vram = compute_owned_vram(nvidia_procs, owned_pids)
+    unallocated_vram = max(0.0, alloc_vram - owned_vram)
+    free_vram = max(0.0, round(raw_free_vram - unallocated_vram, 2))
     free_ram = max(0.0, round(raw_free_ram - alloc_ram, 2))
     idle_cpus = max(0, idle_cpus - alloc_cpus)
     return {
         "host": hostname(),
         "free_vram_gb": free_vram,
-        "unregistered_vram_gb": compute_unregistered_vram(
-            nvidia_processes(), _effective_owned_pids(tracked_pids)
-        ),
+        "unregistered_vram_gb": compute_unregistered_vram(nvidia_procs, owned_pids),
         "free_ram_gb": free_ram,
         "idle_cpus": idle_cpus,
         "host_aliases": _configured_aliases(),
