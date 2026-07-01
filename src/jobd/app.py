@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import TypedDict
 
 import yaml
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sse_starlette.sse import EventSourceResponse
@@ -661,10 +661,19 @@ def build_app(
             return _to_info(job, eta_ctx)
 
     @app.post("/jobs/{job_id}/log")
-    async def append_log(job_id: int, request: Request):
+    async def append_log(
+        job_id: int,
+        request: Request,
+        x_jobd_worker: str | None = Header(default=None),
+    ):
         with SessionLocal() as session:
-            if session.get(Job, job_id) is None:
+            job = session.get(Job, job_id)
+            if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            # Drop log chunks from a stale worker (M2): a partition-reclaimed job
+            # re-dispatched elsewhere must not have the original worker's output
+            # interleaved into the new run's log file.
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "log append")
         body = await request.body()
         if len(body) > MAX_LOG_CHUNK_BYTES:
             raise HTTPException(status_code=413, detail="log chunk too large")
@@ -674,7 +683,7 @@ def build_app(
         return {"bytes": len(body)}
 
     @app.post("/jobs/{job_id}/started", response_model=JobInfo)
-    def started_job(job_id: int):
+    def started_job(job_id: int, x_jobd_worker: str | None = Header(default=None)):
         """Worker reports subprocess.Popen returned: assigned -> running.
 
         The matcher flips queued->assigned at dispatch and stamps started_at,
@@ -691,6 +700,7 @@ def build_app(
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "started")
             # Guarded assigned->running: win only if the row is still ASSIGNED,
             # so a /started that races a concurrent sweeper orphan (or a cancel
             # that already went terminal) can't re-open a job that has left
@@ -712,7 +722,7 @@ def build_app(
             return _to_info(job)
 
     @app.post("/jobs/{job_id}/complete", response_model=JobInfo)
-    def complete_job(job_id: int, payload: dict):
+    def complete_job(job_id: int, payload: dict, x_jobd_worker: str | None = Header(default=None)):
         exit_code = payload.get("exit_code")
         final_state = payload.get("final_state")
         termination_reason = payload.get("termination_reason")
@@ -725,6 +735,12 @@ def build_app(
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            # Refuse a terminal report from a stale worker (M2): a
+            # partition-reclaimed job re-dispatched to a fresh worker must not be
+            # terminal-ized (or have its outcome overwritten) by the original
+            # worker that kept running. Checked before the CAS so the stale
+            # /complete never wins the transition.
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "completion")
             # final_state must name a valid terminal state. Reject garbage so a
             # typo'd worker payload can't strand the job in a non-enum state that
             # later raises ValueError in JobState(job.state) on every read.
@@ -1041,15 +1057,22 @@ def build_app(
                     for w in eligible_workers(req, job.host_pin, snapshots)
                     if w.host not in excluded
                 ]
-                _emit_event(
-                    logs_dir,
-                    "cwd_refused",
-                    source="broker",
-                    job_id=job_id,
-                    project=job.project,
-                    worker=prior_worker,
-                    cwd=payload.cwd,
-                )
+
+                # cwd_refused is emitted AFTER the commit in each branch below,
+                # never before — a failed commit must not leave events.jsonl
+                # claiming a refusal the DB never recorded (M3: this was the only
+                # violator of the emit-after-commit invariant).
+                def _emit_cwd_refused() -> None:
+                    _emit_event(
+                        logs_dir,
+                        "cwd_refused",
+                        source="broker",
+                        job_id=job_id,
+                        project=job.project,
+                        worker=prior_worker,
+                        cwd=payload.cwd,
+                    )
+
                 if not elig:
                     job.state = JobState.FAILED
                     job.worker = None
@@ -1069,6 +1092,7 @@ def build_app(
                             )
                     except OSError:
                         pass
+                    _emit_cwd_refused()
                     _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.FAILED.value)
                     if cascaded:
                         _wake_dispatchers()
@@ -1082,6 +1106,7 @@ def build_app(
                 # worker SIGTERM the re-run on its first /signal poll.
                 job.signal = None
                 session.commit()
+                _emit_cwd_refused()
                 # Job is back in QUEUED, excluding the refusing host — re-route it.
                 _wake_dispatchers()
                 session.refresh(job)
@@ -2178,6 +2203,29 @@ def _cas_state(session, job_id: int, expected: tuple[JobState, ...], **values) -
         .values(**values)
     )
     return int(result.rowcount)
+
+
+def _reject_stale_worker(
+    job_worker: str | None, reporting: str | None, job_id: int, action: str
+) -> None:
+    """Raise 409 if a worker other than the job's current owner is reporting.
+
+    A job reclaimed after a partition (sweeper/reconcile requeue) and
+    re-dispatched to a fresh worker can still receive /log, /started, or
+    /complete from the ORIGINAL worker, which kept running the workload.
+    Accepting those would clobber the current run's record/log or terminal-ize
+    the re-dispatched job under the wrong worker (M2 double-execution). The
+    reporting worker is carried in the `X-Jobd-Worker` header; `reporting is
+    None` means a pre-header worker binary — skip the check (backward
+    compatible), preserving the old best-effort behavior for old workers."""
+    if reporting is not None and reporting != job_worker:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job {job_id} is owned by worker {job_worker!r}, not {reporting!r}; "
+                f"refusing stale {action}"
+            ),
+        )
 
 
 def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[tuple[int, str]]:

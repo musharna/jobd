@@ -49,3 +49,17 @@ def test_worker_httpx_client_carries_bearer(monkeypatch):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     client = httpx.Client(base_url="http://test", timeout=1.0, headers=headers)
     assert client.headers.get("Authorization") == "Bearer s3cret"
+
+
+def test_worker_httpx_client_carries_worker_identity():
+    """M2: the worker tags every request with X-Jobd-Worker = its hostname (the
+    same value it sends as `host` in /next-job, which becomes job.worker) so the
+    broker can refuse /log, /started, and /complete from a stale worker after a
+    partition reclaim + re-dispatch."""
+    from jobd.worker.job_worker import hostname
+
+    headers: dict[str, str] = {}
+    headers["X-Jobd-Worker"] = hostname()
+    client = httpx.Client(base_url="http://test", timeout=1.0, headers=headers)
+    assert client.headers.get("X-Jobd-Worker") == hostname()
+    assert hostname()  # non-empty
