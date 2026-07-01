@@ -35,6 +35,18 @@ def _acl_disabled() -> bool:
     return os.environ.get("JOBD_DISABLE_TAILNET_ACL", "") == "1"
 
 
+# The Prometheus /metrics endpoint is mounted as an unauthenticated sub-app
+# (non-sensitive aggregate counts) and must be scrapable by an in-cluster
+# Prometheus whose source IP is the docker bridge, not a tailnet address. It is
+# still only reachable on the broker's bound (tailnet) interface. See
+# jobd.metrics.build_metrics_app.
+_ACL_EXEMPT_ROOT = "/metrics"
+
+
+def _acl_exempt(path: str) -> bool:
+    return path == _ACL_EXEMPT_ROOT or path.startswith(_ACL_EXEMPT_ROOT + "/")
+
+
 def _is_allowed_source(host: str) -> bool:
     """Return True if `host` (request.client.host string) should be allowed."""
     if host == _TEST_CLIENT_HOST:
@@ -52,6 +64,8 @@ def _is_allowed_source(host: str) -> bool:
 class TailnetACLMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if _acl_disabled():
+            return await call_next(request)
+        if _acl_exempt(request.url.path):
             return await call_next(request)
         client = request.client
         host = client.host if client else ""

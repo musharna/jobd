@@ -307,8 +307,14 @@ class AdmissionRefusal(BaseModel):
     non-jobd-owned holders driving the contention.
     """
 
-    required_gb: float
-    free_gb: float
+    # reason routes the broker's handling: "gpu_contention" (default, the
+    # original VRAM-admission path) or "cwd_missing" (the worker found the job's
+    # cwd absent on this host -> exclude this host + re-route, or fail unreachable).
+    reason: str = "gpu_contention"
+    cwd: str | None = None
+    # Optional so a cwd_missing refusal can omit them; the GPU path still sends both.
+    required_gb: float | None = None
+    free_gb: float | None = None
     foreign_pids: list[int] = Field(default_factory=list)
     foreign_vram_gb: float = 0.0
 
