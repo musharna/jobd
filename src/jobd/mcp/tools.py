@@ -18,11 +18,15 @@ from jobd.mcp.translate import (
     xlate_job_info,
     xlate_submit_payload,
 )
+from jobd.models import TERMINAL_STATES
 
 POLL_INTERVAL_S = 2.0
 MAX_WAIT_S = 270
 
-_TERMINAL = {"completed", "failed", "cancelled"}
+# Single source of truth in models.py — the old local {completed, failed,
+# cancelled} silently dropped preempted/orphaned/scheduling_timeout, so
+# wait=true hung until MAX_WAIT_S on any job that reached one of those.
+_TERMINAL = TERMINAL_STATES
 
 
 def _build_submit_payload(args: dict) -> dict:

@@ -49,6 +49,10 @@ except Exception:
 HEARTBEAT_INTERVAL_S = 5.0
 SIGNAL_POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 30.0
+# Grace between a watchdog SIGTERM and the forced SIGKILL. Matches the broker
+# cancel path's default grace so escalation is bounded the same way whether it
+# comes from the kill timer or the post-loop proc.wait().
+WATCHDOG_KILL_GRACE_S = 60.0
 
 # Bounded retry for the terminal /complete POST. The endpoint is idempotent
 # (returns current info if the job is already terminal), so re-POSTing after a
@@ -1071,8 +1075,6 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             # Wall-clock cap: total runtime exceeded. Trips even when the job
             # is producing output — useful for runaway training runs.
             if max_wall_s is not None and (now - job_started) > max_wall_s:
-                got_signal["signal"] = "cancel"
-                termination_reason["reason"] = "wall_timeout"
                 print(
                     f"[worker] job {job_id}: max_wall_s={max_wall_s}s exceeded, killing",
                     file=sys.stderr,
@@ -1086,7 +1088,13 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     reason="wall_timeout",
                     threshold_s=max_wall_s,
                 )
-                _signal_workload("TERM")
+                # Route through _initiate_termination so the watchdog kill arms
+                # the same SIGKILL-escalation timer as broker cancel/preempt. A
+                # bare SIGTERM here left SIGTERM-ignoring jobs pinning their slot
+                # forever: poll_signals returns, the stdout-read loop blocks on
+                # the still-open pipe, and the post-loop proc.wait(timeout=grace)
+                # escalation is never reached.
+                _initiate_termination("cancel", "wall_timeout", WATCHDOG_KILL_GRACE_S)
                 return
             # First-output watchdog: fires once if the workload hasn't emitted
             # a single byte within first_output_timeout_s of job start.
@@ -1099,8 +1107,6 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 and not first_output_landed[0]
                 and (now - job_started) > first_output_timeout_s
             ):
-                got_signal["signal"] = "cancel"
-                termination_reason["reason"] = "first_output_timeout"
                 print(
                     f"[worker] job {job_id}: no output within "
                     f"first_output_timeout_s={first_output_timeout_s}s of start, killing",
@@ -1115,7 +1121,8 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     reason="first_output_timeout",
                     threshold_s=first_output_timeout_s,
                 )
-                _signal_workload("TERM")
+                # See wall_timeout branch: arm the SIGKILL escalation timer.
+                _initiate_termination("cancel", "first_output_timeout", WATCHDOG_KILL_GRACE_S)
                 return
             # Idle watchdog: no log bytes for N seconds. Trips on hung jobs
             # whose process is alive but making no progress (the 2026-04-25
@@ -1124,8 +1131,6 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 with last_log_lock:
                     silent_for = now - last_log_monotonic[0]
                 if silent_for > idle_timeout_s:
-                    got_signal["signal"] = "cancel"
-                    termination_reason["reason"] = "idle_timeout"
                     print(
                         f"[worker] job {job_id}: no output for {silent_for:.0f}s "
                         f"(idle_timeout_s={idle_timeout_s}), killing",
@@ -1140,7 +1145,8 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                         reason="idle_timeout",
                         threshold_s=idle_timeout_s,
                     )
-                    _signal_workload("TERM")
+                    # See wall_timeout branch: arm the SIGKILL escalation timer.
+                    _initiate_termination("cancel", "idle_timeout", WATCHDOG_KILL_GRACE_S)
                     return
             try:
                 r = client.get(f"/jobs/{job_id}/signal", timeout=5.0)

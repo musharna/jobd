@@ -707,6 +707,96 @@ def test_user_cancel_surfaces_as_cancelled_not_failed(tmp_path, monkeypatch):
     assert "termination_reason" not in body or body.get("termination_reason") is None
 
 
+def test_run_job_watchdog_escalates_to_sigkill_when_sigterm_ignored(tmp_path, monkeypatch):
+    """A watchdog kill must escalate SIGTERM -> SIGKILL for a workload that
+    ignores SIGTERM and keeps stdout open. The wall/idle/first-output branches
+    route through _initiate_termination, which arms a kill timer; without it
+    (bare _signal_workload('TERM')) poll_signals returns, the stdout-read loop
+    blocks forever on the still-open pipe, and the post-loop
+    proc.wait(timeout=grace) escalation is never reached — the job pins its
+    slot (e.g. a GPU) indefinitely. Here only the SIGKILL lets the stub finish,
+    so reaching /complete promptly proves the timer fired."""
+    import subprocess
+
+    import jobd.worker.job_worker as job_worker
+
+    monkeypatch.setattr(job_worker, "SIGNAL_POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(job_worker, "WATCHDOG_KILL_GRACE_S", 0.3)
+    monkeypatch.setattr(
+        job_worker.shutil,
+        "which",
+        lambda name: f"/fake/bin/{name}" if name == "systemd-run" else None,
+    )
+
+    # Released ONLY by the SIGKILL escalation. A SIGTERM leaves the workload
+    # alive with stdout still blocked, modelling the ignore-SIGTERM case.
+    killed = threading.Event()
+
+    class _StubStdout:
+        def read(self, _n):
+            killed.wait(timeout=10.0)
+            return b""
+
+        def close(self):
+            pass
+
+    class _StubProc:
+        def __init__(self, _cmd, **_kw):
+            self.pid = 34444
+            self.stdout = _StubStdout()
+
+        def send_signal(self, _sig):
+            pass
+
+        def poll(self):
+            return None if not killed.is_set() else -9
+
+        def wait(self, timeout=None):
+            killed.wait(timeout=10.0)
+            return -9
+
+        def kill(self):
+            killed.set()
+
+    monkeypatch.setattr(subprocess, "Popen", _StubProc)
+    systemctl_calls: list[list[str]] = []
+
+    def _fake_run(args, **_kw):
+        if args and args[0] == "systemctl":
+            systemctl_calls.append(args)
+            if any(a == "--signal=KILL" for a in args):
+                killed.set()
+
+        class R:
+            returncode = 0
+
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    job = {
+        "id": 9401,
+        "cmd": ["bash", "-c", "sleep 60"],
+        "cwd": str(tmp_path),
+        "idle_timeout_s": 1,
+    }
+    client = _FakeClient(cancel_after_s=999.0)  # never user-cancel
+    t0 = time.monotonic()
+    run_job(client, job, set())
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 6.0, f"escalation should force-kill promptly, took {elapsed:.1f}s"
+    kill_calls = [
+        c
+        for c in systemctl_calls
+        if any(a == "--signal=KILL" for a in c) and c[-1] == "jobd-9401.scope"
+    ]
+    assert kill_calls, f"watchdog must escalate to SIGKILL on the scope unit, got {systemctl_calls}"
+    completes = [p for p in client.posts if p[0].endswith("/complete")]
+    assert len(completes) == 1
+    assert completes[0][1]["termination_reason"] == "idle_timeout"
+
+
 def test_run_job_does_not_post_started_when_popen_fails(tmp_path, monkeypatch):
     """If Popen raises (bad cmd, missing executable), the worker reports
     /complete with exit 127 — and must NOT POST /started, because there's
