@@ -1209,6 +1209,64 @@ def test_parent_cancelled_queued_cancels_child(client):
     assert row["state"] == "cancelled"
 
 
+def test_parent_failure_cascade_is_transitive(client):
+    """A<-B<-C: when A fails via /complete, the cascade must cancel B AND
+    transitively C (audit 2026-07-01 H2 — the old single-level cascade cancelled
+    only the direct child B and stranded C in QUEUED forever)."""
+    a = _submit(client).json()
+    b = _submit(client, depends_on=[a["id"]]).json()
+    c = _submit(client, depends_on=[b["id"]]).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{a['id']}/complete", json={"exit_code": 1, "final_state": "failed"})
+    assert client.get(f"/jobs/{b['id']}").json()["state"] == "cancelled"
+    assert client.get(f"/jobs/{c['id']}").json()["state"] == "cancelled"
+
+
+def test_submit_rejects_default_dep_on_terminal_failed_parent(client):
+    """audit 2026-07-01 H2: a default-policy dep on an ALREADY failed-side
+    terminal parent can never be satisfied (the parent won't reach COMPLETED)
+    and no future transition fires the cascade, so the child would strand in
+    QUEUED forever. Reject at submit (400) instead."""
+    parent = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{parent['id']}/complete", json={"exit_code": 1, "final_state": "failed"})
+    assert client.get(f"/jobs/{parent['id']}").json()["state"] == "failed"
+
+    r = _submit(client, depends_on=[parent["id"]])
+    assert r.status_code == 400, r.text
+    assert "failed-side terminal" in r.text
+
+
+def test_submit_allows_any_exit_dep_on_terminal_parent(client):
+    """The submit-time reject applies only to default-policy deps: an any-exit
+    child is satisfied by any terminal parent, so it must still be accepted and
+    become dispatchable immediately."""
+    parent = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{parent['id']}/complete", json={"exit_code": 1, "final_state": "failed"})
+
+    r = _submit(client, depends_on=[parent["id"]], any_exit=True)
+    assert r.status_code == 200, r.text
+    child = r.json()
+    claim = _next_job(client).json()
+    assert claim["id"] == child["id"]
+
+
+def test_submit_allows_default_dep_on_completed_parent(client):
+    """A default-policy dep on an already-COMPLETED parent is satisfied, not
+    rejected — the reject targets only failed-side terminals."""
+    parent = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{parent['id']}/complete", json={"exit_code": 0, "final_state": "completed"})
+
+    r = _submit(client, depends_on=[parent["id"]])
+    assert r.status_code == 200, r.text
+
+
 def test_depends_on_any_exit_allows_failed_parent(client):
     parent = _submit(client).json()
     child = _submit(client, depends_on=[parent["id"]], any_exit=True).json()
@@ -3167,6 +3225,34 @@ def test_refuse_admission_cwd_missing_terminal_when_no_eligible_left(client):
     info = r.json()
     assert info["state"] == "failed"
     assert info["termination_reason"] == "cwd_unreachable"
+
+
+def test_refuse_admission_cwd_unreachable_cascades_to_children(client):
+    """audit 2026-07-01 H2: when a job fails cwd_unreachable (no eligible worker
+    advertises its cwd), its default-policy dependents must cascade-cancel — the
+    old path failed the parent without a cascade and stranded the child."""
+    _register_worker(client, host="desktop", mount_roots=["/home"])
+    cwd = "/home/u/p/wt3"
+    parent_id = _submit_and_assign(client, cwd=cwd, worker="desktop")
+    child = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/home/u/p/child",
+            "project": "project-a",
+            "depends_on": [parent_id],
+        },
+    ).json()
+
+    r = client.post(
+        f"/jobs/{parent_id}/refuse-admission", json={"reason": "cwd_missing", "cwd": cwd}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["termination_reason"] == "cwd_unreachable"
+
+    row = client.get(f"/jobs/{child['id']}").json()
+    assert row["state"] == "cancelled", row
+    assert "parent_failed" in (row.get("warning") or "")
 
 
 def test_refuse_admission_gpu_contention_unchanged(client):
