@@ -2,6 +2,18 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.7] — 2026-07-01
+
+### Added
+
+- **Unauthenticated Prometheus `/metrics` endpoint.** The broker exposes aggregate state for scraping — `jobd_jobs{state}`, `jobd_workers{state}`, and `jobd_build_info{version}` — computed from the DB on each scrape via a `prometheus_client` custom collector (private registry; only `jobd_*` series, no default process collectors). It is mounted as an ASGI sub-app so it bypasses the global bearer-token dependency (mounts don't inherit router deps), and its `/metrics` path is exempted from the tailnet-IP ACL so an in-cluster Prometheus — whose source IP is the docker bridge, not a tailnet address — can scrape the broker's tailnet-bound port. Only non-sensitive aggregate counts are exposed, and the endpoint stays reachable only on the broker's bound interface. New dependency: `prometheus-client`.
+
+## [0.5.6] — 2026-06-30
+
+### Fixed
+
+- **Host-local cwds no longer silently misroute to `exit 127`.** A job whose `cwd` exists only on some hosts (e.g. a git worktree under `/home`, which **every** worker advertises in `mount_roots`) used to pass the broker's coarse `/next-job` prefix filter, route to a host that lacked the path, and die `[worker setup error] No such file or directory` / `exit 127` minutes later. Two layers now prevent this. **(A) Submit-time probe:** `cwd_routability` (`matcher.py`) checks the cwd against known workers' `mount_roots` — a pinned host that advertises no covering root — or a `host_pin=any` cwd that **no** known worker covers — gets a `400` with a routable hint (generalizing the prior `/mnt/c` guard), since the job can't run anywhere. Workers with empty `mount_roots` are treated as "unknown" so it never false-rejects. **(B) Worker-side re-queue:** before running, a worker verifies `os.path.isdir(cwd)`; if absent it POSTs `refuse-admission` `reason=cwd_missing` instead of `exit 127`. The broker records the host in a new per-job `jobs.excluded_workers_json` (auto-migrated), drops the job for that host at `/next-job`, and re-routes — or fails it `termination_reason="cwd_unreachable"` with an explanatory log line when no eligible worker remains (never a silent queue, never a hot loop: each worker refuses a given job at most once). `AdmissionRefusal` gains `reason`/`cwd` and relaxes `required_gb`/`free_gb` to optional; the GPU-contention admission path is unchanged. Old workers (no cwd check, empty `mount_roots`) keep working. Motivating incident: a jepagame GPU test submitted from a worktree cwd with `--gpu` (2026-06-30). Design + plan: `docs/plans/2026-06-30-submit-cwd-probe-design.md`, `…-submit-cwd-probe.md`; deploy: `…-submit-cwd-probe-deploy.md`.
+
 ## [0.5.5] — 2026-06-11
 
 ### Added
