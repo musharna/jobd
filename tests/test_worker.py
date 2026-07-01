@@ -1107,6 +1107,48 @@ def test_resource_snapshot_no_in_flight_unchanged(monkeypatch):
     assert snap["free_vram_gb"] == 30.0
 
 
+def test_resource_snapshot_does_not_double_count_allocated_vram(monkeypatch):
+    """M6: once an in-flight job has actually allocated its VRAM, NVML free
+    already reflects it — the ad reservation must NOT subtract it again, or a
+    steady multi-slot worker idles capacity the GPU actually has. Here a 24 GB
+    job on a 32 GB card (NVML free = 8) must still report 8 GB free, not
+    8 - 24 clamped to 0."""
+    _reset_in_flight()
+    try:
+        monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 8.0)
+        # The job's OWN GPU pid holds the full 24 GB (24 * 1024 MiB).
+        monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [(4242, 24 * 1024)])
+        job_worker._register_in_flight({"id": 921, "vram_gb": 24.0, "ram_gb": 0, "cpus": 0})
+        snap = job_worker.resource_snapshot({4242})  # tracked_pids owns 4242
+        assert snap["free_vram_gb"] == 8.0
+    finally:
+        _reset_in_flight()
+
+
+def test_resource_snapshot_reserves_only_unallocated_vram(monkeypatch):
+    """A job mid-startup that has allocated only part of its ad reserves the
+    remainder: raw_free - max(0, ad - allocated). Here NVML free = 20, the job
+    has allocated 12 of its 24 GB ad, so reserve 12 -> report 8."""
+    _reset_in_flight()
+    try:
+        monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 20.0)
+        monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [(4243, 12 * 1024)])
+        job_worker._register_in_flight({"id": 922, "vram_gb": 24.0, "ram_gb": 0, "cpus": 0})
+        snap = job_worker.resource_snapshot({4243})
+        assert snap["free_vram_gb"] == 8.0
+    finally:
+        _reset_in_flight()
+
+
+def test_compute_owned_vram_sums_owned_pids_only():
+    """compute_owned_vram is the mirror of compute_unregistered_vram: it sums
+    VRAM held by pids IN the owned set (GB, 2dp)."""
+    procs = [(100, 8 * 1024), (200, 4 * 1024), (300, 2 * 1024)]
+    assert job_worker.compute_owned_vram(procs, {100, 300}) == 10.0
+    assert job_worker.compute_owned_vram(procs, set()) == 0.0
+    assert job_worker.compute_owned_vram([], {100}) == 0.0
+
+
 def test_resource_snapshot_reports_slot_usage(monkeypatch):
     """Heartbeat carries max_concurrent (the env knob) + running (live
     in-flight count) so the broker can surface slot usage in `job workers`."""
