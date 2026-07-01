@@ -2,6 +2,12 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.7] — 2026-07-01
+
+### Added
+
+- **Unauthenticated Prometheus `/metrics` endpoint.** The broker exposes aggregate state for scraping — `jobd_jobs{state}`, `jobd_workers{state}`, and `jobd_build_info{version}` — computed from the DB on each scrape via a `prometheus_client` custom collector (private registry; only `jobd_*` series, no default process collectors). It is mounted as an ASGI sub-app so it bypasses the global bearer-token dependency (mounts don't inherit router deps), and its `/metrics` path is exempted from the tailnet-IP ACL so an in-cluster Prometheus — whose source IP is the docker bridge, not a tailnet address — can scrape the broker's tailnet-bound port. Only non-sensitive aggregate counts are exposed, and the endpoint stays reachable only on the broker's bound interface. New dependency: `prometheus-client`.
+
 ## [0.5.6] — 2026-06-30
 
 ### Fixed
