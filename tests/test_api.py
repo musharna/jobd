@@ -1466,6 +1466,45 @@ def test_cancel_running_sets_signal_not_state(client):
     assert row["exit_code"] == -15
 
 
+def test_cancel_queued_loses_race_to_claim_falls_through_to_signal(client, monkeypatch):
+    """H3 cancel-vs-claim TOCTOU. If a worker's atomic queued->assigned claim
+    lands between cancel_job's read (which saw QUEUED) and its guarded write,
+    the guarded UPDATE matches 0 rows. cancel must NOT clobber the claim to
+    CANCELLED (which would strand the worker running a job the user was told
+    was cancelled, with no kill signal). It must fall through to the signal
+    path: state stays assigned, signal='cancel'.
+
+    The race is injected deterministically: the first _cas_state call (the
+    queued->cancelled CAS) flips the row to ASSIGNED via a real update and
+    reports 0 rows, exactly as a concurrent claim committing mid-request would.
+    """
+    from jobd import app as app_mod
+    from jobd.models import JobState
+
+    job = _submit(client).json()
+    real_cas = app_mod._cas_state
+    calls = {"n": 0}
+
+    def racing_cas(session, job_id, expected, **values):
+        calls["n"] += 1
+        if calls["n"] == 1 and values.get("state") == JobState.CANCELLED:
+            # Simulate the matcher's claim winning: queued -> assigned, and
+            # report that our guarded cancel matched nothing.
+            real_cas(session, job_id, (JobState.QUEUED,), state=JobState.ASSIGNED, worker="w1")
+            return 0
+        return real_cas(session, job_id, expected, **values)
+
+    monkeypatch.setattr(app_mod, "_cas_state", racing_cas)
+
+    r = client.post(f"/jobs/{job['id']}/cancel")
+    assert r.status_code == 200
+    # Must NOT have been clobbered to cancelled.
+    assert r.json()["state"] in ("assigned", "running"), r.json()
+    # The cancel still lands — as a signal the worker honors.
+    sig = client.get(f"/jobs/{job['id']}/signal").json()
+    assert sig["signal"] == "cancel"
+
+
 def test_started_transitions_assigned_to_running(client):
     """Worker POST /started flips assigned -> running so callers can observe
     the live in-flight phase. Without this, jobs spend their entire run in
