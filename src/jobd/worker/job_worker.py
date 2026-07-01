@@ -1348,6 +1348,11 @@ def main():
 
     _token = os.environ.get("JOBD_API_TOKEN", "").strip()
     _headers = {"Authorization": f"Bearer {_token}"} if _token else {}
+    # Identify this worker on every request so the broker can refuse /log,
+    # /started, and /complete from a stale worker whose job was reclaimed and
+    # re-dispatched after a partition (M2). Must match the `host` this worker
+    # sends in /next-job (also hostname()), which becomes job.worker.
+    _headers["X-Jobd-Worker"] = hostname()
     client = httpx.Client(base_url=args.jobd_url, timeout=60.0, headers=_headers)
     if swept_scopes:
         _post_event(client, "stale_scope_sweep", host=hostname(), units=swept_scopes)

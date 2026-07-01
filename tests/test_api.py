@@ -1511,6 +1511,67 @@ def test_complete_rejects_invalid_final_state(client):
     assert client.get(f"/jobs/{job['id']}").json()["state"] == "running"
 
 
+def test_complete_rejects_stale_worker(client):
+    """M2: after a partition reclaim + re-dispatch, the ORIGINAL worker (still
+    running the workload) must not be able to terminal-ize the job that now
+    belongs to a different worker. A /complete whose X-Jobd-Worker header
+    doesn't match job.worker is refused (409); the job stays running."""
+    job = _submit(client).json()
+    _heartbeat(client, host="w1")
+    _next_job(client, host="w1")  # job.worker = w1
+    client.post(f"/jobs/{job['id']}/started", headers={"X-Jobd-Worker": "w1"})
+
+    stale = client.post(
+        f"/jobs/{job['id']}/complete",
+        json={"exit_code": 0, "final_state": "completed"},
+        headers={"X-Jobd-Worker": "w2"},  # a different, stale worker
+    )
+    assert stale.status_code == 409, stale.text
+    assert client.get(f"/jobs/{job['id']}").json()["state"] == "running"
+
+    # The owning worker completes it normally.
+    ok = client.post(
+        f"/jobs/{job['id']}/complete",
+        json={"exit_code": 0, "final_state": "completed"},
+        headers={"X-Jobd-Worker": "w1"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert client.get(f"/jobs/{job['id']}").json()["state"] == "completed"
+
+
+def test_complete_without_worker_header_still_accepted(client):
+    """Backward compatibility: a pre-header worker sends no X-Jobd-Worker, so the
+    stale-worker check is skipped and /complete behaves as before."""
+    job = _submit(client).json()
+    _heartbeat(client, host="w1")
+    _next_job(client, host="w1")
+    r = client.post(
+        f"/jobs/{job['id']}/complete", json={"exit_code": 0, "final_state": "completed"}
+    )
+    assert r.status_code == 200, r.text
+    assert client.get(f"/jobs/{job['id']}").json()["state"] == "completed"
+
+
+def test_log_rejects_stale_worker(client):
+    """M2: a stale worker's /log chunk must not interleave into the log file of
+    the run that now owns the job."""
+    job = _submit(client).json()
+    _heartbeat(client, host="w1")
+    _next_job(client, host="w1")
+
+    stale = client.post(
+        f"/jobs/{job['id']}/log", content=b"stale bytes", headers={"X-Jobd-Worker": "w2"}
+    )
+    assert stale.status_code == 409, stale.text
+
+    ok = client.post(
+        f"/jobs/{job['id']}/log", content=b"real bytes", headers={"X-Jobd-Worker": "w1"}
+    )
+    assert ok.status_code == 200, ok.text
+    out = client.get(f"/jobs/{job['id']}/output").json()
+    assert out["tail"] == "real bytes"
+
+
 def test_job_info_exposes_session_id(client):
     r = client.post(
         "/submit",
