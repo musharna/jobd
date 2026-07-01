@@ -32,6 +32,7 @@ dependencies = [
     "typer>=0.9",
     "httpx>=0.26",
     "sse-starlette>=2.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.urls]
