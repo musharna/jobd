@@ -56,6 +56,7 @@ from jobd.matcher import (
     selectors_only_match,
     submit_preflight,
 )
+from jobd.metrics import build_metrics_app
 from jobd.models import (
     AdmissionRefusal,
     ClassifyRequest,
@@ -277,6 +278,12 @@ def build_app(
     }
     app.state.shared = state
     app.state.SessionLocal = SessionLocal
+
+    # Prometheus metrics: mounted as a sub-app so it bypasses the global bearer
+    # token (mounts don't inherit router dependencies). Its /metrics path is
+    # exempted from the tailnet ACL in auth.py so an in-cluster Prometheus can
+    # scrape it. Exposes only aggregate job/worker counts.
+    app.mount("/metrics", build_metrics_app(SessionLocal))
 
     # Server-side long-poll wake signal. /next-job with wait_s>0 blocks on this
     # condition until a job may have become dispatchable (submit / terminal
