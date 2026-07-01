@@ -1713,3 +1713,31 @@ def test_run_job_first_output_timeout_disarms_after_first_byte(tmp_path, monkeyp
     # first_output_timeout.
     assert body.get("termination_reason") != "first_output_timeout"
     assert body["final_state"] in ("completed", "failed")  # depends on rc
+
+
+def test_run_job_refuses_admission_when_cwd_missing():
+    """B: a cwd absent on this host -> POST refuse-admission(cwd_missing), no
+    subprocess, no exit-127 /complete."""
+    posts = []
+
+    class _RecordingClient:
+        def post(self, path, json=None, content=None, **kw):
+            posts.append((path, json))
+
+            class _R:
+                status_code = 200
+
+                def json(self_inner):
+                    return {}
+
+            return _R()
+
+    job = {"id": 7, "cmd": ["true"], "cwd": "/no/such/dir/xyz_nonexistent", "env": {}}
+    run_job(_RecordingClient(), job, set())
+    paths = [p for p, _ in posts]
+    assert any(p == "/jobs/7/refuse-admission" for p in paths), paths
+    body = next(j for p, j in posts if p == "/jobs/7/refuse-admission")
+    assert body["reason"] == "cwd_missing"
+    assert body["cwd"] == "/no/such/dir/xyz_nonexistent"
+    # must NOT have started the workload / posted a 127 completion
+    assert not any(p == "/jobs/7/complete" for p in paths), paths
