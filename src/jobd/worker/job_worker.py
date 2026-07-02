@@ -49,6 +49,11 @@ except Exception:
 HEARTBEAT_INTERVAL_S = 5.0
 SIGNAL_POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 30.0
+# Grace between a watchdog SIGTERM and the forced SIGKILL. Matches the broker
+# cancel path's default grace so escalation is bounded the same way whether it
+# comes from the kill timer or the post-loop proc.wait(). Env-tunable so ops can
+# shorten it for fast-failing fleets (and the live escalation test can too).
+WATCHDOG_KILL_GRACE_S = float(os.environ.get("JOBD_WORKER_WATCHDOG_KILL_GRACE_S", "60"))
 
 # Bounded retry for the terminal /complete POST. The endpoint is idempotent
 # (returns current info if the job is already terminal), so re-POSTing after a
@@ -489,6 +494,16 @@ def compute_unregistered_vram(
     return round(mib / 1024.0, 2)
 
 
+def compute_owned_vram(nvidia_procs: Iterable[tuple[int, int]], owned_pids: set[int]) -> float:
+    """VRAM (GB) actually held right now by this worker's own jobd job pids —
+    the mirror of compute_unregistered_vram. Used to avoid double-counting an
+    in-flight job's reservation: NVML free already reflects VRAM the job has
+    allocated, so only the still-unallocated part of its ad should be reserved
+    on top (M6)."""
+    mib = sum(used for pid, used in nvidia_procs if pid in owned_pids)
+    return round(mib / 1024.0, 2)
+
+
 def gpu_admission_check(required_gb: float, tracked_pids: set[int]) -> dict:
     """Live GPU contention check at the moment of decision.
 
@@ -633,22 +648,27 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
     idle_cpus = max(0, int(cpu_count - load1))
     raw_free_vram = nvidia_free_vram_gb()
     raw_free_ram = round(vm.available / (1024**3), 2)
-    # #42: subtract sum of in-flight ads so the broker matcher only sees
-    # true-available capacity. Without this, a worker running one 24 GB
-    # job still reports its full GPU as free (the foreign-PID accounting
-    # below catches the live VRAM, but tracked_pids = jobd-owned PIDs are
-    # subtracted from `unregistered`, not `free`). The live admission gate
-    # at /next-job (#41) remains the safety net for overstated ads.
+    # #42 + M6: reserve only the *unallocated* portion of in-flight jobs' VRAM
+    # ads. raw_free_vram (NVML) already reflects VRAM a running job has
+    # allocated, so subtracting its full ad on top double-counts and idles
+    # capacity the GPU actually has (M6: a steady multi-slot worker understated
+    # free VRAM by Σ(ads)). Reserve max(0, ad - already_allocated): the startup
+    # window (job spawned, CUDA not yet initialized → owned_vram≈0) still gets
+    # the full reservation so a second big job can't overcommit; a steady job
+    # reserves ~0 because NVML already covers it. The live admission gate at
+    # /next-job (#41) remains the safety net for overstated ads.
+    nvidia_procs = nvidia_processes()
+    owned_pids = _effective_owned_pids(tracked_pids)
     alloc_vram, alloc_ram, alloc_cpus = _allocations_total()
-    free_vram = max(0.0, round(raw_free_vram - alloc_vram, 2))
+    owned_vram = compute_owned_vram(nvidia_procs, owned_pids)
+    unallocated_vram = max(0.0, alloc_vram - owned_vram)
+    free_vram = max(0.0, round(raw_free_vram - unallocated_vram, 2))
     free_ram = max(0.0, round(raw_free_ram - alloc_ram, 2))
     idle_cpus = max(0, idle_cpus - alloc_cpus)
     return {
         "host": hostname(),
         "free_vram_gb": free_vram,
-        "unregistered_vram_gb": compute_unregistered_vram(
-            nvidia_processes(), _effective_owned_pids(tracked_pids)
-        ),
+        "unregistered_vram_gb": compute_unregistered_vram(nvidia_procs, owned_pids),
         "free_ram_gb": free_ram,
         "idle_cpus": idle_cpus,
         "host_aliases": _configured_aliases(),
@@ -1071,8 +1091,6 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             # Wall-clock cap: total runtime exceeded. Trips even when the job
             # is producing output — useful for runaway training runs.
             if max_wall_s is not None and (now - job_started) > max_wall_s:
-                got_signal["signal"] = "cancel"
-                termination_reason["reason"] = "wall_timeout"
                 print(
                     f"[worker] job {job_id}: max_wall_s={max_wall_s}s exceeded, killing",
                     file=sys.stderr,
@@ -1086,7 +1104,13 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     reason="wall_timeout",
                     threshold_s=max_wall_s,
                 )
-                _signal_workload("TERM")
+                # Route through _initiate_termination so the watchdog kill arms
+                # the same SIGKILL-escalation timer as broker cancel/preempt. A
+                # bare SIGTERM here left SIGTERM-ignoring jobs pinning their slot
+                # forever: poll_signals returns, the stdout-read loop blocks on
+                # the still-open pipe, and the post-loop proc.wait(timeout=grace)
+                # escalation is never reached.
+                _initiate_termination("cancel", "wall_timeout", WATCHDOG_KILL_GRACE_S)
                 return
             # First-output watchdog: fires once if the workload hasn't emitted
             # a single byte within first_output_timeout_s of job start.
@@ -1099,8 +1123,6 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 and not first_output_landed[0]
                 and (now - job_started) > first_output_timeout_s
             ):
-                got_signal["signal"] = "cancel"
-                termination_reason["reason"] = "first_output_timeout"
                 print(
                     f"[worker] job {job_id}: no output within "
                     f"first_output_timeout_s={first_output_timeout_s}s of start, killing",
@@ -1115,7 +1137,8 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     reason="first_output_timeout",
                     threshold_s=first_output_timeout_s,
                 )
-                _signal_workload("TERM")
+                # See wall_timeout branch: arm the SIGKILL escalation timer.
+                _initiate_termination("cancel", "first_output_timeout", WATCHDOG_KILL_GRACE_S)
                 return
             # Idle watchdog: no log bytes for N seconds. Trips on hung jobs
             # whose process is alive but making no progress (the 2026-04-25
@@ -1124,8 +1147,6 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 with last_log_lock:
                     silent_for = now - last_log_monotonic[0]
                 if silent_for > idle_timeout_s:
-                    got_signal["signal"] = "cancel"
-                    termination_reason["reason"] = "idle_timeout"
                     print(
                         f"[worker] job {job_id}: no output for {silent_for:.0f}s "
                         f"(idle_timeout_s={idle_timeout_s}), killing",
@@ -1140,7 +1161,8 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                         reason="idle_timeout",
                         threshold_s=idle_timeout_s,
                     )
-                    _signal_workload("TERM")
+                    # See wall_timeout branch: arm the SIGKILL escalation timer.
+                    _initiate_termination("cancel", "idle_timeout", WATCHDOG_KILL_GRACE_S)
                     return
             try:
                 r = client.get(f"/jobs/{job_id}/signal", timeout=5.0)
@@ -1342,6 +1364,11 @@ def main():
 
     _token = os.environ.get("JOBD_API_TOKEN", "").strip()
     _headers = {"Authorization": f"Bearer {_token}"} if _token else {}
+    # Identify this worker on every request so the broker can refuse /log,
+    # /started, and /complete from a stale worker whose job was reclaimed and
+    # re-dispatched after a partition (M2). Must match the `host` this worker
+    # sends in /next-job (also hostname()), which becomes job.worker.
+    _headers["X-Jobd-Worker"] = hostname()
     client = httpx.Client(base_url=args.jobd_url, timeout=60.0, headers=_headers)
     if swept_scopes:
         _post_event(client, "stale_scope_sweep", host=hostname(), units=swept_scopes)

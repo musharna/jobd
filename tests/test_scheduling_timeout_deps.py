@@ -104,28 +104,32 @@ def test_scheduling_timeout_parent_unblocks_any_exit_child(client):
     assert claim["id"] == child["id"]
 
 
-def test_scheduling_timeout_parent_cascade_cancels_default_child(client, tmp_path):
+def test_scheduling_timeout_parent_cascade_cancels_default_child(client):
     parent = _submit(client).json()
     child = _submit(client, depends_on=[parent["id"]]).json()
 
     _expire_parent_to_scheduling_timeout(client, parent["id"])
     assert client.get(f"/jobs/{parent['id']}").json()["state"] == "scheduling_timeout"
 
-    # Default-policy child: the parent never produced its output, so a cascade
-    # over the scheduling_timeout parent must cancel it.
-    from sqlalchemy.orm import sessionmaker
-
-    from jobd import app as app_mod
-    from jobd.db import Job
-
-    SessionLocal = sessionmaker(app_mod._engine_for_testing(), expire_on_commit=False)
-    with SessionLocal() as session:
-        parent_row = session.get(Job, parent["id"])
-        cancelled = app_mod._cascade_on_parent_terminal(session, parent_row, tmp_path / "logs")
-        session.commit()
-
-    cancelled_ids = [c[0] if isinstance(c, tuple) else c for c in cancelled]
-    assert child["id"] in cancelled_ids, cancelled
+    # Default-policy child: the parent never produced its output, so the SWEEP
+    # itself must cascade-cancel it — no manual _cascade call (audit 2026-07-01
+    # H2). Before the fix this path skipped the cascade and the child stranded
+    # in QUEUED forever.
     row = client.get(f"/jobs/{child['id']}").json()
-    assert row["state"] == "cancelled"
+    assert row["state"] == "cancelled", row
     assert "parent_failed" in (row.get("warning") or "")
+
+
+def test_scheduling_timeout_cascade_is_transitive(client):
+    """A<-B<-C chain: parent A times out, so B cancels, and B's cancellation
+    must transitively cancel C (audit 2026-07-01 H2 — the old single-level
+    cascade stranded C in QUEUED forever)."""
+    a = _submit(client).json()
+    b = _submit(client, depends_on=[a["id"]]).json()
+    c = _submit(client, depends_on=[b["id"]]).json()
+
+    _expire_parent_to_scheduling_timeout(client, a["id"])
+
+    assert client.get(f"/jobs/{a['id']}").json()["state"] == "scheduling_timeout"
+    assert client.get(f"/jobs/{b['id']}").json()["state"] == "cancelled"
+    assert client.get(f"/jobs/{c['id']}").json()["state"] == "cancelled"

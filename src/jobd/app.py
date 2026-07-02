@@ -11,16 +11,15 @@ import json
 import logging
 import os
 import re
-import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TypedDict
 
 import yaml
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sse_starlette.sse import EventSourceResponse
@@ -58,6 +57,7 @@ from jobd.matcher import (
 )
 from jobd.metrics import build_metrics_app
 from jobd.models import (
+    TERMINAL_STATES,
     AdmissionRefusal,
     ClassifyRequest,
     ClassifyResult,
@@ -93,18 +93,13 @@ class BrokerState(TypedDict):
     dispatch_skip_state: dict[int, str]
 
 
-TERMINAL_STATES = {
-    JobState.COMPLETED,
-    JobState.FAILED,
-    JobState.CANCELLED,
-    JobState.PREEMPTED,
-    JobState.ORPHANED,
-    JobState.SCHEDULING_TIMEOUT,
-}
-
 DEAD_WORKER_SECONDS = 300  # 5 min
 IDEMPOTENT_RECLAIM_SECONDS = 90
 OFFLINE_AFTER_SECONDS = 120
+# Non-terminal states. A guarded /complete or /started transition wins only
+# from one of these, so it can't clobber a concurrent terminal transition (e.g.
+# a sweeper-set ORPHANED) — the complement of models.TERMINAL_STATES.
+NON_TERMINAL_STATES: tuple[JobState, ...] = tuple(s for s in JobState if s not in TERMINAL_STATES)
 # SIGTERM-drain Phase 2 (docs/plans/sigterm-drain.md): heartbeat reconcile.
 # A claimed (ASSIGNED/RUNNING) job must be absent from this many CONSECUTIVE
 # in_flight_job_ids reports, and be at least this old since its claim, before
@@ -214,16 +209,25 @@ def build_app(
     classifier_path: Path | str,
     logs_path: Path | str | None = None,
 ) -> FastAPI:
+    # Long-poll plumbing (see _wake_dispatchers below). Defined up here so both
+    # lifespan and the sweep can reach the loop handle.
+    _loop_holder: list[asyncio.AbstractEventLoop | None] = [None]
+    _wake_holder: list[asyncio.Event] = [asyncio.Event()]
+
     async def _sweep_loop():
         while True:
             try:
-                _sweep_once()
+                # Run the (blocking, SQLite-touching) sweep off the event loop so
+                # it can't freeze every async endpoint for the sweep's duration —
+                # incl. the up-to-5s busy_timeout stalls (M5).
+                await asyncio.to_thread(_sweep_once)
             except Exception as e:
                 log.warning("sweeper error: %s", e)
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
 
     @asynccontextmanager
     async def lifespan(app):
+        _loop_holder[0] = asyncio.get_running_loop()
         task = asyncio.create_task(_sweep_loop())
         yield
         task.cancel()
@@ -285,19 +289,32 @@ def build_app(
     # scrape it. Exposes only aggregate job/worker counts.
     app.mount("/metrics", build_metrics_app(SessionLocal))
 
-    # Server-side long-poll wake signal. /next-job with wait_s>0 blocks on this
-    # condition until a job may have become dispatchable (submit / terminal
-    # transition / requeue) or its deadline elapses, instead of returning
-    # instantly and forcing the worker to re-poll every 2s. notify_all is cheap
-    # and spurious wakes are harmless (the waiter just re-runs the pick and
-    # re-waits), so we wake liberally on any mutation that could newly satisfy a
-    # match. A bounded internal recheck (_LONGPOLL_RECHECK_S) backstops any wake
-    # site we miss, capping worst-case dispatch latency without a network poll.
-    _job_wake = threading.Condition()
-
+    # Server-side long-poll wake. /next-job (async) with wait_s>0 suspends on an
+    # asyncio.Event until a mutation that could newly satisfy a match (submit /
+    # terminal transition / requeue) or a bounded recheck elapses — WITHOUT
+    # holding an anyio threadpool thread, so a fleet of long-pollers can't starve
+    # /heartbeat and the other sync endpoints (M4). We wake liberally; spurious
+    # wakes are harmless (the waiter just re-runs the pick and re-waits), and
+    # _LONGPOLL_RECHECK_S backstops any wake site we miss.
+    #
+    # Wakes originate on sync threadpool threads (submit/complete/cancel/…) and
+    # the sweep thread, so they're marshalled onto the loop via
+    # call_soon_threadsafe. The event is SWAPPED (not just set) on each wake: a
+    # waiter captures the current event before its claim attempt, so a wake that
+    # fires during the attempt lands on the captured (now-set) event and the
+    # waiter returns immediately instead of missing it.
     def _wake_dispatchers() -> None:
-        with _job_wake:
-            _job_wake.notify_all()
+        loop = _loop_holder[0]
+        if loop is None:
+            return  # no async waiter has run yet — nothing is parked
+
+        def _fire() -> None:
+            ev = _wake_holder[0]
+            _wake_holder[0] = asyncio.Event()
+            ev.set()
+
+        with suppress(RuntimeError):  # loop closed during shutdown — nothing to wake
+            loop.call_soon_threadsafe(_fire)
 
     @app.get("/health")
     def health():
@@ -436,9 +453,26 @@ def build_app(
 
         with SessionLocal() as session:
             for dep_id in req.depends_on:
-                if session.get(Job, dep_id) is None:
+                parent = session.get(Job, dep_id)
+                if parent is None:
                     raise HTTPException(
                         status_code=400, detail=f"depends_on refers to missing job: {dep_id}"
+                    )
+                # A default-policy (non-any-exit) child needs the parent to
+                # reach COMPLETED. If the parent is ALREADY in a failed-side
+                # terminal, it never will — and no future transition fires the
+                # cascade to cancel this child, so it would strand in QUEUED
+                # forever. Reject at submit instead. (any-exit children are fine:
+                # any terminal parent satisfies their dep.)
+                if not req.depends_on_any_exit and parent.state in _FAILED_SIDE_TERMINAL:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"depends_on parent {dep_id} is already {parent.state} "
+                            "(a failed-side terminal); a default-policy dependent would "
+                            "never dispatch. Resubmit the parent, or pass "
+                            "depends_on_any_exit to proceed on any terminal state."
+                        ),
                     )
             now = datetime.now(UTC)
             # Warnings are routing-derived (requires / host_pin / live capacity),
@@ -648,10 +682,19 @@ def build_app(
             return _to_info(job, eta_ctx)
 
     @app.post("/jobs/{job_id}/log")
-    async def append_log(job_id: int, request: Request):
+    async def append_log(
+        job_id: int,
+        request: Request,
+        x_jobd_worker: str | None = Header(default=None),
+    ):
         with SessionLocal() as session:
-            if session.get(Job, job_id) is None:
+            job = session.get(Job, job_id)
+            if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            # Drop log chunks from a stale worker (M2): a partition-reclaimed job
+            # re-dispatched elsewhere must not have the original worker's output
+            # interleaved into the new run's log file.
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "log append")
         body = await request.body()
         if len(body) > MAX_LOG_CHUNK_BYTES:
             raise HTTPException(status_code=413, detail="log chunk too large")
@@ -661,7 +704,7 @@ def build_app(
         return {"bytes": len(body)}
 
     @app.post("/jobs/{job_id}/started", response_model=JobInfo)
-    def started_job(job_id: int):
+    def started_job(job_id: int, x_jobd_worker: str | None = Header(default=None)):
         """Worker reports subprocess.Popen returned: assigned -> running.
 
         The matcher flips queued->assigned at dispatch and stamps started_at,
@@ -678,8 +721,13 @@ def build_app(
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
-            if job.state == JobState.ASSIGNED:
-                job.state = JobState.RUNNING
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "started")
+            # Guarded assigned->running: win only if the row is still ASSIGNED,
+            # so a /started that races a concurrent sweeper orphan (or a cancel
+            # that already went terminal) can't re-open a job that has left
+            # ASSIGNED. Terminal / already-running states remain no-ops.
+            won = _cas_state(session, job_id, (JobState.ASSIGNED,), state=JobState.RUNNING)
+            if won:
                 session.commit()
                 session.refresh(job)
                 _emit_event(
@@ -690,10 +738,12 @@ def build_app(
                     project=job.project,
                     worker=job.worker,
                 )
+            else:
+                session.refresh(job)
             return _to_info(job)
 
     @app.post("/jobs/{job_id}/complete", response_model=JobInfo)
-    def complete_job(job_id: int, payload: dict):
+    def complete_job(job_id: int, payload: dict, x_jobd_worker: str | None = Header(default=None)):
         exit_code = payload.get("exit_code")
         final_state = payload.get("final_state")
         termination_reason = payload.get("termination_reason")
@@ -706,6 +756,12 @@ def build_app(
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            # Refuse a terminal report from a stale worker (M2): a
+            # partition-reclaimed job re-dispatched to a fresh worker must not be
+            # terminal-ized (or have its outcome overwritten) by the original
+            # worker that kept running. Checked before the CAS so the stale
+            # /complete never wins the transition.
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "completion")
             # final_state must name a valid terminal state. Reject garbage so a
             # typo'd worker payload can't strand the job in a non-enum state that
             # later raises ValueError in JobState(job.state) on every read.
@@ -728,18 +784,26 @@ def build_app(
             # late or duplicate /complete (worker retry, or the user cancelled /
             # the sweeper orphaned it first). Idempotent no-op — don't overwrite
             # the recorded outcome, don't re-cascade to dependents, don't re-emit
-            # job_completed.
-            if JobState(job.state) in TERMINAL_STATES:
-                return _to_info(job)
-            job.state = final_state
-            job.exit_code = exit_code
-            job.finished_at = datetime.now(UTC)
+            # job_completed. The guard is a compare-and-swap (win only from a
+            # non-terminal state) rather than a read-then-check so it can't race
+            # a concurrent sweeper orphan: read-check-write let a late /complete
+            # clobber a just-set ORPHANED back to COMPLETED (and vice versa).
+            complete_values: dict = dict(
+                state=final_state,
+                exit_code=exit_code,
+                finished_at=datetime.now(UTC),
+                # Clear any pending signal — it's been honored (or irrelevant now
+                # that the job is terminal). Otherwise a future reclaim/retry
+                # would see a stale cancel signal and die on startup.
+                signal=None,
+            )
             if termination_reason is not None:
-                job.termination_reason = termination_reason
-            # Clear any pending signal — it's been honored (or irrelevant now
-            # that the job is terminal). Otherwise a future reclaim/retry would
-            # see a stale cancel signal and die on startup.
-            job.signal = None
+                complete_values["termination_reason"] = termination_reason
+            won = _cas_state(session, job_id, NON_TERMINAL_STATES, **complete_values)
+            if not won:
+                session.refresh(job)
+                return _to_info(job)
+            session.refresh(job)
             cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
             session.commit()
             session.refresh(job)
@@ -769,21 +833,44 @@ def build_app(
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
-            cancel_event_kw: dict | None
+            cancel_event_kw: dict | None = None
             cascaded: list[tuple[int, str]] = []
-            if job.state in (JobState.RUNNING, JobState.ASSIGNED):
+            # Guarded queued->cancelled. Only wins if the row is STILL queued:
+            # a worker's atomic queued->assigned claim can land between our read
+            # and this write, and without the WHERE state=queued guard we'd
+            # clobber that claim to CANCELLED without setting `signal` — the
+            # worker would then run the job to completion while the user is told
+            # it was cancelled (the H3 cancel-vs-claim TOCTOU).
+            if job.state == JobState.QUEUED:
+                won = _cas_state(
+                    session,
+                    job_id,
+                    (JobState.QUEUED,),
+                    state=JobState.CANCELLED,
+                    finished_at=datetime.now(UTC),
+                )
+                if won:
+                    session.refresh(job)  # sync ORM state for the cascade below
+                    cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                    cancel_event_kw = dict(prior_state=JobState.QUEUED.value, by="user")
+                else:
+                    # Lost the race to the claim — re-read and fall through to
+                    # the running/assigned signal path below.
+                    session.refresh(job)
+            if cancel_event_kw is None and job.state in (JobState.RUNNING, JobState.ASSIGNED):
+                # Signal-based cancel: the worker honors it on its next poll.
+                # Guarded so a job that reached a terminal state between our read
+                # and here doesn't get a stale 'cancel' signal stamped on it.
                 prior_state = job.state.value if hasattr(job.state, "value") else job.state
-                job.signal = "cancel"
-                cancel_event_kw = dict(prior_state=prior_state, by="user_signal_pending")
-            elif job.state == JobState.QUEUED:
-                prior_state = job.state.value if hasattr(job.state, "value") else job.state
-                job.state = JobState.CANCELLED
-                job.finished_at = datetime.now(UTC)
-                cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
-                cancel_event_kw = dict(prior_state=prior_state, by="user")
-            else:
-                # terminal-state cancel is a no-op; don't emit
-                cancel_event_kw = None
+                won = _cas_state(
+                    session,
+                    job_id,
+                    (JobState.RUNNING, JobState.ASSIGNED),
+                    signal="cancel",
+                )
+                if won:
+                    cancel_event_kw = dict(prior_state=prior_state, by="user_signal_pending")
+            # else: terminal-state cancel is a no-op; don't emit
             session.commit()
             session.refresh(job)
             if cancel_event_kw is not None:
@@ -819,7 +906,10 @@ def build_app(
                     status_code=409,
                     detail=f"job {job_id} is not preemptible (submit with --preemptible or set project default)",
                 )
-            job.signal = "preempt"
+            # Guarded so a job that reached a terminal state between the check
+            # above and this write doesn't get a stale 'preempt' signal stamped
+            # on it (which a later reclaim/retry would honor and mis-kill).
+            _cas_state(session, job_id, (JobState.RUNNING, JobState.ASSIGNED), signal="preempt")
             session.commit()
             session.refresh(job)
             return _to_info(job)
@@ -932,7 +1022,9 @@ def build_app(
             return {"ok": True}
 
     @app.post("/jobs/{job_id}/refuse-admission", response_model=JobInfo)
-    def refuse_admission(job_id: int, payload: AdmissionRefusal):
+    def refuse_admission(
+        job_id: int, payload: AdmissionRefusal, x_jobd_worker: str | None = Header(default=None)
+    ):
         """Worker observed live GPU contention (free_vram < required) at the
         moment of dispatch and refuses an already-assigned job. Broker
         reverts state to QUEUED, clears `worker` and `started_at`, and emits
@@ -941,12 +1033,17 @@ def build_app(
         will catch up within ~5s) or back here once contention clears.
 
         409 if the job isn't in ASSIGNED state (race with /complete or a
-        cancel signal).
+        cancel signal), or if the reporting worker isn't the current owner
+        (M2: a stale worker whose reclaimed job was re-dispatched must not be
+        able to requeue/exclude the job now running on a different worker).
+        Every state write below is a compare-and-swap on `state=ASSIGNED` so a
+        refusal can't clobber a concurrent /complete that lands in the window.
         """
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "admission refusal")
             if job.state != JobState.ASSIGNED:
                 raise HTTPException(
                     status_code=409,
@@ -988,19 +1085,41 @@ def build_app(
                     for w in eligible_workers(req, job.host_pin, snapshots)
                     if w.host not in excluded
                 ]
-                _emit_event(
-                    logs_dir,
-                    "cwd_refused",
-                    source="broker",
-                    job_id=job_id,
-                    project=job.project,
-                    worker=prior_worker,
-                    cwd=payload.cwd,
-                )
+
+                # cwd_refused is emitted AFTER the commit in each branch below,
+                # never before — a failed commit must not leave events.jsonl
+                # claiming a refusal the DB never recorded (M3: this was the only
+                # violator of the emit-after-commit invariant).
+                def _emit_cwd_refused() -> None:
+                    _emit_event(
+                        logs_dir,
+                        "cwd_refused",
+                        source="broker",
+                        job_id=job_id,
+                        project=job.project,
+                        worker=prior_worker,
+                        cwd=payload.cwd,
+                    )
+
                 if not elig:
-                    job.state = JobState.FAILED
-                    job.worker = None
-                    job.termination_reason = "cwd_unreachable"
+                    # Guarded terminal transition: if the job left ASSIGNED under
+                    # us (a concurrent /complete), don't clobber it.
+                    if not _cas_state(
+                        session,
+                        job_id,
+                        (JobState.ASSIGNED,),
+                        state=JobState.FAILED,
+                        worker=None,
+                        termination_reason="cwd_unreachable",
+                    ):
+                        session.refresh(job)
+                        return _to_info(job)
+                    session.refresh(job)  # sync ORM state so the cascade sees FAILED
+                    # cwd_unreachable is a failed-side terminal: the job never
+                    # ran, so its default-policy dependents can't proceed and
+                    # must cascade-cancel (audit 2026-07-01 H2 — this path used
+                    # to strand them in QUEUED forever).
+                    cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
                     session.commit()
                     try:
                         with (logs_dir / f"{job_id}.log").open("a") as lf:
@@ -1011,21 +1130,45 @@ def build_app(
                             )
                     except OSError:
                         pass
+                    _emit_cwd_refused()
+                    _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.FAILED.value)
+                    if cascaded:
+                        _wake_dispatchers()
                     session.refresh(job)
                     return _to_info(job)
-                job.state = JobState.QUEUED
-                job.worker = None
-                job.started_at = None
+                # Guarded requeue (clears the stale signal, M1). If the job left
+                # ASSIGNED under us (concurrent /complete), don't clobber it.
+                if not _cas_state(
+                    session,
+                    job_id,
+                    (JobState.ASSIGNED,),
+                    state=JobState.QUEUED,
+                    worker=None,
+                    started_at=None,
+                    signal=None,
+                ):
+                    session.refresh(job)
+                    return _to_info(job)
                 session.commit()
+                _emit_cwd_refused()
                 # Job is back in QUEUED, excluding the refusing host — re-route it.
                 _wake_dispatchers()
                 session.refresh(job)
                 return _to_info(job)
 
             # --- default: gpu_contention (unchanged) ---
-            job.state = JobState.QUEUED
-            job.worker = None
-            job.started_at = None
+            # Guarded requeue — same CAS as the cwd branch above.
+            if not _cas_state(
+                session,
+                job_id,
+                (JobState.ASSIGNED,),
+                state=JobState.QUEUED,
+                worker=None,
+                started_at=None,
+                signal=None,
+            ):
+                session.refresh(job)
+                return _to_info(job)
             session.commit()
             _emit_event(
                 logs_dir,
@@ -1225,8 +1368,13 @@ def build_app(
             return {"ok": True, "deleted": host}
 
     @app.post("/next-job", response_model=JobInfo | None)
-    def next_job(q: NextJobQuery):
+    async def next_job(q: NextJobQuery):
         from jobd.matcher import pick_next_job
+
+        # Capture the running loop so sync-thread wake sites can reach it (the
+        # lifespan sets it too; this covers callers that skip lifespan, e.g.
+        # TestClient without a context manager).
+        _loop_holder[0] = asyncio.get_running_loop()
 
         def _attempt() -> JobInfo | None:
             """One claim attempt against the live queue. Returns the claimed job
@@ -1328,17 +1476,24 @@ def build_app(
         # Long-poll: hold the request up to q.wait_s, re-attempting whenever a
         # dispatcher wake fires (or every _LONGPOLL_RECHECK_S as a backstop for
         # any wake site we miss). wait_s=0 → single attempt, legacy behavior.
+        # The blocking claim runs in a thread (asyncio's default executor, NOT
+        # the anyio pool that serves the sync endpoints) and the wait suspends on
+        # the loop, so a parked long-poll holds no threadpool token (M4).
         wait_s = max(0.0, float(q.wait_s or 0.0))
         deadline = time.monotonic() + wait_s
         while True:
-            info = _attempt()
+            # Capture the wake event BEFORE the attempt so a wake that fires
+            # during the attempt isn't lost (it sets this exact event).
+            wake = _wake_holder[0]
+            info = await asyncio.to_thread(_attempt)
             if info is not None:
                 return info
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 return None
-            with _job_wake:
-                _job_wake.wait(timeout=min(remaining, _LONGPOLL_RECHECK_S))
+            # recheck backstop elapsed with no wake — loop and re-attempt
+            with suppress(TimeoutError):
+                await asyncio.wait_for(wake.wait(), timeout=min(remaining, _LONGPOLL_RECHECK_S))
 
     @app.post("/events", status_code=204)
     def ingest_event(body: EventIngest):
@@ -1623,6 +1778,11 @@ def build_app(
         now = datetime.now(UTC).replace(tzinfo=None)
         going_offline_records: list[tuple[str, datetime | None]] = []
         scheduling_timeout_records: list[tuple[int, str, int]] = []
+        # Declared up here (not at the running-reclaim loop) so the
+        # scheduling_timeout cascade above can append to them too; all emitted
+        # once after the single commit below.
+        orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
+        cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
         with SessionLocal() as session:
             # Audit 2026-05-18 (runtime-zombies S3): expire queued jobs whose
             # caller-supplied scheduling_timeout_s elapsed. Hatchet pattern,
@@ -1643,16 +1803,37 @@ def build_app(
                 deadline_age_s = (now - j.submitted_at).total_seconds()
                 if deadline_age_s <= j.scheduling_timeout_s:
                     continue
-                j.state = JobState.SCHEDULING_TIMEOUT.value
-                j.finished_at = now
-                j.termination_reason = "scheduling_timeout"
-                j.signal = None
-                # Audit 2026-05-18 spec-review (S3 fix): no cascade on
-                # scheduling-timeout. Spec called only for the queued-job
-                # auto-cancel; cascading silently failed dependents of jobs
-                # that never even dispatched — out of scope. Real failures
-                # (jobs that ran and crashed) still cascade via the worker
-                # /complete + worker-reclaim paths above/below.
+                # Guarded so a job the matcher claims (queued->assigned) at the
+                # same instant isn't clobbered back to a terminal
+                # scheduling_timeout: the sweeper reads QUEUED then writes,
+                # racing the atomic claim. If the claim won, skip — the job is
+                # dispatching, not stuck. (The orphan/reclaim writes below are
+                # instead gated by their worker-liveness check, which a live
+                # /complete's fresh heartbeat can't slip past.)
+                won = _cas_state(
+                    session,
+                    j.id,
+                    (JobState.QUEUED,),
+                    state=JobState.SCHEDULING_TIMEOUT.value,
+                    finished_at=now,
+                    termination_reason="scheduling_timeout",
+                    signal=None,
+                )
+                if not won:
+                    continue
+                # Cascade over the timed-out parent: it never dispatched, so it
+                # can never produce the output a default-policy dependent needs.
+                # Without this the child strands in QUEUED forever — the matcher
+                # won't dispatch it (deps unsatisfied) and nothing else cancels
+                # it. any-exit dependents are unblocked separately by
+                # _deps_satisfied. Reverses the 2026-05-18 S3 "out of scope"
+                # call, which left non-any-exit children stranded (audit
+                # 2026-07-01 H2; the deps test only passed by calling the hook
+                # manually).
+                session.refresh(j)  # sync ORM state so the cascade sees the terminal
+                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                if cascaded:
+                    cascade_records.append((j.id, j.state, cascaded))
                 scheduling_timeout_records.append((j.id, j.project, int(j.scheduling_timeout_s)))
             # Mark workers offline past threshold (split SELECT-then-set so we
             # can emit one worker_offline event per transitioning worker).
@@ -1722,9 +1903,21 @@ def build_app(
                     select(Worker).where(Worker.host == j.worker)
                 ).scalar_one_or_none()
                 if w is None or w.last_heartbeat < cutoff:
-                    j.state = JobState.QUEUED
-                    j.worker = None
-                    j.started_at = None
+                    # CAS-guarded (WHERE state=ASSIGNED): the reclaim DECISION is
+                    # gated by worker-liveness, but the WRITE must still not
+                    # clobber a /complete that a briefly-revived worker commits
+                    # between this pass's SELECT and its trailing commit (review
+                    # finding F1). If the row already left ASSIGNED, skip it.
+                    # Clears a pending cancel/preempt signal (M1) on the requeue.
+                    _cas_state(
+                        session,
+                        j.id,
+                        (JobState.ASSIGNED,),
+                        state=JobState.QUEUED,
+                        worker=None,
+                        started_at=None,
+                        signal=None,
+                    )
 
             # Pre-launch CRIT-2: reclaim RUNNING jobs whose worker has died.
             # A worker crash mid-run otherwise strands the job in RUNNING
@@ -1734,8 +1927,8 @@ def build_app(
             # already had side effects, so we transition them to ORPHANED (a
             # failed-side terminal state that cascades to dependents) rather
             # than silently re-running a job that may not be re-runnable.
-            orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
-            cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
+            # (orphan_records / cascade_records declared at the top of the sweep
+            # so the scheduling_timeout cascade shares them.)
             running = (
                 session.execute(select(Job).where(Job.state == JobState.RUNNING)).scalars().all()
             )
@@ -1761,10 +1954,19 @@ def build_app(
                                 select(Worker).where(Worker.host == j.worker)
                             ).scalar_one_or_none()
                             last_hb = wk.last_heartbeat if wk is not None else None
-                        j.state = JobState.ORPHANED.value
-                        j.finished_at = now
-                        j.termination_reason = "wall_clock_exceeded"
-                        j.signal = None
+                        # CAS-guarded (WHERE state=RUNNING) so a concurrent
+                        # /complete isn't clobbered back to ORPHANED (F1).
+                        if not _cas_state(
+                            session,
+                            j.id,
+                            (JobState.RUNNING,),
+                            state=JobState.ORPHANED.value,
+                            finished_at=now,
+                            termination_reason="wall_clock_exceeded",
+                            signal=None,
+                        ):
+                            continue
+                        session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
                         cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
                         cascade_records.append((j.id, j.state, cascaded))
                         orphan_records.append(
@@ -1788,17 +1990,33 @@ def build_app(
                 if w is not None and w.last_heartbeat >= cutoff:
                     continue  # worker still alive — leave the job running
                 last_hb = w.last_heartbeat if w is not None else None
+                # Both branches CAS-guard (WHERE state=RUNNING) so a /complete
+                # from a briefly-revived worker isn't clobbered (F1). M1: clear
+                # the stale signal on the requeue.
                 if idempotent:
-                    j.state = JobState.QUEUED
-                    j.worker = None
-                    j.started_at = None
+                    _cas_state(
+                        session,
+                        j.id,
+                        (JobState.RUNNING,),
+                        state=JobState.QUEUED,
+                        worker=None,
+                        started_at=None,
+                        signal=None,
+                    )
                 else:
                     # Set the string value (not the enum) so the cascade's
                     # `parent.state in {...value}` membership test fires.
-                    j.state = JobState.ORPHANED.value
-                    j.finished_at = now
-                    j.termination_reason = "worker_died"
-                    j.signal = None
+                    if not _cas_state(
+                        session,
+                        j.id,
+                        (JobState.RUNNING,),
+                        state=JobState.ORPHANED.value,
+                        finished_at=now,
+                        termination_reason="worker_died",
+                        signal=None,
+                    ):
+                        continue
+                    session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
                     cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
                     cascade_records.append((j.id, j.state, cascaded))
                     orphan_records.append((j.id, j.project, j.worker, last_hb, "worker_died"))
@@ -2032,6 +2250,10 @@ _DEPENDS_TERMINAL_ANY = {
     JobState.ORPHANED.value,
     JobState.SCHEDULING_TIMEOUT.value,
 }
+# Failed-side terminal states: a parent here can never produce the output a
+# default-policy (non-any-exit) child needs, so the child is cascade-cancelled.
+# Everything terminal except COMPLETED.
+_FAILED_SIDE_TERMINAL = _DEPENDS_TERMINAL_ANY - _DEPENDS_TERMINAL
 
 
 def _deps_satisfied(job: Job, session) -> bool:
@@ -2059,36 +2281,96 @@ def _deps_satisfied(job: Job, session) -> bool:
     return True
 
 
+def _cas_state(session, job_id: int, expected: tuple[JobState, ...], **values) -> int:
+    """Compare-and-swap a job's state: apply `values` only if the row is still
+    in one of `expected`. Returns the affected rowcount — 1 = we won, 0 = the
+    state changed between the caller's read and this write (another request, or
+    the matcher's atomic queued->assigned claim).
+
+    Mirrors that claim (next_job) so every transition write is guarded, closing
+    the read-check-write TOCTOU: without it a `cancel` could overwrite a
+    concurrent claim to CANCELLED without setting `signal`, and the worker would
+    then run to completion a job the user was told was cancelled; likewise a
+    late `/complete` could clobber a sweeper-set ORPHANED (and vice versa)."""
+    result = session.execute(
+        Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
+        .where(Job.id == job_id, Job.state.in_([s.value for s in expected]))
+        .values(**values)
+    )
+    return int(result.rowcount)
+
+
+def _reject_stale_worker(
+    job_worker: str | None, reporting: str | None, job_id: int, action: str
+) -> None:
+    """Raise 409 if a worker other than the job's current owner is reporting.
+
+    A job reclaimed after a partition (sweeper/reconcile requeue) and
+    re-dispatched to a fresh worker can still receive /log, /started, or
+    /complete from the ORIGINAL worker, which kept running the workload.
+    Accepting those would clobber the current run's record/log or terminal-ize
+    the re-dispatched job under the wrong worker (M2 double-execution). The
+    reporting worker is carried in the `X-Jobd-Worker` header; `reporting is
+    None` means a pre-header worker binary — skip the check (backward
+    compatible), preserving the old best-effort behavior for old workers."""
+    if reporting is not None and reporting != job_worker:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job {job_id} is owned by worker {job_worker!r}, not {reporting!r}; "
+                f"refusing stale {action}"
+            ),
+        )
+
+
 def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[tuple[int, str]]:
-    """When parent reaches a failed-side terminal state, cancel children that
-    did not opt into depends_on_any_exit. Returns (child_id, project) for each
-    cancelled child so the caller can emit `job_cancelled` events with
-    `by='cascade'` (schema-v2) AFTER its commit."""
-    if parent.state not in {
-        JobState.FAILED.value,
-        JobState.CANCELLED.value,
-        JobState.ORPHANED.value,
-        JobState.PREEMPTED.value,
-        JobState.SCHEDULING_TIMEOUT.value,
-    }:
+    """When `parent` reaches a failed-side terminal state, transitively cancel
+    the QUEUED descendants that did not opt into depends_on_any_exit. Returns
+    (child_id, project) for every cancelled job so the caller can emit
+    `job_cancelled` events (by='cascade', schema-v2) AFTER its commit.
+
+    Transitive: a cancelled child is itself a failed-side terminal, so its own
+    default-policy children must cascade too. In A<-B<-C, A failing cancels B,
+    and B's cancellation must cancel C — the old single-level pass stranded C in
+    QUEUED forever. Fan-in is handled by the depends_on membership test: a
+    non-any-exit child needs ALL parents COMPLETED, so any one failing cancels
+    it. Diamonds are safe — each job is cancelled at most once (`processed`)."""
+    if parent.state not in _FAILED_SIDE_TERMINAL:
         return []
     # SQLite stores datetimes as naive UTC; keep finished_at/warning_at naive.
     now = datetime.now(UTC).replace(tzinfo=None)
-    cancelled: list[tuple[int, str]] = []
+    # Index the currently-QUEUED default-policy children by every parent id they
+    # depend on. Built once from a snapshot: the traversal only cancels rows
+    # (shrinking the live QUEUED set), never adds, so the snapshot stays a valid
+    # superset and no row is re-queried mid-cascade.
     candidates = (
         session.execute(select(Job).where(Job.state == JobState.QUEUED.value)).scalars().all()
     )
+    children_by_parent: dict[int, list[Job]] = {}
     for child in candidates:
         if child.depends_on_any_exit:
             continue
-        deps = json.loads(child.depends_on_json or "[]")
-        if parent.id not in deps:
-            continue
-        child.state = JobState.CANCELLED.value
-        child.finished_at = now
-        child.warning = f"parent_failed: {parent.id} → {parent.state}"
-        child.warning_at = now
-        cancelled.append((child.id, child.project))
+        for dep_id in json.loads(child.depends_on_json or "[]"):
+            children_by_parent.setdefault(dep_id, []).append(child)
+    cancelled: list[tuple[int, str]] = []
+    processed: set[int] = set()
+    # (parent_id, parent_state) frontier — the state annotates each child's
+    # warning so it names the actual failed ancestor.
+    frontier: list[tuple[int, object]] = [(parent.id, parent.state)]
+    while frontier:
+        pid, pstate = frontier.pop()
+        for child in children_by_parent.get(pid, []):
+            if child.id in processed:
+                continue
+            processed.add(child.id)
+            child.state = JobState.CANCELLED.value
+            child.finished_at = now
+            child.warning = f"parent_failed: {pid} → {pstate}"
+            child.warning_at = now
+            cancelled.append((child.id, child.project))
+            # The cancelled child is now a failed-side terminal; cascade to its
+            # own default-policy children.
+            frontier.append((child.id, JobState.CANCELLED.value))
     return cancelled
 
 
@@ -2172,21 +2454,40 @@ def _reconcile_worker_in_flight(
                     idempotent = True
             except Exception:
                 pass
-        if j.state == JobState.ASSIGNED.value or idempotent:
-            j.state = JobState.QUEUED.value
-            j.worker = None
-            j.started_at = None
-            j.reconcile_misses = 0
-            requeued.append(j.id)
+        # CAS-guarded on the state we read (ASSIGNED or RUNNING) so a /complete
+        # from the just-revived worker — which lands on its own session right as
+        # this reconcile decides the worker is gone — isn't clobbered (F1). If
+        # the row already left that state, skip it (don't requeue/orphan/emit).
+        cur = JobState(j.state)
+        if cur == JobState.ASSIGNED or idempotent:
+            # M1: clear a stale cancel/preempt signal so the fresh worker this
+            # requeue re-dispatches to doesn't honor it and kill the re-run.
+            if _cas_state(
+                session,
+                j.id,
+                (cur,),
+                state=JobState.QUEUED.value,
+                worker=None,
+                started_at=None,
+                reconcile_misses=0,
+                signal=None,
+            ):
+                requeued.append(j.id)
         else:
             # String value (not the enum) so the cascade's membership test fires.
-            j.state = JobState.ORPHANED.value
-            j.finished_at = now
-            j.termination_reason = "worker_restarted"
-            j.signal = None
-            cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
-            cascade_records.append((j.id, j.state, cascaded))
-            orphan_records.append((j.id, j.project))
+            if _cas_state(
+                session,
+                j.id,
+                (cur,),
+                state=JobState.ORPHANED.value,
+                finished_at=now,
+                termination_reason="worker_restarted",
+                signal=None,
+            ):
+                session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
+                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                cascade_records.append((j.id, j.state, cascaded))
+                orphan_records.append((j.id, j.project))
     return orphan_records, cascade_records, requeued
 
 

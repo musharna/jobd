@@ -49,6 +49,30 @@ class JobState(StrEnum):
     SCHEDULING_TIMEOUT = "scheduling_timeout"
 
 
+# Canonical set of states from which no further transition happens. Defined
+# once here (JobState's home) so the broker, CLI, and MCP surfaces can't drift
+# apart — a partial copy makes `job wait` / `job status --watch` / MCP
+# wait=true hang forever on a preempted/orphaned/scheduling_timeout job (the
+# single-job CLI/MCP copies were the narrow {completed, failed, cancelled}).
+# JobState is a StrEnum, so members compare and hash equal to their string
+# values: `"orphaned" in TERMINAL_STATES` works on raw status strings from the
+# HTTP API just as `JobState.ORPHANED in TERMINAL_STATES` works on enum values.
+TERMINAL_STATES: frozenset[JobState] = frozenset(
+    {
+        JobState.COMPLETED,
+        JobState.FAILED,
+        JobState.CANCELLED,
+        JobState.PREEMPTED,
+        JobState.ORPHANED,
+        JobState.SCHEDULING_TIMEOUT,
+    }
+)
+
+# Terminal states that are a non-success outcome (everything terminal except
+# COMPLETED) — used for ✗-vs-✓ rendering and failure-cascade checks.
+TERMINAL_FAIL_STATES: frozenset[JobState] = TERMINAL_STATES - {JobState.COMPLETED}
+
+
 class ResourceReq(BaseModel):
     vram_gb: float = 0
     ram_gb: float = 0
