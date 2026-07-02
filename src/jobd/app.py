@@ -10,15 +10,12 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TypedDict
 
-import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
@@ -28,8 +25,53 @@ from jobd import __version__
 from jobd import events as _events
 from jobd.arrays import index_subs, render_cmd, render_env, sweep_member_subs
 from jobd.auth import install_tailnet_acl, require_token
+
+# Broker internals split into jobd.broker.* (see that package's docstring). They
+# are re-imported here so the endpoint closures in build_app() — and the tests
+# that monkeypatch e.g. jobd.app._cas_state — resolve them from this module's
+# namespace exactly as when they were defined inline.
+from jobd.broker.constants import (
+    _AUTO_PREEMPT_WARNING_PREFIX,
+    _BLOCKED_WARNING_PREFIX,
+    _FAILED_SIDE_TERMINAL,
+    _LONGPOLL_RECHECK_S,
+    _UNMATCHEABLE_WARNING_PREFIX,
+    AUTO_PREEMPT_MIN_RUNTIME_SECONDS,  # noqa: F401  # re-exported: tests read jobd.app.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
+    DEAD_WORKER_SECONDS,
+    IDEMPOTENT_RECLAIM_SECONDS,
+    JOB_RETENTION_DAYS_DEFAULT,
+    MAX_LOG_CHUNK_BYTES,
+    NON_TERMINAL_STATES,
+    OFFLINE_AFTER_SECONDS,
+    QUEUE_BLOCKED_THRESHOLD_SECONDS,
+    STALE_WORKER_THRESHOLD_S_DEFAULT,
+    SWEEP_INTERVAL_SECONDS,
+    UNMATCHEABLE_THRESHOLD_SECONDS,
+    WALL_CLOCK_BACKSTOP_GRACE_SECONDS,
+)
+from jobd.broker.context import BrokerState
+from jobd.broker.events import _emit_event, _parse_since
+from jobd.broker.jobinfo import _build_eta_ctx, _to_info
+from jobd.broker.projects import (
+    _persist_projects,
+    _projects_to_jsonable,
+)
+from jobd.broker.scheduling import (
+    _build_snapshots,
+    _find_nonpreemptible_blocker,
+    _find_preemptible_candidate,
+    _serialization_warning,
+)
+from jobd.broker.state import (
+    _cas_state,
+    _cascade_on_parent_terminal,
+    _deps_satisfied,
+    _emit_cascade_cancellations,
+    _excluded_workers,
+    _reconcile_worker_in_flight,
+    _reject_stale_worker,
+)
 from jobd.config import (
-    ClassifierRule,
     ProjectEntry,
     load_classifier_rules,
     load_profiles,
@@ -38,15 +80,7 @@ from jobd.config import (
     resolve_profile,
     resolve_project_defaults,
 )
-from jobd.ctest_eta import predict_ctest
 from jobd.db import Job, Worker, init_db, migrate
-from jobd.estimator import (
-    WallPrediction,
-    cmd_head,
-    make_predict_cache,
-    queue_start_eta,
-    remaining_for_running,
-)
 from jobd.matcher import (
     WorkerSnapshot,
     cwd_routability,
@@ -68,7 +102,6 @@ from jobd.models import (
     JobState,
     JobSubmit,
     NextJobQuery,
-    ProfileSpec,
     ResolutionSource,
     ResolvedConfig,
     WorkerHeartbeat,
@@ -76,130 +109,6 @@ from jobd.models import (
 )
 
 log = logging.getLogger("jobd")
-
-
-class BrokerState(TypedDict):
-    """Shared, mutable per-broker config + scratch, stored on app.state.shared.
-
-    Typed so the heterogeneous values resolve to their real types instead of
-    the `object` join mypy would otherwise infer from a bare dict literal.
-    """
-
-    projects: dict[str, ProjectEntry]
-    profiles: dict[str, ProfileSpec]
-    classifier: list[ClassifierRule]
-    paths: dict[str, Path]
-    logs_dir: Path
-    dispatch_skip_state: dict[int, str]
-
-
-DEAD_WORKER_SECONDS = 300  # 5 min
-IDEMPOTENT_RECLAIM_SECONDS = 90
-OFFLINE_AFTER_SECONDS = 120
-# Non-terminal states. A guarded /complete or /started transition wins only
-# from one of these, so it can't clobber a concurrent terminal transition (e.g.
-# a sweeper-set ORPHANED) — the complement of models.TERMINAL_STATES.
-NON_TERMINAL_STATES: tuple[JobState, ...] = tuple(s for s in JobState if s not in TERMINAL_STATES)
-# SIGTERM-drain Phase 2 (docs/plans/sigterm-drain.md): heartbeat reconcile.
-# A claimed (ASSIGNED/RUNNING) job must be absent from this many CONSECUTIVE
-# in_flight_job_ids reports, and be at least this old since its claim, before
-# it gets the worker-died disposition. The age floor plus the debounce cover
-# the /next-job -> first-report and /complete-in-flight races.
-RECONCILE_MISS_THRESHOLD = 2
-RECONCILE_MIN_AGE_SECONDS = 60
-# Broker-side wall-clock backstop grace (RUNNING reaper). Worker-side
-# enforcement (job_worker.poll_signals) SIGTERMs at exactly max_wall_s and
-# reports within seconds. The broker only needs to act when that enforcement
-# never lands (the worker crashed mid-run and restarted with no memory of the
-# job). This grace keeps the broker strictly looser than a healthy worker so it
-# never races one — it fires only on a genuinely stranded job. job 1364 (2026-06).
-WALL_CLOCK_BACKSTOP_GRACE_SECONDS = 120
-# Audit 2026-05-18 (runtime-zombies S6): shorter threshold than OFFLINE_AFTER
-# so a crashed-mid-run worker stops being matcher-eligible quickly. Probe
-# finding: 2 stale workers on server. Configurable via env so operators can
-# tune for heartbeat cadence.
-STALE_WORKER_THRESHOLD_S_DEFAULT = 60
-SWEEP_INTERVAL_SECONDS = 30
-# Job/log retention: terminal jobs (and their per-job .log files) whose
-# finished_at is older than this many days are pruned by the sweeper. 0
-# (default) keeps history forever — opt-in so existing deployments never
-# silently lose job records. Override via JOBD_JOB_RETENTION_DAYS. Bounds
-# jobs-table + log-dir growth; events.jsonl is bounded separately by rotation.
-JOB_RETENTION_DAYS_DEFAULT = 0
-# /next-job long-poll: a waiting worker re-attempts the pick at least this often
-# even with no wake, so a missed wake site costs at most this much latency (not
-# the full wait_s). Small enough to be a safe backstop, large enough that an
-# idle worker held on the condition isn't busy-querying.
-_LONGPOLL_RECHECK_S = 10.0
-UNMATCHEABLE_THRESHOLD_SECONDS = 60
-QUEUE_BLOCKED_THRESHOLD_SECONDS = 300  # 5 min: above this, surface load-blocker
-AUTO_PREEMPT_MIN_RUNTIME_SECONDS = 300  # don't auto-preempt jobs that just started
-MAX_LOG_CHUNK_BYTES = 10 * 1024 * 1024  # 10 MiB cap per /log append
-
-_UNMATCHEABLE_WARNING_PREFIX = "no matching worker —"
-_BLOCKED_WARNING_PREFIX = "queue-age "
-_AUTO_PREEMPT_WARNING_PREFIX = "auto-preempted in favor of job "
-
-_SINCE_RELATIVE_RE = re.compile(r"^(\d+)([hdw])$")
-
-
-def _parse_since(s: str) -> datetime:
-    """Parse '24h'/'7d'/'2w' relative or ISO-8601 absolute → cutoff datetime (UTC).
-
-    Events with ts >= cutoff are included. Mirrors the positive-only guard
-    of job_cli.cli._parse_since.
-    """
-    s = s.strip()
-    m = _SINCE_RELATIVE_RE.match(s)
-    if m:
-        n = int(m.group(1))
-        if n <= 0:
-            raise HTTPException(status_code=400, detail=f"invalid since={s!r}: must be positive")
-        unit = m.group(2)
-        delta = {
-            "h": timedelta(hours=n),
-            "d": timedelta(days=n),
-            "w": timedelta(weeks=n),
-        }[unit]
-        return datetime.now(UTC) - delta
-    # Python ≥3.11 fromisoformat accepts trailing Z, but be defensive on older
-    # variants by normalising it explicitly.
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"invalid since={s!r}: {e}") from e
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt
-
-
-def _emit_event(
-    logs_dir: Path,
-    event: str,
-    *,
-    source: str,
-    job_id: int | None = None,
-    project: str | None = None,
-    **payload,
-) -> None:
-    """Append a single schema-v2 JSON line to logs_dir/events.jsonl.
-
-    Schema: {ts, source, event, job_id, project, payload}.
-    Best-effort: errors are logged at WARNING and swallowed so observability
-    never breaks broker liveness.
-    """
-    row = {
-        "ts": datetime.now(UTC).isoformat(),
-        "source": source,
-        "event": event,
-        "job_id": job_id,
-        "project": project,
-        "payload": payload,
-    }
-    try:
-        _events.append_event(logs_dir, row)
-    except Exception as e:
-        log.warning("event emit failed (%s): %s", event, e)
 
 
 def build_app(
@@ -2123,513 +2032,3 @@ def build_app(
     globals()["_engine_for_testing"] = lambda: engine
 
     return app
-
-
-def _entry_to_yaml_dict(entry: ProjectEntry) -> dict:
-    """Serialize one ProjectEntry to the YAML on-disk shape.
-
-    Critical: emit the ``defaults:`` block whenever it carries non-zero
-    values. Older code dropped defaults on every ``set_project_priority``
-    or ``nudge_project_priority`` call, silently erasing them after one
-    nudge — see docs/projects-yaml.md §8 round-trip canary test.
-    """
-    out: dict = {"priority": entry.priority}
-    d = entry.defaults
-    defaults_dict: dict = {}
-    if d.max_wall_s is not None:
-        defaults_dict["max_wall_s"] = d.max_wall_s
-    if d.idle_timeout_s is not None:
-        defaults_dict["idle_timeout_s"] = d.idle_timeout_s
-    if d.checkpoint_grace_s is not None:
-        defaults_dict["checkpoint_grace_s"] = d.checkpoint_grace_s
-    if d.host_pin is not None:
-        defaults_dict["host_pin"] = d.host_pin
-    if d.requires is not None:
-        defaults_dict["requires"] = d.requires.model_dump(exclude_none=False)
-    if d.preemptible is not None:
-        defaults_dict["preemptible"] = d.preemptible
-    if d.priority is not None:
-        defaults_dict["priority"] = d.priority
-    if d.escalate_to_arc:
-        defaults_dict["escalate_to_arc"] = d.escalate_to_arc
-    if defaults_dict:
-        out["defaults"] = defaults_dict
-    return out
-
-
-def _entry_to_jsonable(entry: ProjectEntry) -> dict:
-    """Serialize a ProjectEntry to a JSON-safe shape for HTTP responses."""
-    return _entry_to_yaml_dict(entry)
-
-
-def _projects_to_jsonable(projects: dict[str, ProjectEntry]) -> dict[str, dict]:
-    return {name: _entry_to_jsonable(entry) for name, entry in projects.items()}
-
-
-def _persist_projects(state: BrokerState) -> None:
-    """Write the in-memory projects dict back to YAML in the canonical shape.
-
-    Round-trip safety: must preserve ``defaults:`` blocks exactly so that a
-    single ``job projects nudge`` does not silently erase per-project
-    overrides. See test_projects_yaml.test_persist_projects_round_trip.
-    """
-    data = {
-        "projects": {name: _entry_to_yaml_dict(entry) for name, entry in state["projects"].items()}
-    }
-    state["paths"]["projects"].write_text(yaml.safe_dump(data, sort_keys=False))
-
-
-_DEPENDS_TERMINAL = {JobState.COMPLETED.value}
-_DEPENDS_TERMINAL_ANY = {
-    JobState.COMPLETED.value,
-    JobState.FAILED.value,
-    JobState.CANCELLED.value,
-    JobState.PREEMPTED.value,
-    JobState.ORPHANED.value,
-    JobState.SCHEDULING_TIMEOUT.value,
-}
-# Failed-side terminal states: a parent here can never produce the output a
-# default-policy (non-any-exit) child needs, so the child is cascade-cancelled.
-# Everything terminal except COMPLETED.
-_FAILED_SIDE_TERMINAL = _DEPENDS_TERMINAL_ANY - _DEPENDS_TERMINAL
-
-
-def _deps_satisfied(job: Job, session) -> bool:
-    """True iff job's depends_on list is empty OR every parent has reached a
-    terminal state that matches the child's policy.
-
-    Policy:
-      - depends_on_any_exit=False (default): parents must reach COMPLETED.
-        If any parent is FAILED/CANCELLED/ORPHANED/PREEMPTED/SCHEDULING_TIMEOUT,
-        the child will be cascade-cancelled elsewhere — return False here so the
-        matcher doesn't dispatch it while the cascade is still pending.
-      - depends_on_any_exit=True: any terminal state unblocks.
-    """
-    deps = json.loads(job.depends_on_json or "[]")
-    if not deps:
-        return True
-    terminal = _DEPENDS_TERMINAL_ANY if job.depends_on_any_exit else _DEPENDS_TERMINAL
-    for dep_id in deps:
-        parent = session.get(Job, dep_id)
-        if parent is None:
-            # Pruned parent — treat as satisfied (generous default).
-            continue
-        if parent.state not in terminal:
-            return False
-    return True
-
-
-def _cas_state(session, job_id: int, expected: tuple[JobState, ...], **values) -> int:
-    """Compare-and-swap a job's state: apply `values` only if the row is still
-    in one of `expected`. Returns the affected rowcount — 1 = we won, 0 = the
-    state changed between the caller's read and this write (another request, or
-    the matcher's atomic queued->assigned claim).
-
-    Mirrors that claim (next_job) so every transition write is guarded, closing
-    the read-check-write TOCTOU: without it a `cancel` could overwrite a
-    concurrent claim to CANCELLED without setting `signal`, and the worker would
-    then run to completion a job the user was told was cancelled; likewise a
-    late `/complete` could clobber a sweeper-set ORPHANED (and vice versa)."""
-    result = session.execute(
-        Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
-        .where(Job.id == job_id, Job.state.in_([s.value for s in expected]))
-        .values(**values)
-    )
-    return int(result.rowcount)
-
-
-def _reject_stale_worker(
-    job_worker: str | None, reporting: str | None, job_id: int, action: str
-) -> None:
-    """Raise 409 if a worker other than the job's current owner is reporting.
-
-    A job reclaimed after a partition (sweeper/reconcile requeue) and
-    re-dispatched to a fresh worker can still receive /log, /started, or
-    /complete from the ORIGINAL worker, which kept running the workload.
-    Accepting those would clobber the current run's record/log or terminal-ize
-    the re-dispatched job under the wrong worker (M2 double-execution). The
-    reporting worker is carried in the `X-Jobd-Worker` header; `reporting is
-    None` means a pre-header worker binary — skip the check (backward
-    compatible), preserving the old best-effort behavior for old workers."""
-    if reporting is not None and reporting != job_worker:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"job {job_id} is owned by worker {job_worker!r}, not {reporting!r}; "
-                f"refusing stale {action}"
-            ),
-        )
-
-
-def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[tuple[int, str]]:
-    """When `parent` reaches a failed-side terminal state, transitively cancel
-    the QUEUED descendants that did not opt into depends_on_any_exit. Returns
-    (child_id, project) for every cancelled job so the caller can emit
-    `job_cancelled` events (by='cascade', schema-v2) AFTER its commit.
-
-    Transitive: a cancelled child is itself a failed-side terminal, so its own
-    default-policy children must cascade too. In A<-B<-C, A failing cancels B,
-    and B's cancellation must cancel C — the old single-level pass stranded C in
-    QUEUED forever. Fan-in is handled by the depends_on membership test: a
-    non-any-exit child needs ALL parents COMPLETED, so any one failing cancels
-    it. Diamonds are safe — each job is cancelled at most once (`processed`)."""
-    if parent.state not in _FAILED_SIDE_TERMINAL:
-        return []
-    # SQLite stores datetimes as naive UTC; keep finished_at/warning_at naive.
-    now = datetime.now(UTC).replace(tzinfo=None)
-    # Index the currently-QUEUED default-policy children by every parent id they
-    # depend on. Built once from a snapshot: the traversal only cancels rows
-    # (shrinking the live QUEUED set), never adds, so the snapshot stays a valid
-    # superset and no row is re-queried mid-cascade.
-    candidates = (
-        session.execute(select(Job).where(Job.state == JobState.QUEUED.value)).scalars().all()
-    )
-    children_by_parent: dict[int, list[Job]] = {}
-    for child in candidates:
-        if child.depends_on_any_exit:
-            continue
-        for dep_id in json.loads(child.depends_on_json or "[]"):
-            children_by_parent.setdefault(dep_id, []).append(child)
-    cancelled: list[tuple[int, str]] = []
-    processed: set[int] = set()
-    # (parent_id, parent_state) frontier — the state annotates each child's
-    # warning so it names the actual failed ancestor.
-    frontier: list[tuple[int, object]] = [(parent.id, parent.state)]
-    while frontier:
-        pid, pstate = frontier.pop()
-        for child in children_by_parent.get(pid, []):
-            if child.id in processed:
-                continue
-            processed.add(child.id)
-            child.state = JobState.CANCELLED.value
-            child.finished_at = now
-            child.warning = f"parent_failed: {pid} → {pstate}"
-            child.warning_at = now
-            cancelled.append((child.id, child.project))
-            # The cancelled child is now a failed-side terminal; cascade to its
-            # own default-policy children.
-            frontier.append((child.id, JobState.CANCELLED.value))
-    return cancelled
-
-
-def _emit_cascade_cancellations(
-    logs_dir: Path,
-    cancelled: list[tuple[int, str]],
-    parent_id: int,
-    parent_state: str,
-) -> None:
-    """Emit one `job_cancelled` event (by='cascade') per child cancelled by
-    `_cascade_on_parent_terminal`. Call this AFTER the caller's commit so a
-    failed commit can't leave events.jsonl claiming a cancel the DB never
-    recorded."""
-    for child_id, child_project in cancelled:
-        _emit_event(
-            logs_dir,
-            "job_cancelled",
-            source="broker",
-            job_id=child_id,
-            project=child_project,
-            prior_state=JobState.QUEUED.value,
-            by="cascade",
-            parent_job=parent_id,
-            parent_state=parent_state,
-        )
-
-
-def _reconcile_worker_in_flight(
-    session,
-    host: str,
-    reported: set[int],
-    logs_dir: Path,
-) -> tuple[list[tuple[int, str]], list[tuple[int, str, list[tuple[int, str]]]], list[int]]:
-    """SIGTERM-drain Phase 2: reconcile a worker's reported in-flight set
-    against broker-side claims (docs/plans/sigterm-drain.md).
-
-    A worker that died without draining (SIGKILL, crash, power loss) restarts
-    within seconds under Restart=on-failure and heartbeats again — refreshing
-    the liveness clock the dead-worker reaper keys on — while knowing nothing
-    about the jobs it was running. Those jobs would strand in RUNNING/ASSIGNED
-    forever. Any job claimed by `host`, older than RECONCILE_MIN_AGE_SECONDS
-    since its claim, and missing from RECONCILE_MISS_THRESHOLD consecutive
-    reports gets the worker-died disposition: ASSIGNED jobs requeue (the
-    workload never started, so no side effects — this also recovers a lost
-    /next-job response, which the heartbeat-keyed reaper never catches);
-    idempotent RUNNING jobs requeue; non-idempotent RUNNING jobs go ORPHANED
-    with termination_reason="worker_restarted" and cascade to dependents.
-
-    Mutates job rows only — the caller commits, then emits the returned
-    (orphan_records, cascade_records, requeued_ids).
-    """
-    now = datetime.now(UTC).replace(tzinfo=None)
-    orphan_records: list[tuple[int, str]] = []
-    cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
-    requeued: list[int] = []
-    claimed = (
-        session.execute(
-            select(Job).where(
-                Job.state.in_([JobState.ASSIGNED.value, JobState.RUNNING.value]),
-                Job.worker == host,
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for j in claimed:
-        if j.id in reported:
-            if j.reconcile_misses:
-                j.reconcile_misses = 0
-            continue
-        if j.started_at is None or (now - j.started_at).total_seconds() < RECONCILE_MIN_AGE_SECONDS:
-            continue
-        j.reconcile_misses = (j.reconcile_misses or 0) + 1
-        if j.reconcile_misses < RECONCILE_MISS_THRESHOLD:
-            continue
-        idempotent = False
-        if j.requires_json and j.requires_json != "{}":
-            try:
-                req = JobRequires.model_validate_json(j.requires_json)
-                if req.idempotent:
-                    idempotent = True
-            except Exception:
-                pass
-        if j.state == JobState.ASSIGNED.value or idempotent:
-            j.state = JobState.QUEUED.value
-            j.worker = None
-            j.started_at = None
-            j.reconcile_misses = 0
-            # M1: clear a stale cancel/preempt signal so the fresh worker this
-            # requeue re-dispatches to doesn't honor it and kill the re-run.
-            j.signal = None
-            requeued.append(j.id)
-        else:
-            # String value (not the enum) so the cascade's membership test fires.
-            j.state = JobState.ORPHANED.value
-            j.finished_at = now
-            j.termination_reason = "worker_restarted"
-            j.signal = None
-            cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
-            cascade_records.append((j.id, j.state, cascaded))
-            orphan_records.append((j.id, j.project))
-    return orphan_records, cascade_records, requeued
-
-
-def _find_preemptible_candidate(
-    elig: list[WorkerSnapshot],
-    queued: Job,
-    session,
-    now: datetime,
-) -> Job | None:
-    """Find a preemptible job to displace in favor of a higher-priority queued
-    job. Searches running/assigned jobs on eligible workers with priority
-    strictly less than the queued job's priority, runtime above the
-    AUTO_PREEMPT_MIN_RUNTIME_SECONDS floor, and no signal already set
-    (don't double-fire).
-
-    Returns the lowest-priority eligible candidate (most preemptable), or
-    None if no candidate qualifies.
-    """
-    cutoff = now - timedelta(seconds=AUTO_PREEMPT_MIN_RUNTIME_SECONDS)
-    hosts = [ws.host for ws in elig]
-    if not hosts:
-        return None
-    return (
-        session.execute(
-            select(Job)
-            .where(
-                Job.worker.in_(hosts),
-                Job.state.in_([JobState.ASSIGNED.value, JobState.RUNNING.value]),
-                Job.preemptible.is_(True),
-                Job.priority < queued.priority,
-                Job.signal.is_(None),
-                Job.started_at.is_not(None),
-                Job.started_at <= cutoff,
-            )
-            .order_by(Job.priority.asc(), Job.started_at.asc())
-            .limit(1)
-        )
-        .scalars()
-        .first()
-    )
-
-
-def _find_nonpreemptible_blocker(elig: list[WorkerSnapshot], session) -> Job | None:
-    """If every eligible worker has a non-preemptible job in flight, return
-    the first such blocker. Returns None if at least one eligible worker is
-    free or running only preemptible jobs (the matcher can preempt those).
-    """
-    blocker: Job | None = None
-    for ws in elig:
-        running = (
-            session.execute(
-                select(Job).where(
-                    Job.worker == ws.host,
-                    Job.state.in_([JobState.ASSIGNED.value, JobState.RUNNING.value]),
-                    Job.preemptible.is_(False),
-                )
-            )
-            .scalars()
-            .first()
-        )
-        if running is None:
-            return None
-        if blocker is None:
-            blocker = running
-    return blocker
-
-
-def _serialization_warning(
-    requires: JobRequires | None,
-    host_pin: str,
-    snapshots: list[WorkerSnapshot],
-    session,
-) -> str | None:
-    """At submit time: if exactly one online worker can route this job AND
-    that worker has a non-terminal job, return a 'will queue behind' string.
-    Returns None otherwise.
-    """
-    elig = eligible_workers(requires, host_pin, snapshots)
-    if len(elig) != 1:
-        return None
-    only = elig[0]
-    busy = (
-        session.execute(
-            select(Job).where(
-                Job.worker == only.host,
-                Job.state.in_([JobState.ASSIGNED.value, JobState.RUNNING.value]),
-            )
-        )
-        .scalars()
-        .first()
-    )
-    if busy is None:
-        return None
-    return f"will queue behind job {busy.id} on {only.host}"
-
-
-def _excluded_workers(job: Job) -> list[str]:
-    """Hosts that refused this job for a missing cwd (back-compat: NULL/"[]" -> [])."""
-    return json.loads(job.excluded_workers_json or "[]")
-
-
-def _build_snapshots(workers: list[Worker]) -> list[WorkerSnapshot]:
-    return [
-        WorkerSnapshot(
-            host=w.host,
-            host_aliases=json.loads(w.host_aliases_json or "[]"),
-            free_vram_gb=w.free_vram_gb,
-            unregistered_vram_gb=w.unregistered_vram_gb,
-            free_ram_gb=w.free_ram_gb,
-            idle_cpus=w.idle_cpus,
-            arch=w.arch,
-            os=w.os,
-            gpu=w.gpu,
-            tags=json.loads(w.tags_json or "[]"),
-            mount_roots=json.loads(w.mount_roots_json or "[]"),
-        )
-        for w in workers
-    ]
-
-
-def _to_info(job: Job, eta_ctx: dict | None = None) -> JobInfo:
-    req = None
-    if job.requires_json and job.requires_json != "{}":
-        try:
-            req = JobRequires.model_validate_json(job.requires_json)
-        except Exception:
-            req = None
-    info = JobInfo(
-        id=job.id,
-        project=job.project,
-        profile=job.profile,
-        host_pin=job.host_pin,
-        priority=job.priority,
-        state=JobState(job.state),
-        cmd=json.loads(job.cmd_json),
-        cwd=job.cwd,
-        preemptible=job.preemptible,
-        worker=job.worker,
-        submitted_at=job.submitted_at,
-        started_at=job.started_at,
-        finished_at=job.finished_at,
-        exit_code=job.exit_code,
-        vram_gb=job.vram_gb,
-        ram_gb=job.ram_gb,
-        cpus=job.cpus,
-        env=json.loads(job.env_json or "{}"),
-        requires=req,
-        warning=job.warning,
-        depends_on=json.loads(job.depends_on_json or "[]"),
-        depends_on_any_exit=job.depends_on_any_exit,
-        session_id=job.session_id,
-        fast_path=bool(job.fast_path),
-        max_wall_s=job.max_wall_s,
-        idle_timeout_s=job.idle_timeout_s,
-        checkpoint_grace_s=job.checkpoint_grace_s,
-        scheduling_timeout_s=job.scheduling_timeout_s,
-        termination_reason=job.termination_reason,
-        array_id=job.array_id,
-        array_index=job.array_index,
-        array_size=job.array_size,
-        submitted_via=job.submitted_via if job.submitted_via in ("cli", "mcp") else None,  # type: ignore[arg-type]
-    )
-    if eta_ctx is not None and job.state in {
-        JobState.QUEUED.value,
-        JobState.ASSIGNED.value,
-        JobState.RUNNING.value,
-    }:
-        _populate_eta(info, job, eta_ctx)
-    return info
-
-
-def _populate_eta(info: JobInfo, job: Job, eta_ctx: dict) -> None:
-    """Fill in eta_* fields on a non-terminal JobInfo from a per-request cache.
-
-    eta_ctx keys: "cache" (PredictCache), "queued" (list[Job]), "running"
-    (list[Job]), "now" (datetime). Built by callers once per request so
-    list endpoints don't re-query history per row.
-    """
-    cache = eta_ctx["cache"]
-    cmd = json.loads(job.cmd_json)
-    head = cmd_head(cmd)
-    ctest_pred = predict_ctest(cmd, job.cwd)
-    if ctest_pred is not None:
-        info.eta_basis = ctest_pred.basis
-        info.eta_p50_s = ctest_pred.sum_cost_s
-        info.eta_p90_s = ctest_pred.sum_cost_s
-        return
-    pred = cache.get(job.project, head)
-    info.eta_basis = pred.basis
-    if not isinstance(pred, WallPrediction):
-        return
-    info.eta_p50_s = pred.p50_s
-    info.eta_p90_s = pred.p90_s
-    info.eta_clipped = pred.clipped
-
-    if job.state == JobState.RUNNING.value:
-        rem_p50, rem_p90 = remaining_for_running(job, pred, eta_ctx["now"])
-        info.eta_remaining_p50_s = rem_p50
-        info.eta_remaining_p90_s = rem_p90
-    elif job.state == JobState.QUEUED.value:
-        start = queue_start_eta(
-            job,
-            eta_ctx["queued"],
-            eta_ctx["running"],
-            cache,
-            eta_ctx["now"],
-        )
-        if start is not None:
-            info.eta_start_p50_s = start
-
-
-def _build_eta_ctx(session) -> dict:
-    """Per-request ETA context: prediction cache + active job snapshots."""
-    queued = list(session.execute(select(Job).where(Job.state == JobState.QUEUED.value)).scalars())
-    running = list(
-        session.execute(select(Job).where(Job.state == JobState.RUNNING.value)).scalars()
-    )
-    return {
-        "cache": make_predict_cache(session),
-        "queued": queued,
-        "running": running,
-        "now": datetime.now(UTC),
-    }
