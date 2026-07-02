@@ -11,9 +11,8 @@ import json
 import logging
 import os
 import re
-import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -210,16 +209,25 @@ def build_app(
     classifier_path: Path | str,
     logs_path: Path | str | None = None,
 ) -> FastAPI:
+    # Long-poll plumbing (see _wake_dispatchers below). Defined up here so both
+    # lifespan and the sweep can reach the loop handle.
+    _loop_holder: list[asyncio.AbstractEventLoop | None] = [None]
+    _wake_holder: list[asyncio.Event] = [asyncio.Event()]
+
     async def _sweep_loop():
         while True:
             try:
-                _sweep_once()
+                # Run the (blocking, SQLite-touching) sweep off the event loop so
+                # it can't freeze every async endpoint for the sweep's duration —
+                # incl. the up-to-5s busy_timeout stalls (M5).
+                await asyncio.to_thread(_sweep_once)
             except Exception as e:
                 log.warning("sweeper error: %s", e)
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
 
     @asynccontextmanager
     async def lifespan(app):
+        _loop_holder[0] = asyncio.get_running_loop()
         task = asyncio.create_task(_sweep_loop())
         yield
         task.cancel()
@@ -281,19 +289,32 @@ def build_app(
     # scrape it. Exposes only aggregate job/worker counts.
     app.mount("/metrics", build_metrics_app(SessionLocal))
 
-    # Server-side long-poll wake signal. /next-job with wait_s>0 blocks on this
-    # condition until a job may have become dispatchable (submit / terminal
-    # transition / requeue) or its deadline elapses, instead of returning
-    # instantly and forcing the worker to re-poll every 2s. notify_all is cheap
-    # and spurious wakes are harmless (the waiter just re-runs the pick and
-    # re-waits), so we wake liberally on any mutation that could newly satisfy a
-    # match. A bounded internal recheck (_LONGPOLL_RECHECK_S) backstops any wake
-    # site we miss, capping worst-case dispatch latency without a network poll.
-    _job_wake = threading.Condition()
-
+    # Server-side long-poll wake. /next-job (async) with wait_s>0 suspends on an
+    # asyncio.Event until a mutation that could newly satisfy a match (submit /
+    # terminal transition / requeue) or a bounded recheck elapses — WITHOUT
+    # holding an anyio threadpool thread, so a fleet of long-pollers can't starve
+    # /heartbeat and the other sync endpoints (M4). We wake liberally; spurious
+    # wakes are harmless (the waiter just re-runs the pick and re-waits), and
+    # _LONGPOLL_RECHECK_S backstops any wake site we miss.
+    #
+    # Wakes originate on sync threadpool threads (submit/complete/cancel/…) and
+    # the sweep thread, so they're marshalled onto the loop via
+    # call_soon_threadsafe. The event is SWAPPED (not just set) on each wake: a
+    # waiter captures the current event before its claim attempt, so a wake that
+    # fires during the attempt lands on the captured (now-set) event and the
+    # waiter returns immediately instead of missing it.
     def _wake_dispatchers() -> None:
-        with _job_wake:
-            _job_wake.notify_all()
+        loop = _loop_holder[0]
+        if loop is None:
+            return  # no async waiter has run yet — nothing is parked
+
+        def _fire() -> None:
+            ev = _wake_holder[0]
+            _wake_holder[0] = asyncio.Event()
+            ev.set()
+
+        with suppress(RuntimeError):  # loop closed during shutdown — nothing to wake
+            loop.call_soon_threadsafe(_fire)
 
     @app.get("/health")
     def health():
@@ -1317,8 +1338,13 @@ def build_app(
             return {"ok": True, "deleted": host}
 
     @app.post("/next-job", response_model=JobInfo | None)
-    def next_job(q: NextJobQuery):
+    async def next_job(q: NextJobQuery):
         from jobd.matcher import pick_next_job
+
+        # Capture the running loop so sync-thread wake sites can reach it (the
+        # lifespan sets it too; this covers callers that skip lifespan, e.g.
+        # TestClient without a context manager).
+        _loop_holder[0] = asyncio.get_running_loop()
 
         def _attempt() -> JobInfo | None:
             """One claim attempt against the live queue. Returns the claimed job
@@ -1420,17 +1446,24 @@ def build_app(
         # Long-poll: hold the request up to q.wait_s, re-attempting whenever a
         # dispatcher wake fires (or every _LONGPOLL_RECHECK_S as a backstop for
         # any wake site we miss). wait_s=0 → single attempt, legacy behavior.
+        # The blocking claim runs in a thread (asyncio's default executor, NOT
+        # the anyio pool that serves the sync endpoints) and the wait suspends on
+        # the loop, so a parked long-poll holds no threadpool token (M4).
         wait_s = max(0.0, float(q.wait_s or 0.0))
         deadline = time.monotonic() + wait_s
         while True:
-            info = _attempt()
+            # Capture the wake event BEFORE the attempt so a wake that fires
+            # during the attempt isn't lost (it sets this exact event).
+            wake = _wake_holder[0]
+            info = await asyncio.to_thread(_attempt)
             if info is not None:
                 return info
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 return None
-            with _job_wake:
-                _job_wake.wait(timeout=min(remaining, _LONGPOLL_RECHECK_S))
+            # recheck backstop elapsed with no wake — loop and re-attempt
+            with suppress(TimeoutError):
+                await asyncio.wait_for(wake.wait(), timeout=min(remaining, _LONGPOLL_RECHECK_S))
 
     @app.post("/events", status_code=204)
     def ingest_event(body: EventIngest):

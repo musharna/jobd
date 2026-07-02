@@ -375,6 +375,88 @@ def test_next_job_empty_queue_returns_null(client):
     assert r.json() is None
 
 
+def test_next_job_longpoll_times_out_returns_null(client):
+    """M4: an async long-poll on an empty queue must return None near wait_s
+    without holding a threadpool thread. Here it should return in ~0.4s, not
+    hang and not return early."""
+    import time as _time
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
+    )
+    t0 = _time.monotonic()
+    r = client.post(
+        "/next-job",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+            "wait_s": 0.4,
+        },
+    )
+    elapsed = _time.monotonic() - t0
+    assert r.status_code == 200
+    assert r.json() is None
+    assert 0.3 < elapsed < 3.0, f"long-poll should wait ~wait_s, took {elapsed:.2f}s"
+
+
+def test_next_job_longpoll_wakes_on_submit(client):
+    """M4: a submit that lands while a worker is long-polling must WAKE the poll
+    (via the cross-thread asyncio.Event), returning the job well before the
+    wait_s deadline and before the _LONGPOLL_RECHECK_S backstop — proving the
+    wait suspends on the loop rather than parking a thread until recheck."""
+    import threading
+    import time as _time
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
+    )
+    result: dict = {}
+
+    def _poll():
+        t0 = _time.monotonic()
+        r = client.post(
+            "/next-job",
+            json={
+                "host": "desktop",
+                "free_vram_gb": 30.0,
+                "unregistered_vram_gb": 0.0,
+                "free_ram_gb": 28.0,
+                "idle_cpus": 10,
+                "wait_s": 8.0,
+            },
+        )
+        result["elapsed"] = _time.monotonic() - t0
+        result["body"] = r.json()
+
+    poller = threading.Thread(target=_poll)
+    poller.start()
+    _time.sleep(0.4)  # let the poll start and suspend on the wake event
+    client.post("/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"})
+    poller.join(timeout=5.0)
+
+    assert not poller.is_alive(), "long-poll did not return after submit"
+    assert result["body"] is not None and result["body"]["state"] == "assigned"
+    # Woken by the submit, not by the 10s recheck backstop.
+    assert result["elapsed"] < 5.0, f"wake was slow ({result['elapsed']:.2f}s) — recheck, not wake?"
+
+
 def test_append_log_and_complete(client):
     sub = client.post(
         "/submit",
