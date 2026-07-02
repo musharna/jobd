@@ -21,15 +21,18 @@ JOBD_LIVE=1 pytest tests/integration/test_broker_concurrency_live.py -v
 | `test_sanity_real_job_completes`                             | —                                   | broker+worker actually dispatch and run a job                                                                                                       |
 | `test_watchdog_escalates_to_sigkill_on_sigterm_ignoring_job` | **H1**                              | a real `trap '' TERM` workload is force-**KILL**ed by the escalation timer once the idle watchdog fires — not left RUNNING forever pinning its slot |
 | `test_cancel_running_job_terminates_child`                   | cancel-latency / **H3** signal path | `/cancel` on a genuinely-running job terminates the real child and lands the job `cancelled` promptly                                               |
+| `test_stale_worker_reports_rejected_by_live_broker`          | **M2**                              | the live broker 409s `/complete` + `/log` carrying a foreign `X-Jobd-Worker` and leaves the running job uncorrupted; the owner's report still works |
 
 The worker is launched with `JOBD_WORKER_WATCHDOG_KILL_GRACE_S=3` (a new env knob
 on the H1 fix) so the escalation test runs in seconds instead of the 60s default.
 
-## Manual (needs a real partition) — M2 stale-worker rejection
+## Manual (optional) — full M2 partition sequence end-to-end
 
-M2 (the broker refuses `/log`, `/started`, `/complete` from a stale worker after
-a partition-reclaim + re-dispatch) needs a genuine network partition between one
-worker and the broker, which isn't reliably automatable in-process. Procedure:
+The automated `test_stale_worker_reports_rejected_by_live_broker` validates the
+M2 **mechanism** directly (foreign `X-Jobd-Worker` → 409) over real HTTP. The
+full production **sequence** — partition → reclaim → re-dispatch → the original
+worker's stale completion arriving — needs a genuine partition, which isn't
+reliably automatable. To exercise it end-to-end by hand:
 
 1. Start a broker and **two** workers `wA`, `wB` (`JOBD_WORKER_HOST=wA` / `wB`).
    Set a short reclaim by using an **idempotent** job (`--needs idempotent`) so
