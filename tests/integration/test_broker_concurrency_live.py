@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -109,15 +110,30 @@ class _Broker:
         with urllib.request.urlopen(self.base + path, timeout=5) as r:
             return json.load(r)
 
-    def post(self, path: str, body: dict) -> dict:
+    def post(self, path: str, body: dict, headers: dict | None = None) -> dict:
         req = urllib.request.Request(
             self.base + path,
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **(headers or {})},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.load(r)
+
+    def post_status(self, path: str, body: dict, headers: dict | None = None) -> int:
+        """POST and return the HTTP status code, without raising on 4xx/5xx —
+        for asserting the broker's stale-worker 409 rejection."""
+        req = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", **(headers or {})},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
 
     def stop(self) -> None:
         _terminate(self.proc)
@@ -229,3 +245,32 @@ def test_cancel_running_job_terminates_child(broker: _Broker, worker: subprocess
     broker.post(f"/jobs/{jid}/cancel", {})
     final = _wait_state(broker, jid, {"cancelled", "failed", "completed"}, timeout_s=20)
     assert final["state"] == "cancelled", final
+
+
+def test_stale_worker_reports_rejected_by_live_broker(
+    broker: _Broker, worker: subprocess.Popen
+) -> None:
+    """M2 (real HTTP): once a job is owned by one worker, the live broker must
+    refuse /complete and /log carrying a DIFFERENT `X-Jobd-Worker` (a stale
+    worker whose reclaimed job was re-dispatched) with 409, and must not let the
+    stale report terminal-ize or corrupt the running job. The owner's own report
+    is still accepted.
+
+    This validates the broker-side mechanism of M2 directly over real HTTP; the
+    full partition -> reclaim -> re-dispatch -> stale-completion sequence is the
+    manual procedure in README-live.md (it needs a real partition).
+    """
+    jid = _submit(broker, ["bash", "-c", "echo started; sleep 60"])
+    running = _wait_state(broker, jid, {"running", "assigned"}, timeout_s=15)
+    owner = running["worker"]
+    assert owner, running
+
+    stale = {"X-Jobd-Worker": "ghost-worker-xyz"}
+    assert broker.post_status(f"/jobs/{jid}/complete", {"exit_code": 0}, stale) == 409
+    assert broker.post_status(f"/jobs/{jid}/log", {}, stale) == 409
+    # A stale terminal report must NOT have moved the job off running.
+    assert broker.get(f"/jobs/{jid}")["state"] in ("running", "assigned")
+
+    # The real owner can still terminate it (owner header matches job.worker).
+    assert broker.post_status(f"/jobs/{jid}/cancel", {}) == 200
+    _wait_state(broker, jid, {"cancelled", "failed", "completed"}, timeout_s=20)
