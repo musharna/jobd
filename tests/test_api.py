@@ -805,6 +805,79 @@ def test_sweeper_reclaim_clears_pending_signal(client):
     assert client.get(f"/jobs/{job_id}/signal").json()["signal"] is None
 
 
+def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatch):
+    """F1 (review finding): the sweeper's ASSIGNED reclaim is a CAS on
+    WHERE state=ASSIGNED, so a /complete that a briefly-revived worker commits
+    between the sweep's SELECT and its write is NOT clobbered back to QUEUED
+    (which would lose the result and re-dispatch → double execution).
+
+    The race is injected deterministically: right as the reclaim's _cas_state
+    runs, we flip the row to COMPLETED (as a concurrent /complete would), then
+    delegate to the real guard — which must match 0 rows and leave it completed.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Job, Worker
+    from jobd.models import JobState
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    job_id = client.post(
+        "/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
+    ).json()["id"]
+    client.post(
+        "/next-job",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Worker)
+            .where(Worker.host == "ghost")
+            .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=10))
+        )
+
+    real_cas = app_mod._cas_state
+
+    def racing_cas(session, jid, expected, **values):
+        # Fire once, on the ASSIGNED->QUEUED reclaim write: simulate a /complete
+        # landing in the same window by flipping the row COMPLETED first.
+        if expected == (JobState.ASSIGNED,) and values.get("state") == JobState.QUEUED:
+            monkeypatch.setattr(app_mod, "_cas_state", real_cas)  # only once
+            session.execute(
+                update(Job).where(Job.id == jid).values(state=JobState.COMPLETED.value, exit_code=0)
+            )
+        return real_cas(session, jid, expected, **values)
+
+    monkeypatch.setattr(app_mod, "_cas_state", racing_cas)
+    app_mod._sweep_once()
+
+    # The concurrent completion must survive — not be overwritten to queued.
+    assert client.get(f"/jobs/{job_id}").json()["state"] == "completed"
+
+
 def _start_job_on_worker(client, host, job_json):
     """Helper: heartbeat a worker, submit a job, claim it, and POST /started so
     the job reaches RUNNING. Returns the job id."""
@@ -3463,6 +3536,32 @@ def test_refuse_admission_gpu_contention_unchanged(client):
     r = client.post(f"/jobs/{jid}/refuse-admission", json={"required_gb": 20.0, "free_gb": 2.0})
     assert r.status_code == 200, r.text
     assert r.json()["state"] == "queued"
+
+
+def test_refuse_admission_rejects_stale_worker(client):
+    """M2 completeness (review finding): a worker that isn't the job's current
+    owner must not be able to requeue/exclude it via /refuse-admission — after a
+    partition-reclaim + re-dispatch, the original worker's delayed refusal would
+    otherwise wipe the new owner's active claim. Foreign X-Jobd-Worker -> 409,
+    job untouched; the owner's own refusal still works."""
+    _register_worker(client, host="desktop", mount_roots=["/home"])
+    jid = _submit_and_assign(client, cwd="/home/u/p", worker="desktop")  # job.worker=desktop
+
+    stale = client.post(
+        f"/jobs/{jid}/refuse-admission",
+        json={"required_gb": 20.0, "free_gb": 2.0},
+        headers={"X-Jobd-Worker": "ghost-worker"},
+    )
+    assert stale.status_code == 409, stale.text
+    assert client.get(f"/jobs/{jid}").json()["state"] == "assigned"  # not clobbered
+
+    ok = client.post(
+        f"/jobs/{jid}/refuse-admission",
+        json={"required_gb": 20.0, "free_gb": 2.0},
+        headers={"X-Jobd-Worker": "desktop"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["state"] == "queued"
 
 
 def test_next_job_skips_excluded_worker(client):

@@ -1022,7 +1022,9 @@ def build_app(
             return {"ok": True}
 
     @app.post("/jobs/{job_id}/refuse-admission", response_model=JobInfo)
-    def refuse_admission(job_id: int, payload: AdmissionRefusal):
+    def refuse_admission(
+        job_id: int, payload: AdmissionRefusal, x_jobd_worker: str | None = Header(default=None)
+    ):
         """Worker observed live GPU contention (free_vram < required) at the
         moment of dispatch and refuses an already-assigned job. Broker
         reverts state to QUEUED, clears `worker` and `started_at`, and emits
@@ -1031,12 +1033,17 @@ def build_app(
         will catch up within ~5s) or back here once contention clears.
 
         409 if the job isn't in ASSIGNED state (race with /complete or a
-        cancel signal).
+        cancel signal), or if the reporting worker isn't the current owner
+        (M2: a stale worker whose reclaimed job was re-dispatched must not be
+        able to requeue/exclude the job now running on a different worker).
+        Every state write below is a compare-and-swap on `state=ASSIGNED` so a
+        refusal can't clobber a concurrent /complete that lands in the window.
         """
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "admission refusal")
             if job.state != JobState.ASSIGNED:
                 raise HTTPException(
                     status_code=409,
@@ -1095,9 +1102,19 @@ def build_app(
                     )
 
                 if not elig:
-                    job.state = JobState.FAILED
-                    job.worker = None
-                    job.termination_reason = "cwd_unreachable"
+                    # Guarded terminal transition: if the job left ASSIGNED under
+                    # us (a concurrent /complete), don't clobber it.
+                    if not _cas_state(
+                        session,
+                        job_id,
+                        (JobState.ASSIGNED,),
+                        state=JobState.FAILED,
+                        worker=None,
+                        termination_reason="cwd_unreachable",
+                    ):
+                        session.refresh(job)
+                        return _to_info(job)
+                    session.refresh(job)  # sync ORM state so the cascade sees FAILED
                     # cwd_unreachable is a failed-side terminal: the job never
                     # ran, so its default-policy dependents can't proceed and
                     # must cascade-cancel (audit 2026-07-01 H2 — this path used
@@ -1119,13 +1136,19 @@ def build_app(
                         _wake_dispatchers()
                     session.refresh(job)
                     return _to_info(job)
-                job.state = JobState.QUEUED
-                job.worker = None
-                job.started_at = None
-                # Clear any pending cancel/preempt signal (M1): a requeue sends
-                # the job to a FRESH worker, and a stale signal would make that
-                # worker SIGTERM the re-run on its first /signal poll.
-                job.signal = None
+                # Guarded requeue (clears the stale signal, M1). If the job left
+                # ASSIGNED under us (concurrent /complete), don't clobber it.
+                if not _cas_state(
+                    session,
+                    job_id,
+                    (JobState.ASSIGNED,),
+                    state=JobState.QUEUED,
+                    worker=None,
+                    started_at=None,
+                    signal=None,
+                ):
+                    session.refresh(job)
+                    return _to_info(job)
                 session.commit()
                 _emit_cwd_refused()
                 # Job is back in QUEUED, excluding the refusing host — re-route it.
@@ -1134,11 +1157,18 @@ def build_app(
                 return _to_info(job)
 
             # --- default: gpu_contention (unchanged) ---
-            job.state = JobState.QUEUED
-            job.worker = None
-            job.started_at = None
-            # Clear any pending signal (M1) — see the cwd_missing branch above.
-            job.signal = None
+            # Guarded requeue — same CAS as the cwd branch above.
+            if not _cas_state(
+                session,
+                job_id,
+                (JobState.ASSIGNED,),
+                state=JobState.QUEUED,
+                worker=None,
+                started_at=None,
+                signal=None,
+            ):
+                session.refresh(job)
+                return _to_info(job)
             session.commit()
             _emit_event(
                 logs_dir,
@@ -1873,13 +1903,21 @@ def build_app(
                     select(Worker).where(Worker.host == j.worker)
                 ).scalar_one_or_none()
                 if w is None or w.last_heartbeat < cutoff:
-                    j.state = JobState.QUEUED
-                    j.worker = None
-                    j.started_at = None
-                    # Clear a pending cancel/preempt signal (M1): the reclaim
-                    # re-dispatches to a fresh worker, which would otherwise
-                    # honor the stale signal and kill the re-run on first poll.
-                    j.signal = None
+                    # CAS-guarded (WHERE state=ASSIGNED): the reclaim DECISION is
+                    # gated by worker-liveness, but the WRITE must still not
+                    # clobber a /complete that a briefly-revived worker commits
+                    # between this pass's SELECT and its trailing commit (review
+                    # finding F1). If the row already left ASSIGNED, skip it.
+                    # Clears a pending cancel/preempt signal (M1) on the requeue.
+                    _cas_state(
+                        session,
+                        j.id,
+                        (JobState.ASSIGNED,),
+                        state=JobState.QUEUED,
+                        worker=None,
+                        started_at=None,
+                        signal=None,
+                    )
 
             # Pre-launch CRIT-2: reclaim RUNNING jobs whose worker has died.
             # A worker crash mid-run otherwise strands the job in RUNNING
@@ -1916,10 +1954,19 @@ def build_app(
                                 select(Worker).where(Worker.host == j.worker)
                             ).scalar_one_or_none()
                             last_hb = wk.last_heartbeat if wk is not None else None
-                        j.state = JobState.ORPHANED.value
-                        j.finished_at = now
-                        j.termination_reason = "wall_clock_exceeded"
-                        j.signal = None
+                        # CAS-guarded (WHERE state=RUNNING) so a concurrent
+                        # /complete isn't clobbered back to ORPHANED (F1).
+                        if not _cas_state(
+                            session,
+                            j.id,
+                            (JobState.RUNNING,),
+                            state=JobState.ORPHANED.value,
+                            finished_at=now,
+                            termination_reason="wall_clock_exceeded",
+                            signal=None,
+                        ):
+                            continue
+                        session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
                         cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
                         cascade_records.append((j.id, j.state, cascaded))
                         orphan_records.append(
@@ -1943,18 +1990,33 @@ def build_app(
                 if w is not None and w.last_heartbeat >= cutoff:
                     continue  # worker still alive — leave the job running
                 last_hb = w.last_heartbeat if w is not None else None
+                # Both branches CAS-guard (WHERE state=RUNNING) so a /complete
+                # from a briefly-revived worker isn't clobbered (F1). M1: clear
+                # the stale signal on the requeue.
                 if idempotent:
-                    j.state = JobState.QUEUED
-                    j.worker = None
-                    j.started_at = None
-                    j.signal = None  # M1: clear stale signal before re-dispatch
+                    _cas_state(
+                        session,
+                        j.id,
+                        (JobState.RUNNING,),
+                        state=JobState.QUEUED,
+                        worker=None,
+                        started_at=None,
+                        signal=None,
+                    )
                 else:
                     # Set the string value (not the enum) so the cascade's
                     # `parent.state in {...value}` membership test fires.
-                    j.state = JobState.ORPHANED.value
-                    j.finished_at = now
-                    j.termination_reason = "worker_died"
-                    j.signal = None
+                    if not _cas_state(
+                        session,
+                        j.id,
+                        (JobState.RUNNING,),
+                        state=JobState.ORPHANED.value,
+                        finished_at=now,
+                        termination_reason="worker_died",
+                        signal=None,
+                    ):
+                        continue
+                    session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
                     cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
                     cascade_records.append((j.id, j.state, cascaded))
                     orphan_records.append((j.id, j.project, j.worker, last_hb, "worker_died"))
@@ -2392,24 +2454,40 @@ def _reconcile_worker_in_flight(
                     idempotent = True
             except Exception:
                 pass
-        if j.state == JobState.ASSIGNED.value or idempotent:
-            j.state = JobState.QUEUED.value
-            j.worker = None
-            j.started_at = None
-            j.reconcile_misses = 0
+        # CAS-guarded on the state we read (ASSIGNED or RUNNING) so a /complete
+        # from the just-revived worker — which lands on its own session right as
+        # this reconcile decides the worker is gone — isn't clobbered (F1). If
+        # the row already left that state, skip it (don't requeue/orphan/emit).
+        cur = JobState(j.state)
+        if cur == JobState.ASSIGNED or idempotent:
             # M1: clear a stale cancel/preempt signal so the fresh worker this
             # requeue re-dispatches to doesn't honor it and kill the re-run.
-            j.signal = None
-            requeued.append(j.id)
+            if _cas_state(
+                session,
+                j.id,
+                (cur,),
+                state=JobState.QUEUED.value,
+                worker=None,
+                started_at=None,
+                reconcile_misses=0,
+                signal=None,
+            ):
+                requeued.append(j.id)
         else:
             # String value (not the enum) so the cascade's membership test fires.
-            j.state = JobState.ORPHANED.value
-            j.finished_at = now
-            j.termination_reason = "worker_restarted"
-            j.signal = None
-            cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
-            cascade_records.append((j.id, j.state, cascaded))
-            orphan_records.append((j.id, j.project))
+            if _cas_state(
+                session,
+                j.id,
+                (cur,),
+                state=JobState.ORPHANED.value,
+                finished_at=now,
+                termination_reason="worker_restarted",
+                signal=None,
+            ):
+                session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
+                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                cascade_records.append((j.id, j.state, cascaded))
+                orphan_records.append((j.id, j.project))
     return orphan_records, cascade_records, requeued
 
 
