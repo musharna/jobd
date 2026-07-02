@@ -707,6 +707,96 @@ def test_user_cancel_surfaces_as_cancelled_not_failed(tmp_path, monkeypatch):
     assert "termination_reason" not in body or body.get("termination_reason") is None
 
 
+def test_run_job_watchdog_escalates_to_sigkill_when_sigterm_ignored(tmp_path, monkeypatch):
+    """A watchdog kill must escalate SIGTERM -> SIGKILL for a workload that
+    ignores SIGTERM and keeps stdout open. The wall/idle/first-output branches
+    route through _initiate_termination, which arms a kill timer; without it
+    (bare _signal_workload('TERM')) poll_signals returns, the stdout-read loop
+    blocks forever on the still-open pipe, and the post-loop
+    proc.wait(timeout=grace) escalation is never reached — the job pins its
+    slot (e.g. a GPU) indefinitely. Here only the SIGKILL lets the stub finish,
+    so reaching /complete promptly proves the timer fired."""
+    import subprocess
+
+    import jobd.worker.job_worker as job_worker
+
+    monkeypatch.setattr(job_worker, "SIGNAL_POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(job_worker, "WATCHDOG_KILL_GRACE_S", 0.3)
+    monkeypatch.setattr(
+        job_worker.shutil,
+        "which",
+        lambda name: f"/fake/bin/{name}" if name == "systemd-run" else None,
+    )
+
+    # Released ONLY by the SIGKILL escalation. A SIGTERM leaves the workload
+    # alive with stdout still blocked, modelling the ignore-SIGTERM case.
+    killed = threading.Event()
+
+    class _StubStdout:
+        def read(self, _n):
+            killed.wait(timeout=10.0)
+            return b""
+
+        def close(self):
+            pass
+
+    class _StubProc:
+        def __init__(self, _cmd, **_kw):
+            self.pid = 34444
+            self.stdout = _StubStdout()
+
+        def send_signal(self, _sig):
+            pass
+
+        def poll(self):
+            return None if not killed.is_set() else -9
+
+        def wait(self, timeout=None):
+            killed.wait(timeout=10.0)
+            return -9
+
+        def kill(self):
+            killed.set()
+
+    monkeypatch.setattr(subprocess, "Popen", _StubProc)
+    systemctl_calls: list[list[str]] = []
+
+    def _fake_run(args, **_kw):
+        if args and args[0] == "systemctl":
+            systemctl_calls.append(args)
+            if any(a == "--signal=KILL" for a in args):
+                killed.set()
+
+        class R:
+            returncode = 0
+
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    job = {
+        "id": 9401,
+        "cmd": ["bash", "-c", "sleep 60"],
+        "cwd": str(tmp_path),
+        "idle_timeout_s": 1,
+    }
+    client = _FakeClient(cancel_after_s=999.0)  # never user-cancel
+    t0 = time.monotonic()
+    run_job(client, job, set())
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 6.0, f"escalation should force-kill promptly, took {elapsed:.1f}s"
+    kill_calls = [
+        c
+        for c in systemctl_calls
+        if any(a == "--signal=KILL" for a in c) and c[-1] == "jobd-9401.scope"
+    ]
+    assert kill_calls, f"watchdog must escalate to SIGKILL on the scope unit, got {systemctl_calls}"
+    completes = [p for p in client.posts if p[0].endswith("/complete")]
+    assert len(completes) == 1
+    assert completes[0][1]["termination_reason"] == "idle_timeout"
+
+
 def test_run_job_does_not_post_started_when_popen_fails(tmp_path, monkeypatch):
     """If Popen raises (bad cmd, missing executable), the worker reports
     /complete with exit 127 — and must NOT POST /started, because there's
@@ -1015,6 +1105,48 @@ def test_resource_snapshot_no_in_flight_unchanged(monkeypatch):
     monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [])
     snap = job_worker.resource_snapshot(set())
     assert snap["free_vram_gb"] == 30.0
+
+
+def test_resource_snapshot_does_not_double_count_allocated_vram(monkeypatch):
+    """M6: once an in-flight job has actually allocated its VRAM, NVML free
+    already reflects it — the ad reservation must NOT subtract it again, or a
+    steady multi-slot worker idles capacity the GPU actually has. Here a 24 GB
+    job on a 32 GB card (NVML free = 8) must still report 8 GB free, not
+    8 - 24 clamped to 0."""
+    _reset_in_flight()
+    try:
+        monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 8.0)
+        # The job's OWN GPU pid holds the full 24 GB (24 * 1024 MiB).
+        monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [(4242, 24 * 1024)])
+        job_worker._register_in_flight({"id": 921, "vram_gb": 24.0, "ram_gb": 0, "cpus": 0})
+        snap = job_worker.resource_snapshot({4242})  # tracked_pids owns 4242
+        assert snap["free_vram_gb"] == 8.0
+    finally:
+        _reset_in_flight()
+
+
+def test_resource_snapshot_reserves_only_unallocated_vram(monkeypatch):
+    """A job mid-startup that has allocated only part of its ad reserves the
+    remainder: raw_free - max(0, ad - allocated). Here NVML free = 20, the job
+    has allocated 12 of its 24 GB ad, so reserve 12 -> report 8."""
+    _reset_in_flight()
+    try:
+        monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 20.0)
+        monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [(4243, 12 * 1024)])
+        job_worker._register_in_flight({"id": 922, "vram_gb": 24.0, "ram_gb": 0, "cpus": 0})
+        snap = job_worker.resource_snapshot({4243})
+        assert snap["free_vram_gb"] == 8.0
+    finally:
+        _reset_in_flight()
+
+
+def test_compute_owned_vram_sums_owned_pids_only():
+    """compute_owned_vram is the mirror of compute_unregistered_vram: it sums
+    VRAM held by pids IN the owned set (GB, 2dp)."""
+    procs = [(100, 8 * 1024), (200, 4 * 1024), (300, 2 * 1024)]
+    assert job_worker.compute_owned_vram(procs, {100, 300}) == 10.0
+    assert job_worker.compute_owned_vram(procs, set()) == 0.0
+    assert job_worker.compute_owned_vram([], {100}) == 0.0
 
 
 def test_resource_snapshot_reports_slot_usage(monkeypatch):

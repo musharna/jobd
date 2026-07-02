@@ -14,12 +14,11 @@ from typing import Any
 import typer
 
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
+from jobd.models import TERMINAL_FAIL_STATES, TERMINAL_STATES
 
 app = typer.Typer(help="Submit and monitor jobs on jobd.")
 
 BASE = os.environ.get("JOBD_URL", "http://127.0.0.1:8765")
-TERMINAL_STATES = {"completed", "failed", "cancelled"}
-TERMINAL_FAIL_STATES = {"failed", "cancelled", "preempted", "orphaned"}
 
 
 def _client() -> JobdClient:
@@ -523,11 +522,7 @@ def list_jobs(
                 for d in deps:
                     st = state_by_id.get(d)
                     mark = (
-                        "✓"
-                        if st == "completed"
-                        else (
-                            "✗" if st in {"failed", "cancelled", "preempted", "orphaned"} else "⧖"
-                        )
+                        "✓" if st == "completed" else ("✗" if st in TERMINAL_FAIL_STATES else "⧖")
                     )
                     parts.append(f"{d}{mark}")
                 typer.echo(f"  deps: {' '.join(parts)}")
@@ -553,18 +548,13 @@ def _render_status(j: dict) -> str:
     return "\n".join(lines)
 
 
-# Full terminal set for array aggregation. The single-job TERMINAL_STATES above
-# is intentionally narrow (legacy); arrays need every terminal state so --watch
-# can't hang on a preempted/orphaned/scheduling_timeout member.
-_ARRAY_TERMINAL = {
-    "completed",
-    "failed",
-    "cancelled",
-    "preempted",
-    "orphaned",
-    "scheduling_timeout",
-}
-_ARRAY_FAILURE = _ARRAY_TERMINAL - {"completed"}
+# Array aggregation needs every terminal state so --watch can't hang on a
+# preempted/orphaned/scheduling_timeout member. These now alias the canonical
+# models.TERMINAL_STATES / TERMINAL_FAIL_STATES — the single-job TERMINAL_STATES
+# above used to be a narrow {completed, failed, cancelled} copy that diverged
+# from this set; unifying on models.py removed that split.
+_ARRAY_TERMINAL = TERMINAL_STATES
+_ARRAY_FAILURE = TERMINAL_FAIL_STATES
 
 
 def _render_array_status(jobs: list[dict], array_id: int) -> str:

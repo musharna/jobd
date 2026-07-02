@@ -375,6 +375,88 @@ def test_next_job_empty_queue_returns_null(client):
     assert r.json() is None
 
 
+def test_next_job_longpoll_times_out_returns_null(client):
+    """M4: an async long-poll on an empty queue must return None near wait_s
+    without holding a threadpool thread. Here it should return in ~0.4s, not
+    hang and not return early."""
+    import time as _time
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
+    )
+    t0 = _time.monotonic()
+    r = client.post(
+        "/next-job",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+            "wait_s": 0.4,
+        },
+    )
+    elapsed = _time.monotonic() - t0
+    assert r.status_code == 200
+    assert r.json() is None
+    assert 0.3 < elapsed < 3.0, f"long-poll should wait ~wait_s, took {elapsed:.2f}s"
+
+
+def test_next_job_longpoll_wakes_on_submit(client):
+    """M4: a submit that lands while a worker is long-polling must WAKE the poll
+    (via the cross-thread asyncio.Event), returning the job well before the
+    wait_s deadline and before the _LONGPOLL_RECHECK_S backstop — proving the
+    wait suspends on the loop rather than parking a thread until recheck."""
+    import threading
+    import time as _time
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "desktop",
+            "free_vram_gb": 30.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 28.0,
+            "idle_cpus": 10,
+        },
+    )
+    result: dict = {}
+
+    def _poll():
+        t0 = _time.monotonic()
+        r = client.post(
+            "/next-job",
+            json={
+                "host": "desktop",
+                "free_vram_gb": 30.0,
+                "unregistered_vram_gb": 0.0,
+                "free_ram_gb": 28.0,
+                "idle_cpus": 10,
+                "wait_s": 8.0,
+            },
+        )
+        result["elapsed"] = _time.monotonic() - t0
+        result["body"] = r.json()
+
+    poller = threading.Thread(target=_poll)
+    poller.start()
+    _time.sleep(0.4)  # let the poll start and suspend on the wake event
+    client.post("/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"})
+    poller.join(timeout=5.0)
+
+    assert not poller.is_alive(), "long-poll did not return after submit"
+    assert result["body"] is not None and result["body"]["state"] == "assigned"
+    # Woken by the submit, not by the 10s recheck backstop.
+    assert result["elapsed"] < 5.0, f"wake was slow ({result['elapsed']:.2f}s) — recheck, not wake?"
+
+
 def test_append_log_and_complete(client):
     sub = client.post(
         "/submit",
@@ -662,6 +744,138 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued"
     assert got["worker"] is None
+
+
+def test_sweeper_reclaim_clears_pending_signal(client):
+    """M1: a job assigned to a dead worker with a pending cancel signal must be
+    re-queued with signal cleared. Otherwise the fresh worker it re-dispatches
+    to reads the stale 'cancel' on its first /signal poll and kills the re-run."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Worker
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    job_id = client.post(
+        "/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
+    ).json()["id"]
+    client.post(
+        "/next-job",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+    # A cancel while ASSIGNED stamps a pending 'cancel' signal (worker not seen yet).
+    client.post(f"/jobs/{job_id}/cancel")
+    assert client.get(f"/jobs/{job_id}/signal").json()["signal"] == "cancel"
+
+    # Worker goes silent past the reclaim threshold; sweep re-queues the job.
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Worker)
+            .where(Worker.host == "ghost")
+            .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=6))
+        )
+    app_mod._sweep_once()
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["state"] == "queued", got
+    # The stale signal must be gone so the re-dispatch isn't killed on poll.
+    assert client.get(f"/jobs/{job_id}/signal").json()["signal"] is None
+
+
+def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatch):
+    """F1 (review finding): the sweeper's ASSIGNED reclaim is a CAS on
+    WHERE state=ASSIGNED, so a /complete that a briefly-revived worker commits
+    between the sweep's SELECT and its write is NOT clobbered back to QUEUED
+    (which would lose the result and re-dispatch → double execution).
+
+    The race is injected deterministically: right as the reclaim's _cas_state
+    runs, we flip the row to COMPLETED (as a concurrent /complete would), then
+    delegate to the real guard — which must match 0 rows and leave it completed.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Job, Worker
+    from jobd.models import JobState
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    job_id = client.post(
+        "/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
+    ).json()["id"]
+    client.post(
+        "/next-job",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Worker)
+            .where(Worker.host == "ghost")
+            .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=10))
+        )
+
+    real_cas = app_mod._cas_state
+
+    def racing_cas(session, jid, expected, **values):
+        # Fire once, on the ASSIGNED->QUEUED reclaim write: simulate a /complete
+        # landing in the same window by flipping the row COMPLETED first.
+        if expected == (JobState.ASSIGNED,) and values.get("state") == JobState.QUEUED:
+            monkeypatch.setattr(app_mod, "_cas_state", real_cas)  # only once
+            session.execute(
+                update(Job).where(Job.id == jid).values(state=JobState.COMPLETED.value, exit_code=0)
+            )
+        return real_cas(session, jid, expected, **values)
+
+    monkeypatch.setattr(app_mod, "_cas_state", racing_cas)
+    app_mod._sweep_once()
+
+    # The concurrent completion must survive — not be overwritten to queued.
+    assert client.get(f"/jobs/{job_id}").json()["state"] == "completed"
 
 
 def _start_job_on_worker(client, host, job_json):
@@ -1209,6 +1423,64 @@ def test_parent_cancelled_queued_cancels_child(client):
     assert row["state"] == "cancelled"
 
 
+def test_parent_failure_cascade_is_transitive(client):
+    """A<-B<-C: when A fails via /complete, the cascade must cancel B AND
+    transitively C (audit 2026-07-01 H2 — the old single-level cascade cancelled
+    only the direct child B and stranded C in QUEUED forever)."""
+    a = _submit(client).json()
+    b = _submit(client, depends_on=[a["id"]]).json()
+    c = _submit(client, depends_on=[b["id"]]).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{a['id']}/complete", json={"exit_code": 1, "final_state": "failed"})
+    assert client.get(f"/jobs/{b['id']}").json()["state"] == "cancelled"
+    assert client.get(f"/jobs/{c['id']}").json()["state"] == "cancelled"
+
+
+def test_submit_rejects_default_dep_on_terminal_failed_parent(client):
+    """audit 2026-07-01 H2: a default-policy dep on an ALREADY failed-side
+    terminal parent can never be satisfied (the parent won't reach COMPLETED)
+    and no future transition fires the cascade, so the child would strand in
+    QUEUED forever. Reject at submit (400) instead."""
+    parent = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{parent['id']}/complete", json={"exit_code": 1, "final_state": "failed"})
+    assert client.get(f"/jobs/{parent['id']}").json()["state"] == "failed"
+
+    r = _submit(client, depends_on=[parent["id"]])
+    assert r.status_code == 400, r.text
+    assert "failed-side terminal" in r.text
+
+
+def test_submit_allows_any_exit_dep_on_terminal_parent(client):
+    """The submit-time reject applies only to default-policy deps: an any-exit
+    child is satisfied by any terminal parent, so it must still be accepted and
+    become dispatchable immediately."""
+    parent = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{parent['id']}/complete", json={"exit_code": 1, "final_state": "failed"})
+
+    r = _submit(client, depends_on=[parent["id"]], any_exit=True)
+    assert r.status_code == 200, r.text
+    child = r.json()
+    claim = _next_job(client).json()
+    assert claim["id"] == child["id"]
+
+
+def test_submit_allows_default_dep_on_completed_parent(client):
+    """A default-policy dep on an already-COMPLETED parent is satisfied, not
+    rejected — the reject targets only failed-side terminals."""
+    parent = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{parent['id']}/complete", json={"exit_code": 0, "final_state": "completed"})
+
+    r = _submit(client, depends_on=[parent["id"]])
+    assert r.status_code == 200, r.text
+
+
 def test_depends_on_any_exit_allows_failed_parent(client):
     parent = _submit(client).json()
     child = _submit(client, depends_on=[parent["id"]], any_exit=True).json()
@@ -1394,6 +1666,67 @@ def test_complete_rejects_invalid_final_state(client):
     assert client.get(f"/jobs/{job['id']}").json()["state"] == "running"
 
 
+def test_complete_rejects_stale_worker(client):
+    """M2: after a partition reclaim + re-dispatch, the ORIGINAL worker (still
+    running the workload) must not be able to terminal-ize the job that now
+    belongs to a different worker. A /complete whose X-Jobd-Worker header
+    doesn't match job.worker is refused (409); the job stays running."""
+    job = _submit(client).json()
+    _heartbeat(client, host="w1")
+    _next_job(client, host="w1")  # job.worker = w1
+    client.post(f"/jobs/{job['id']}/started", headers={"X-Jobd-Worker": "w1"})
+
+    stale = client.post(
+        f"/jobs/{job['id']}/complete",
+        json={"exit_code": 0, "final_state": "completed"},
+        headers={"X-Jobd-Worker": "w2"},  # a different, stale worker
+    )
+    assert stale.status_code == 409, stale.text
+    assert client.get(f"/jobs/{job['id']}").json()["state"] == "running"
+
+    # The owning worker completes it normally.
+    ok = client.post(
+        f"/jobs/{job['id']}/complete",
+        json={"exit_code": 0, "final_state": "completed"},
+        headers={"X-Jobd-Worker": "w1"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert client.get(f"/jobs/{job['id']}").json()["state"] == "completed"
+
+
+def test_complete_without_worker_header_still_accepted(client):
+    """Backward compatibility: a pre-header worker sends no X-Jobd-Worker, so the
+    stale-worker check is skipped and /complete behaves as before."""
+    job = _submit(client).json()
+    _heartbeat(client, host="w1")
+    _next_job(client, host="w1")
+    r = client.post(
+        f"/jobs/{job['id']}/complete", json={"exit_code": 0, "final_state": "completed"}
+    )
+    assert r.status_code == 200, r.text
+    assert client.get(f"/jobs/{job['id']}").json()["state"] == "completed"
+
+
+def test_log_rejects_stale_worker(client):
+    """M2: a stale worker's /log chunk must not interleave into the log file of
+    the run that now owns the job."""
+    job = _submit(client).json()
+    _heartbeat(client, host="w1")
+    _next_job(client, host="w1")
+
+    stale = client.post(
+        f"/jobs/{job['id']}/log", content=b"stale bytes", headers={"X-Jobd-Worker": "w2"}
+    )
+    assert stale.status_code == 409, stale.text
+
+    ok = client.post(
+        f"/jobs/{job['id']}/log", content=b"real bytes", headers={"X-Jobd-Worker": "w1"}
+    )
+    assert ok.status_code == 200, ok.text
+    out = client.get(f"/jobs/{job['id']}/output").json()
+    assert out["tail"] == "real bytes"
+
+
 def test_job_info_exposes_session_id(client):
     r = client.post(
         "/submit",
@@ -1464,6 +1797,45 @@ def test_cancel_running_sets_signal_not_state(client):
     row = client.get(f"/jobs/{job['id']}").json()
     assert row["state"] == "cancelled"
     assert row["exit_code"] == -15
+
+
+def test_cancel_queued_loses_race_to_claim_falls_through_to_signal(client, monkeypatch):
+    """H3 cancel-vs-claim TOCTOU. If a worker's atomic queued->assigned claim
+    lands between cancel_job's read (which saw QUEUED) and its guarded write,
+    the guarded UPDATE matches 0 rows. cancel must NOT clobber the claim to
+    CANCELLED (which would strand the worker running a job the user was told
+    was cancelled, with no kill signal). It must fall through to the signal
+    path: state stays assigned, signal='cancel'.
+
+    The race is injected deterministically: the first _cas_state call (the
+    queued->cancelled CAS) flips the row to ASSIGNED via a real update and
+    reports 0 rows, exactly as a concurrent claim committing mid-request would.
+    """
+    from jobd import app as app_mod
+    from jobd.models import JobState
+
+    job = _submit(client).json()
+    real_cas = app_mod._cas_state
+    calls = {"n": 0}
+
+    def racing_cas(session, job_id, expected, **values):
+        calls["n"] += 1
+        if calls["n"] == 1 and values.get("state") == JobState.CANCELLED:
+            # Simulate the matcher's claim winning: queued -> assigned, and
+            # report that our guarded cancel matched nothing.
+            real_cas(session, job_id, (JobState.QUEUED,), state=JobState.ASSIGNED, worker="w1")
+            return 0
+        return real_cas(session, job_id, expected, **values)
+
+    monkeypatch.setattr(app_mod, "_cas_state", racing_cas)
+
+    r = client.post(f"/jobs/{job['id']}/cancel")
+    assert r.status_code == 200
+    # Must NOT have been clobbered to cancelled.
+    assert r.json()["state"] in ("assigned", "running"), r.json()
+    # The cancel still lands — as a signal the worker honors.
+    sig = client.get(f"/jobs/{job['id']}/signal").json()
+    assert sig["signal"] == "cancel"
 
 
 def test_started_transitions_assigned_to_running(client):
@@ -3130,12 +3502,66 @@ def test_refuse_admission_cwd_missing_terminal_when_no_eligible_left(client):
     assert info["termination_reason"] == "cwd_unreachable"
 
 
+def test_refuse_admission_cwd_unreachable_cascades_to_children(client):
+    """audit 2026-07-01 H2: when a job fails cwd_unreachable (no eligible worker
+    advertises its cwd), its default-policy dependents must cascade-cancel — the
+    old path failed the parent without a cascade and stranded the child."""
+    _register_worker(client, host="desktop", mount_roots=["/home"])
+    cwd = "/home/u/p/wt3"
+    parent_id = _submit_and_assign(client, cwd=cwd, worker="desktop")
+    child = client.post(
+        "/submit",
+        json={
+            "cmd": ["true"],
+            "cwd": "/home/u/p/child",
+            "project": "project-a",
+            "depends_on": [parent_id],
+        },
+    ).json()
+
+    r = client.post(
+        f"/jobs/{parent_id}/refuse-admission", json={"reason": "cwd_missing", "cwd": cwd}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["termination_reason"] == "cwd_unreachable"
+
+    row = client.get(f"/jobs/{child['id']}").json()
+    assert row["state"] == "cancelled", row
+    assert "parent_failed" in (row.get("warning") or "")
+
+
 def test_refuse_admission_gpu_contention_unchanged(client):
     _register_worker(client, host="desktop", mount_roots=["/home"])
     jid = _submit_and_assign(client, cwd="/home/u/p", worker="desktop")
     r = client.post(f"/jobs/{jid}/refuse-admission", json={"required_gb": 20.0, "free_gb": 2.0})
     assert r.status_code == 200, r.text
     assert r.json()["state"] == "queued"
+
+
+def test_refuse_admission_rejects_stale_worker(client):
+    """M2 completeness (review finding): a worker that isn't the job's current
+    owner must not be able to requeue/exclude it via /refuse-admission — after a
+    partition-reclaim + re-dispatch, the original worker's delayed refusal would
+    otherwise wipe the new owner's active claim. Foreign X-Jobd-Worker -> 409,
+    job untouched; the owner's own refusal still works."""
+    _register_worker(client, host="desktop", mount_roots=["/home"])
+    jid = _submit_and_assign(client, cwd="/home/u/p", worker="desktop")  # job.worker=desktop
+
+    stale = client.post(
+        f"/jobs/{jid}/refuse-admission",
+        json={"required_gb": 20.0, "free_gb": 2.0},
+        headers={"X-Jobd-Worker": "ghost-worker"},
+    )
+    assert stale.status_code == 409, stale.text
+    assert client.get(f"/jobs/{jid}").json()["state"] == "assigned"  # not clobbered
+
+    ok = client.post(
+        f"/jobs/{jid}/refuse-admission",
+        json={"required_gb": 20.0, "free_gb": 2.0},
+        headers={"X-Jobd-Worker": "desktop"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["state"] == "queued"
 
 
 def test_next_job_skips_excluded_worker(client):
