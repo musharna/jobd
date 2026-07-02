@@ -820,6 +820,7 @@ def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatc
     from sqlalchemy import update
 
     from jobd import app as app_mod
+    from jobd.broker import sweeper as sweeper_mod
     from jobd.db import Job, Worker
     from jobd.models import JobState
 
@@ -859,19 +860,21 @@ def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatc
             .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=10))
         )
 
-    real_cas = app_mod._cas_state
+    # The sweeper resolves _cas_state from its own module (jobd.broker.sweeper),
+    # not jobd.app, so patch it there.
+    real_cas = sweeper_mod._cas_state
 
     def racing_cas(session, jid, expected, **values):
         # Fire once, on the ASSIGNED->QUEUED reclaim write: simulate a /complete
         # landing in the same window by flipping the row COMPLETED first.
         if expected == (JobState.ASSIGNED,) and values.get("state") == JobState.QUEUED:
-            monkeypatch.setattr(app_mod, "_cas_state", real_cas)  # only once
+            monkeypatch.setattr(sweeper_mod, "_cas_state", real_cas)  # only once
             session.execute(
                 update(Job).where(Job.id == jid).values(state=JobState.COMPLETED.value, exit_code=0)
             )
         return real_cas(session, jid, expected, **values)
 
-    monkeypatch.setattr(app_mod, "_cas_state", racing_cas)
+    monkeypatch.setattr(sweeper_mod, "_cas_state", racing_cas)
     app_mod._sweep_once()
 
     # The concurrent completion must survive — not be overwritten to queued.
