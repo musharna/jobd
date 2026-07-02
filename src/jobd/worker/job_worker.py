@@ -51,8 +51,9 @@ SIGNAL_POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 30.0
 # Grace between a watchdog SIGTERM and the forced SIGKILL. Matches the broker
 # cancel path's default grace so escalation is bounded the same way whether it
-# comes from the kill timer or the post-loop proc.wait().
-WATCHDOG_KILL_GRACE_S = 60.0
+# comes from the kill timer or the post-loop proc.wait(). Env-tunable so ops can
+# shorten it for fast-failing fleets (and the live escalation test can too).
+WATCHDOG_KILL_GRACE_S = float(os.environ.get("JOBD_WORKER_WATCHDOG_KILL_GRACE_S", "60"))
 
 # Bounded retry for the terminal /complete POST. The endpoint is idempotent
 # (returns current info if the job is already terminal), so re-POSTing after a
