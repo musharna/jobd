@@ -12,9 +12,8 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from sqlalchemy import create_engine, event, select
@@ -32,22 +31,12 @@ from jobd.auth import install_tailnet_acl, require_token
 # namespace exactly as when they were defined inline.
 from jobd.broker.constants import (
     _AUTO_PREEMPT_WARNING_PREFIX,
-    _BLOCKED_WARNING_PREFIX,
     _FAILED_SIDE_TERMINAL,
     _LONGPOLL_RECHECK_S,
-    _UNMATCHEABLE_WARNING_PREFIX,
     AUTO_PREEMPT_MIN_RUNTIME_SECONDS,  # noqa: F401  # re-exported: tests read jobd.app.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
-    DEAD_WORKER_SECONDS,
-    IDEMPOTENT_RECLAIM_SECONDS,
-    JOB_RETENTION_DAYS_DEFAULT,
     MAX_LOG_CHUNK_BYTES,
     NON_TERMINAL_STATES,
-    OFFLINE_AFTER_SECONDS,
-    QUEUE_BLOCKED_THRESHOLD_SECONDS,
-    STALE_WORKER_THRESHOLD_S_DEFAULT,
     SWEEP_INTERVAL_SECONDS,
-    UNMATCHEABLE_THRESHOLD_SECONDS,
-    WALL_CLOCK_BACKSTOP_GRACE_SECONDS,
 )
 from jobd.broker.context import BrokerState
 from jobd.broker.events import _emit_event, _parse_since
@@ -58,8 +47,6 @@ from jobd.broker.projects import (
 )
 from jobd.broker.scheduling import (
     _build_snapshots,
-    _find_nonpreemptible_blocker,
-    _find_preemptible_candidate,
     _serialization_warning,
 )
 from jobd.broker.state import (
@@ -71,6 +58,7 @@ from jobd.broker.state import (
     _reconcile_worker_in_flight,
     _reject_stale_worker,
 )
+from jobd.broker.sweeper import prune_old_jobs, sweep_once
 from jobd.config import (
     ProjectEntry,
     load_classifier_rules,
@@ -86,7 +74,6 @@ from jobd.matcher import (
     cwd_routability,
     eligible_workers,
     gpu_contention_warning,
-    selectors_only_match,
     submit_preflight,
 )
 from jobd.metrics import build_metrics_app
@@ -1595,436 +1582,10 @@ def build_app(
         )
 
     def _prune_old_jobs(now: datetime | None = None) -> int:
-        """Delete terminal jobs and their per-job .log files whose ``finished_at``
-        is older than ``JOBD_JOB_RETENTION_DAYS``. Returns the count pruned; 0
-        days (the default) disables pruning entirely — opt-in so an existing
-        deployment never silently loses history.
+        return prune_old_jobs(SessionLocal, logs_dir, now)
 
-        Keeps the jobs table and log dir bounded by the retention window on a
-        long-running broker (events.jsonl is bounded separately by size
-        rotation). Freed SQLite pages are reused under WAL, so the DB file stays
-        bounded without a global-locking VACUUM. Removing old terminal rows is
-        safe for any still-pending dependents: ``_deps_satisfied`` already treats
-        a pruned parent as satisfied.
-        """
-        raw = os.environ.get("JOBD_JOB_RETENTION_DAYS", "").strip()
-        try:
-            retention_days = int(raw) if raw else JOB_RETENTION_DAYS_DEFAULT
-        except ValueError:
-            retention_days = JOB_RETENTION_DAYS_DEFAULT
-        if retention_days <= 0:
-            return 0
-        if now is None:
-            now = datetime.now(UTC).replace(tzinfo=None)
-        cutoff = now - timedelta(days=retention_days)
-        terminal = [s.value for s in TERMINAL_STATES]
-        with SessionLocal() as session:
-            pruned_ids = list(
-                session.execute(
-                    select(Job.id).where(
-                        Job.state.in_(terminal),
-                        Job.finished_at.is_not(None),
-                        Job.finished_at < cutoff,
-                    )
-                ).scalars()
-            )
-            if not pruned_ids:
-                return 0
-            session.execute(Job.__table__.delete().where(Job.id.in_(pruned_ids)))  # type: ignore[attr-defined]  # SQLAlchemy: Table.delete on __table__
-            session.commit()
-        # Unlink each per-job .log AFTER the rows are gone: a leftover log for a
-        # deleted row is harmless disk, whereas deleting the log of a row that
-        # survived (had the delete failed) would 404 a live `job output`.
-        for jid in pruned_ids:
-            try:
-                (logs_dir / f"{jid}.log").unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log.warning("retention: could not unlink %s.log: %s", jid, e)
-        _emit_event(
-            logs_dir,
-            "jobs_pruned",
-            source="broker",
-            count=len(pruned_ids),
-            retention_days=retention_days,
-        )
-        return len(pruned_ids)
-
-    def _sweep_once():
-        """One pass: reclaim orphans, mark offline workers."""
-        # SQLite stores datetimes as naive UTC; compare naive-to-naive.
-        now = datetime.now(UTC).replace(tzinfo=None)
-        going_offline_records: list[tuple[str, datetime | None]] = []
-        scheduling_timeout_records: list[tuple[int, str, int]] = []
-        # Declared up here (not at the running-reclaim loop) so the
-        # scheduling_timeout cascade above can append to them too; all emitted
-        # once after the single commit below.
-        orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
-        cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
-        with SessionLocal() as session:
-            # Audit 2026-05-18 (runtime-zombies S3): expire queued jobs whose
-            # caller-supplied scheduling_timeout_s elapsed. Hatchet pattern,
-            # motivated by jobs 577/578 on server. Done FIRST so subsequent
-            # sweeper passes (unmatcheable warning, blocker probe) don't
-            # waste work on already-terminal rows.
-            timeout_candidates = (
-                session.execute(
-                    select(Job).where(
-                        Job.state == JobState.QUEUED,
-                        Job.scheduling_timeout_s.is_not(None),
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            for j in timeout_candidates:
-                deadline_age_s = (now - j.submitted_at).total_seconds()
-                if deadline_age_s <= j.scheduling_timeout_s:
-                    continue
-                # Guarded so a job the matcher claims (queued->assigned) at the
-                # same instant isn't clobbered back to a terminal
-                # scheduling_timeout: the sweeper reads QUEUED then writes,
-                # racing the atomic claim. If the claim won, skip — the job is
-                # dispatching, not stuck. (The orphan/reclaim writes below are
-                # instead gated by their worker-liveness check, which a live
-                # /complete's fresh heartbeat can't slip past.)
-                won = _cas_state(
-                    session,
-                    j.id,
-                    (JobState.QUEUED,),
-                    state=JobState.SCHEDULING_TIMEOUT.value,
-                    finished_at=now,
-                    termination_reason="scheduling_timeout",
-                    signal=None,
-                )
-                if not won:
-                    continue
-                # Cascade over the timed-out parent: it never dispatched, so it
-                # can never produce the output a default-policy dependent needs.
-                # Without this the child strands in QUEUED forever — the matcher
-                # won't dispatch it (deps unsatisfied) and nothing else cancels
-                # it. any-exit dependents are unblocked separately by
-                # _deps_satisfied. Reverses the 2026-05-18 S3 "out of scope"
-                # call, which left non-any-exit children stranded (audit
-                # 2026-07-01 H2; the deps test only passed by calling the hook
-                # manually).
-                session.refresh(j)  # sync ORM state so the cascade sees the terminal
-                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
-                if cascaded:
-                    cascade_records.append((j.id, j.state, cascaded))
-                scheduling_timeout_records.append((j.id, j.project, int(j.scheduling_timeout_s)))
-            # Mark workers offline past threshold (split SELECT-then-set so we
-            # can emit one worker_offline event per transitioning worker).
-            offline_cutoff = now - timedelta(seconds=OFFLINE_AFTER_SECONDS)
-            going_offline = (
-                session.execute(
-                    select(Worker).where(
-                        Worker.last_heartbeat < offline_cutoff,
-                        Worker.state != "offline",
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            for w in going_offline:
-                w.state = "offline"
-                # Capture into local Python values BEFORE commit to avoid
-                # SQLA detached-instance issues when emitting after commit.
-                going_offline_records.append((w.host, w.last_heartbeat))
-
-            # Audit 2026-05-18 (runtime-zombies S6): stale-worker transition.
-            # Workers silent for >threshold but <OFFLINE_AFTER get marked
-            # `stale` so the matcher (which only sees state=='online' rows)
-            # stops dispatching to them. The longer offline transition
-            # above still wins for fully-dead workers. Configurable via
-            # JOBD_STALE_WORKER_THRESHOLD_S.
-            try:
-                stale_threshold_s = int(
-                    os.environ.get(
-                        "JOBD_STALE_WORKER_THRESHOLD_S",
-                        STALE_WORKER_THRESHOLD_S_DEFAULT,
-                    )
-                )
-            except ValueError:
-                stale_threshold_s = STALE_WORKER_THRESHOLD_S_DEFAULT
-            stale_cutoff = now - timedelta(seconds=stale_threshold_s)
-            going_stale = (
-                session.execute(
-                    select(Worker).where(
-                        Worker.last_heartbeat < stale_cutoff,
-                        Worker.state == "online",
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            going_stale_records: list[tuple[str, datetime | None]] = []
-            for w in going_stale:
-                w.state = "stale"
-                going_stale_records.append((w.host, w.last_heartbeat))
-
-            # Reclaim assigned jobs whose worker is stale
-            assigned = (
-                session.execute(select(Job).where(Job.state == JobState.ASSIGNED)).scalars().all()
-            )
-            for j in assigned:
-                reclaim_seconds = DEAD_WORKER_SECONDS
-                if j.requires_json and j.requires_json != "{}":
-                    try:
-                        req = JobRequires.model_validate_json(j.requires_json)
-                        if req.idempotent:
-                            reclaim_seconds = IDEMPOTENT_RECLAIM_SECONDS
-                    except Exception:
-                        pass
-                cutoff = now - timedelta(seconds=reclaim_seconds)
-                w = session.execute(
-                    select(Worker).where(Worker.host == j.worker)
-                ).scalar_one_or_none()
-                if w is None or w.last_heartbeat < cutoff:
-                    j.state = JobState.QUEUED
-                    j.worker = None
-                    j.started_at = None
-                    # Clear a pending cancel/preempt signal (M1): the reclaim
-                    # re-dispatches to a fresh worker, which would otherwise
-                    # honor the stale signal and kill the re-run on first poll.
-                    j.signal = None
-
-            # Pre-launch CRIT-2: reclaim RUNNING jobs whose worker has died.
-            # A worker crash mid-run otherwise strands the job in RUNNING
-            # forever — no /complete ever lands, dependents never unblock, and
-            # /wait never returns. Idempotent jobs are safe to re-run, so we
-            # requeue them like the ASSIGNED path above; non-idempotent jobs
-            # already had side effects, so we transition them to ORPHANED (a
-            # failed-side terminal state that cascades to dependents) rather
-            # than silently re-running a job that may not be re-runnable.
-            # (orphan_records / cascade_records declared at the top of the sweep
-            # so the scheduling_timeout cascade shares them.)
-            running = (
-                session.execute(select(Job).where(Job.state == JobState.RUNNING)).scalars().all()
-            )
-            for j in running:
-                # Wall-clock backstop (independent of worker liveness). Worker-
-                # side enforcement (job_worker.poll_signals SIGTERMs at
-                # max_wall_s) lives only in the worker's per-job monitor; if the
-                # worker crashed mid-run and restarted with no memory of the
-                # job, that enforcement never lands and no /complete is ever
-                # posted, so the job is stranded RUNNING forever even though the
-                # worker is heartbeating again. A healthy worker would have
-                # terminated + reported within seconds of max_wall_s, far inside
-                # the grace, so this never races one. wall_clock_exceeded is a
-                # terminal "ran too long" condition, so orphan regardless of
-                # idempotency (re-running would just blow the same wall clock).
-                # Regression: stranded job 1364 (desktop host-power crash 2026-06).
-                if j.max_wall_s is not None and j.started_at is not None:
-                    grace = WALL_CLOCK_BACKSTOP_GRACE_SECONDS + (j.checkpoint_grace_s or 0)
-                    if (now - j.started_at).total_seconds() > j.max_wall_s + grace:
-                        last_hb = None
-                        if j.worker is not None:
-                            wk = session.execute(
-                                select(Worker).where(Worker.host == j.worker)
-                            ).scalar_one_or_none()
-                            last_hb = wk.last_heartbeat if wk is not None else None
-                        j.state = JobState.ORPHANED.value
-                        j.finished_at = now
-                        j.termination_reason = "wall_clock_exceeded"
-                        j.signal = None
-                        cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
-                        cascade_records.append((j.id, j.state, cascaded))
-                        orphan_records.append(
-                            (j.id, j.project, j.worker, last_hb, "wall_clock_exceeded")
-                        )
-                        continue
-                reclaim_seconds = DEAD_WORKER_SECONDS
-                idempotent = False
-                if j.requires_json and j.requires_json != "{}":
-                    try:
-                        req = JobRequires.model_validate_json(j.requires_json)
-                        if req.idempotent:
-                            idempotent = True
-                            reclaim_seconds = IDEMPOTENT_RECLAIM_SECONDS
-                    except Exception:
-                        pass
-                cutoff = now - timedelta(seconds=reclaim_seconds)
-                w = session.execute(
-                    select(Worker).where(Worker.host == j.worker)
-                ).scalar_one_or_none()
-                if w is not None and w.last_heartbeat >= cutoff:
-                    continue  # worker still alive — leave the job running
-                last_hb = w.last_heartbeat if w is not None else None
-                if idempotent:
-                    j.state = JobState.QUEUED
-                    j.worker = None
-                    j.started_at = None
-                    j.signal = None  # M1: clear stale signal before re-dispatch
-                else:
-                    # Set the string value (not the enum) so the cascade's
-                    # `parent.state in {...value}` membership test fires.
-                    j.state = JobState.ORPHANED.value
-                    j.finished_at = now
-                    j.termination_reason = "worker_died"
-                    j.signal = None
-                    cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
-                    cascade_records.append((j.id, j.state, cascaded))
-                    orphan_records.append((j.id, j.project, j.worker, last_hb, "worker_died"))
-
-            session.commit()
-            # Reclaims/requeues and orphan cascades above may have made jobs
-            # dispatchable — wake any long-polling workers.
-            _wake_dispatchers()
-            for jid, proj, wkr, last_hb, reason in orphan_records:
-                _emit_event(
-                    logs_dir,
-                    "job_orphaned",
-                    source="broker",
-                    job_id=jid,
-                    project=proj,
-                    worker=wkr,
-                    last_heartbeat=last_hb.isoformat() if last_hb else None,
-                    termination_reason=reason,
-                )
-            for parent_id, parent_state, cascaded in cascade_records:
-                _emit_cascade_cancellations(logs_dir, cascaded, parent_id, parent_state)
-            for host, last_hb in going_offline_records:
-                _emit_event(
-                    logs_dir,
-                    "worker_offline",
-                    source="broker",
-                    host=host,
-                    last_heartbeat=last_hb.isoformat() if last_hb else None,
-                )
-            # Audit 2026-05-18 (runtime-zombies S6): worker_stale event so
-            # the operator can see the matcher-eligibility flip in the
-            # broker event log alongside the existing worker_offline emit.
-            for host, last_hb in going_stale_records:
-                _emit_event(
-                    logs_dir,
-                    "worker_stale",
-                    source="broker",
-                    host=host,
-                    last_heartbeat=last_hb.isoformat() if last_hb else None,
-                )
-            for job_id, project, threshold_s in scheduling_timeout_records:
-                _emit_event(
-                    logs_dir,
-                    "scheduling_timeout",
-                    source="broker",
-                    job_id=job_id,
-                    project=project,
-                    threshold_s=threshold_s,
-                )
-
-            # Soft unmatcheable warning: queued >60s + no online worker advertises caps
-            stale_queued = (
-                session.execute(
-                    select(Job).where(
-                        Job.state == JobState.QUEUED,
-                        Job.submitted_at < now - timedelta(seconds=UNMATCHEABLE_THRESHOLD_SECONDS),
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            workers = (
-                session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
-            )
-            snapshots = _build_snapshots(list(workers))
-            host_list = [w.host for w in workers]
-            for j in stale_queued:
-                req = None
-                if j.requires_json and j.requires_json != "{}":
-                    try:
-                        req = JobRequires.model_validate_json(j.requires_json)
-                    except Exception:
-                        continue
-                shim = SimpleNamespace(
-                    id=j.id,
-                    priority=j.priority,
-                    submitted_at=j.submitted_at,
-                    host_pin=j.host_pin,
-                    vram_gb=j.vram_gb,
-                    ram_gb=j.ram_gb,
-                    cpus=j.cpus,
-                    requires=req,
-                )
-                # req=None means job matches any worker by definition — an empty
-                # fleet is a queueing delay, not a capability mismatch.
-                matcheable = req is None or any(selectors_only_match(shim, ws) for ws in snapshots)
-
-                blocker_warning: str | None = None
-                if matcheable:
-                    age_s = (now - j.submitted_at).total_seconds()
-                    if age_s >= QUEUE_BLOCKED_THRESHOLD_SECONDS:
-                        elig = eligible_workers(req, j.host_pin, snapshots)
-                        if elig:
-                            candidate = _find_preemptible_candidate(elig, j, session, now)
-                            if candidate is not None:
-                                candidate.signal = "preempt"
-                                candidate.warning = f"{_AUTO_PREEMPT_WARNING_PREFIX}{j.id}"
-                                candidate.warning_at = now
-                                _emit_event(
-                                    logs_dir,
-                                    "auto_preempt",
-                                    source="broker",
-                                    job_id=candidate.id,
-                                    project=candidate.project,
-                                    cause="sweeper",
-                                    queued_job=j.id,
-                                    worker=candidate.worker,
-                                    queued_priority=j.priority,
-                                    candidate_priority=candidate.priority,
-                                    queue_age_s=int(age_s),
-                                )
-                            else:
-                                blocker = _find_nonpreemptible_blocker(elig, session)
-                                if blocker is not None:
-                                    blocker_warning = (
-                                        f"{_BLOCKED_WARNING_PREFIX}{int(age_s // 60)}m: "
-                                        f"blocked by non-preemptible job {blocker.id} on "
-                                        f"{blocker.worker}; preempt with `job preempt {blocker.id}`"
-                                    )
-
-                if not matcheable:
-                    new_w = (
-                        f"{_UNMATCHEABLE_WARNING_PREFIX} none of {host_list} "
-                        f"advertise required capabilities"
-                    )
-                    if j.warning != new_w:
-                        j.warning = new_w
-                        j.warning_at = now
-                        _emit_event(
-                            logs_dir,
-                            "sweep_warning",
-                            source="broker",
-                            job_id=j.id,
-                            project=j.project,
-                            warning_text=j.warning,
-                        )
-                elif blocker_warning is not None:
-                    if j.warning != blocker_warning:
-                        j.warning = blocker_warning
-                        j.warning_at = now
-                        _emit_event(
-                            logs_dir,
-                            "sweep_warning",
-                            source="broker",
-                            job_id=j.id,
-                            project=j.project,
-                            warning_text=j.warning,
-                        )
-                elif j.warning and (
-                    j.warning.startswith(_UNMATCHEABLE_WARNING_PREFIX)
-                    or j.warning.startswith(_BLOCKED_WARNING_PREFIX)
-                ):
-                    # State improved — clear stale unmatcheable/blocked warnings.
-                    # "will queue behind" warnings set at submit are preserved
-                    # since they describe a different (predictive) signal.
-                    j.warning = None
-                    j.warning_at = None
-            session.commit()
-
-        # Retention prune (own session, opt-in via JOBD_JOB_RETENTION_DAYS).
-        _prune_old_jobs(now)
+    def _sweep_once() -> None:
+        sweep_once(SessionLocal, logs_dir, _wake_dispatchers)
 
     # Expose as test seams at module scope
     globals()["_sweep_once"] = _sweep_once
