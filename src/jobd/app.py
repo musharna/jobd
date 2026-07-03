@@ -7,6 +7,7 @@ All endpoints in this file for now; split into submodules when it grows past
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from jobd.broker.constants import (
     MAX_LOG_CHUNK_BYTES,
     NON_TERMINAL_STATES,
     SWEEP_INTERVAL_SECONDS,
+    WAIT_STREAM_CHUNK_BYTES,
 )
 from jobd.broker.context import BrokerState
 from jobd.broker.events import _emit_event, _parse_since
@@ -1085,18 +1087,33 @@ def build_app(
 
         async def event_generator():
             position = 0
-            while True:
-                # Read new log bytes since last position
-                if log_file.exists():
+            # Incremental decoder so a multibyte UTF-8 char split across two
+            # bounded reads isn't corrupted into replacement chars.
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+            def drain_new_bytes():
+                # Yield log events for all bytes past `position`, reading in
+                # bounded slices so a large backlog is never pulled into memory
+                # in one allocation. The file is reopened per slice so no fd is
+                # held open across an SSE yield/await.
+                nonlocal position
+                while True:
+                    if not log_file.exists():
+                        return
                     with log_file.open("rb") as f:
                         f.seek(position)
-                        chunk = f.read()
-                    if chunk:
-                        position += len(chunk)
-                        yield {
-                            "event": "log",
-                            "data": chunk.decode("utf-8", errors="replace"),
-                        }
+                        chunk = f.read(WAIT_STREAM_CHUNK_BYTES)
+                    if not chunk:
+                        return
+                    position += len(chunk)
+                    text = decoder.decode(chunk)
+                    if text:
+                        yield {"event": "log", "data": text}
+
+            while True:
+                # Read new log bytes since last position
+                for ev in drain_new_bytes():
+                    yield ev
 
                 # Check job state
                 with SessionLocal() as session:
@@ -1107,6 +1124,13 @@ def build_app(
                     return
 
                 if JobState(job.state) in TERMINAL_STATES:
+                    # Final drain: the worker may have written its last bytes
+                    # between our read above and flipping to a terminal state.
+                    for ev in drain_new_bytes():
+                        yield ev
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        yield {"event": "log", "data": tail}
                     yield {
                         "event": "terminal",
                         "data": json.dumps({"state": job.state, "exit_code": job.exit_code}),
