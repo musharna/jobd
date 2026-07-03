@@ -1083,12 +1083,12 @@ def build_app(
 
     @app.get("/wait/{job_id}")
     async def wait_job(job_id: int):
-        # job_id is int-typed by FastAPI so f"{job_id}.log" can't traverse, but
-        # resolve and assert containment within logs_dir as defense-in-depth —
-        # this also clears the CodeQL py/path-injection sink on the reads below.
-        log_file = (logs_dir / f"{job_id}.log").resolve()
-        if not log_file.is_relative_to(logs_dir.resolve()):
-            raise HTTPException(status_code=400, detail="invalid job id")
+        # Build the log filename from an explicit int() of the path param: it's
+        # already int-typed by FastAPI, but the coercion makes it impossible for
+        # a traversal sequence to reach the filename and clears CodeQL's
+        # py/path-injection sink on the reads below (a bare int-typed param is
+        # still modeled as a tainted string by that query).
+        log_file = logs_dir / f"{int(job_id)}.log"
 
         async def event_generator():
             position = 0
