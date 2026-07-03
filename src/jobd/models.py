@@ -347,6 +347,21 @@ class ClassifyRequest(BaseModel):
     cmd: str
 
 
+class SetPriorityRequest(BaseModel):
+    """Body for POST /projects/{name}. A pydantic model (not a raw dict) so a
+    missing/non-integer `priority` fails validation with 422 instead of the
+    handler raising KeyError/ValueError -> 500. The [0,100] clamp stays in the
+    handler (out-of-range is clamped, not rejected, preserving prior behavior)."""
+
+    priority: int
+
+
+class NudgePriorityRequest(BaseModel):
+    """Body for POST /projects/{name}/nudge. See SetPriorityRequest re: 422."""
+
+    delta: int
+
+
 class ClassifyResult(BaseModel):
     heavy: bool
     rule_id: str | None = None
