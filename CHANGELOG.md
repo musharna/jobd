@@ -4,6 +4,10 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **`job` CLI no longer dumps a Python traceback when the broker is down (audit 2026-07-01, LOW).** Most subcommands wrapped their broker call with no error handling, so a `BrokerUnreachable` (broker down / wrong `JOBD_URL`), `BrokerServerError` (5xx), or `BrokerRefusal` (4xx) surfaced as a raw stack trace; only a few (`preempt`, `preempt-blockers`, `delete-worker`, `ping`) handled any of them. The console entry point is now `job_cli.cli:main`, which wraps the Typer app in a broker-error boundary: a one-line stderr diagnostic + a clean exit code (2 for unreachable/5xx, 1 for a 4xx refusal), never a traceback. It's a backstop — per-command handlers still run first and keep their tailored messages; only exceptions they don't catch reach the boundary, and normal `SystemExit`/`typer.Exit` pass through untouched.
+
 ### Security
 
 - **Submitted `env` values are now masked on observability reads (audit 2026-07-01, LOW-Sec).** A job's `env` was stored plaintext and echoed verbatim on every job-info read — `GET /jobs`, `GET /jobs/{id}`, the submit/cancel/preempt responses, and the MCP `jobd_status`/`jobd_job_get` tools (all via `broker.jobinfo._to_info`) — so a token someone passed in `env` leaked to any other token-holder and, worse, into an agent's context on a routine status read. Those surfaces now return `{"KEY": "***"}` (keys preserved so operators can see _which_ vars are set; values hidden). The masking is fail-safe by default in `_to_info`; only the worker-claim `/next-job` path opts out (`redact_env=False`) so the job still runs with the real values. **Not** covered: env is still stored plaintext at rest in `jobs.env_json` (DB-file/backup exposure is out of scope for this change) — see `docs/security.md`. Note: there is no `--env` CLI flag on `job submit` in this tree; env enters only via MCP or a direct `POST /submit`.
