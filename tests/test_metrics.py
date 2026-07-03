@@ -66,6 +66,48 @@ def test_metrics_reports_job_and_worker_counts(app):
     assert "jobd_build_info{version=" in body
 
 
+def test_collector_caches_db_query_within_ttl():
+    """/metrics is unauthenticated + ACL-exempt, so an unauth scrape flood must
+    not drive one GROUP BY per request. With a non-zero TTL the collector queries
+    the DB once and serves the cache until the TTL elapses (audit LOW)."""
+    from jobd.metrics import _JobdCollector
+
+    calls = {"n": 0}
+
+    class _Collector(_JobdCollector):
+        def _query_counts(self):
+            calls["n"] += 1
+            return {"queued": 1}, {"online": 1}
+
+    c = _Collector(session_local=None, cache_ttl_s=60.0)
+    list(c.collect())
+    list(c.collect())
+    families = list(c.collect())
+    assert calls["n"] == 1  # three scrapes, one DB query
+
+    # The cached counts are still emitted correctly.
+    samples = {(f.name, s.labels.get("state")): s.value for f in families for s in f.samples}
+    assert samples[("jobd_jobs", "queued")] == 1.0
+    assert samples[("jobd_workers", "online")] == 1.0
+
+
+def test_collector_ttl_zero_disables_cache():
+    """TTL=0 restores the pre-existing behavior: every scrape queries the DB."""
+    from jobd.metrics import _JobdCollector
+
+    calls = {"n": 0}
+
+    class _Collector(_JobdCollector):
+        def _query_counts(self):
+            calls["n"] += 1
+            return {}, {}
+
+    c = _Collector(session_local=None, cache_ttl_s=0.0)
+    list(c.collect())
+    list(c.collect())
+    assert calls["n"] == 2
+
+
 def test_metrics_bypasses_bearer_token(app, monkeypatch):
     """Mount bypasses the global token: /metrics is 200 without a token while a
     normal route 401s."""
