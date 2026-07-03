@@ -64,9 +64,8 @@ from jobd.config import (
     load_classifier_rules,
     load_profiles,
     load_projects,
-    resolve_priority,
+    resolve_effective_config,
     resolve_profile,
-    resolve_project_defaults,
 )
 from jobd.db import Job, Worker, init_db, migrate
 from jobd.matcher import (
@@ -89,7 +88,6 @@ from jobd.models import (
     JobState,
     JobSubmit,
     NextJobQuery,
-    ResolutionSource,
     ResolvedConfig,
     WorkerHeartbeat,
     WorkerInfo,
@@ -273,65 +271,32 @@ def build_app(
             if profile_spec is None:
                 raise HTTPException(status_code=404, detail=f"unknown profile: {req.profile}")
 
-        priority = resolve_priority(state["projects"], req.project, req.priority_delta)
-        # Per docs/projects-yaml.md §3, resolution order is:
-        # CLI > project_default > profile > global. The `req.<field>` here is
-        # the CLI-side value; project defaults sit just below.
-        proj_defaults = resolve_project_defaults(state["projects"], req.project)
+        # Shared precedence cascade (CLI > project_default > profile > global,
+        # docs/projects-yaml.md §3) resolved once in jobd.config so /submit and
+        # /resolve can't drift. /submit reads only `.value`; /resolve surfaces
+        # the (value, source) verbatim.
+        eff = resolve_effective_config(req, state["projects"], profile_spec)
+        priority = eff.priority.value
+        host_pin = eff.host_pin.value
+        preemptible = eff.preemptible.value
+        max_wall_s = eff.max_wall_s.value
+        idle_timeout_s = eff.idle_timeout_s.value
+        checkpoint_grace_s = eff.checkpoint_grace_s.value
+        unknown_project_warning = eff.unknown_project_warning
+        requires = eff.requires.value
+        requires_json = requires.model_dump_json() if requires is not None else "{}"
 
-        host_pin = req.host_pin
-        if host_pin == "any" and proj_defaults.host_pin:
-            host_pin = proj_defaults.host_pin
-        elif host_pin == "any" and profile_spec and profile_spec.host_hint:
-            host_pin = profile_spec.host_hint
-
-        # Explicit `req.vram_gb > 0` wins; otherwise fall through to the
-        # profile spec; otherwise 0 (matcher applies tier-tag / implicit-
-        # floor fallback). See JobSubmit.vram_gb docstring + matcher's
-        # `effective_vram_request_gb`.
+        # vram_gb/ram_gb/cpus/fast_path are submit-only (no source label, single
+        # consumer, absent from ResolvedConfig): explicit CLI `vram_gb > 0` wins,
+        # else the profile spec, else the matcher-friendly floor. See
+        # JobSubmit.vram_gb docstring + matcher's `effective_vram_request_gb`.
         vram_gb = req.vram_gb if req.vram_gb > 0 else (profile_spec.vram_gb if profile_spec else 0)
         ram_gb = profile_spec.ram_gb if profile_spec else 0
         cpus = profile_spec.cpus if profile_spec else 1
-
-        preemptible = req.preemptible
-        if preemptible is None:
-            preemptible = proj_defaults.preemptible
-        if preemptible is None and profile_spec is not None:
-            preemptible = profile_spec.preemptible
-        if preemptible is None:
-            preemptible = False
-
         if req.fast_path is not None:
             fast_path = req.fast_path
         else:
             fast_path = profile_spec.fast_path if profile_spec else False
-
-        requires = req.requires
-        if requires is None:
-            requires = proj_defaults.requires
-        if requires is None and profile_spec and profile_spec.requires:
-            requires = profile_spec.requires
-        requires_json = requires.model_dump_json() if requires is not None else "{}"
-
-        max_wall_s = req.max_wall_s
-        if max_wall_s is None:
-            max_wall_s = proj_defaults.max_wall_s
-
-        idle_timeout_s = req.idle_timeout_s
-        if idle_timeout_s is None:
-            idle_timeout_s = proj_defaults.idle_timeout_s
-
-        checkpoint_grace_s = req.checkpoint_grace_s
-        if checkpoint_grace_s is None:
-            checkpoint_grace_s = proj_defaults.checkpoint_grace_s
-
-        # Unknown-project warning: surface (don't refuse) so first-time
-        # `--project new-experiment` keeps working with global defaults.
-        unknown_project_warning: str | None = None
-        if req.project not in state["projects"] and "_default" in state["projects"]:
-            unknown_project_warning = (
-                f"project {req.project!r} has no entry in projects.yaml; using global defaults"
-            )
 
         # cwd sanity: Windows-mount paths only exist on the laptop (WSL). If
         # someone submits --cwd /mnt/c/... without pinning the laptop, the
@@ -1495,120 +1460,25 @@ def build_app(
             if profile_spec is None:
                 raise HTTPException(status_code=404, detail=f"unknown profile: {req.profile}")
 
-        proj_defaults = resolve_project_defaults(state["projects"], req.project)
-
-        # priority: existing logic (project base + delta).
-        priority_value = resolve_priority(state["projects"], req.project, req.priority_delta)
-        priority_source: ResolutionSource = "cli" if req.priority_delta != 0 else "project_default"
-        if req.project not in state["projects"]:
-            priority_source = "global"
-
-        # host_pin
-        host_pin_source: ResolutionSource
-        if req.host_pin != "any":
-            host_pin_value = req.host_pin
-            host_pin_source = "cli"
-        elif proj_defaults.host_pin:
-            host_pin_value = proj_defaults.host_pin
-            host_pin_source = "project_default"
-        elif profile_spec and profile_spec.host_hint and profile_spec.host_hint != "any":
-            host_pin_value = profile_spec.host_hint
-            host_pin_source = "profile"
-        else:
-            host_pin_value = "any"
-            host_pin_source = "global"
-
-        # max_wall_s / idle_timeout_s — no profile-level default; fall through
-        # CLI -> project -> global(None).
-        max_wall_source: ResolutionSource
-        if req.max_wall_s is not None:
-            max_wall_value = req.max_wall_s
-            max_wall_source = "cli"
-        elif proj_defaults.max_wall_s is not None:
-            max_wall_value = proj_defaults.max_wall_s
-            max_wall_source = "project_default"
-        else:
-            max_wall_value = None
-            max_wall_source = "global"
-
-        idle_source: ResolutionSource
-        if req.idle_timeout_s is not None:
-            idle_value = req.idle_timeout_s
-            idle_source = "cli"
-        elif proj_defaults.idle_timeout_s is not None:
-            idle_value = proj_defaults.idle_timeout_s
-            idle_source = "project_default"
-        else:
-            idle_value = None
-            idle_source = "global"
-
-        ckpt_source: ResolutionSource
-        if req.checkpoint_grace_s is not None:
-            ckpt_value = req.checkpoint_grace_s
-            ckpt_source = "cli"
-        elif proj_defaults.checkpoint_grace_s is not None:
-            ckpt_value = proj_defaults.checkpoint_grace_s
-            ckpt_source = "project_default"
-        else:
-            ckpt_value = None
-            ckpt_source = "global"
-
-        # preemptible
-        pre_source: ResolutionSource
-        if req.preemptible is not None:
-            pre_value = req.preemptible
-            pre_source = "cli"
-        elif proj_defaults.preemptible is not None:
-            pre_value = proj_defaults.preemptible
-            pre_source = "project_default"
-        elif profile_spec is not None and profile_spec.preemptible:
-            pre_value = profile_spec.preemptible
-            pre_source = "profile"
-        else:
-            pre_value = False
-            pre_source = "global"
-
-        # requires
-        req_source: ResolutionSource
-        if req.requires is not None:
-            req_value = req.requires.model_dump()
-            req_source = "cli"
-        elif proj_defaults.requires is not None:
-            req_value = proj_defaults.requires.model_dump()
-            req_source = "project_default"
-        elif profile_spec is not None and profile_spec.requires is not None:
-            req_value = profile_spec.requires.model_dump()
-            req_source = "profile"
-        else:
-            req_value = None
-            req_source = "global"
-
-        # escalate_to_arc — only project-default or global today.
-        arc_source: ResolutionSource
-        if proj_defaults.escalate_to_arc:
-            arc_value = True
-            arc_source = "project_default"
-        else:
-            arc_value = False
-            arc_source = "global"
-
-        warning: str | None = None
-        if req.project not in state["projects"] and "_default" in state["projects"]:
-            warning = (
-                f"project {req.project!r} has no entry in projects.yaml; using global defaults"
-            )
-
+        eff = resolve_effective_config(req, state["projects"], profile_spec)
+        # requires is carried as the JobRequires OBJECT internally (so /submit
+        # can serialize it); the API surfaces it model_dumped. Every other field
+        # is the shared FieldResolution verbatim — same precedence /submit runs.
+        requires_value = eff.requires.value
         return ResolvedConfig(
             project=req.project,
-            effective_priority=FieldResolution(value=priority_value, source=priority_source),
-            effective_host_pin=FieldResolution(value=host_pin_value, source=host_pin_source),
-            effective_max_wall_s=FieldResolution(value=max_wall_value, source=max_wall_source),
-            effective_idle_timeout_s=FieldResolution(value=idle_value, source=idle_source),
-            effective_checkpoint_grace_s=FieldResolution(value=ckpt_value, source=ckpt_source),
-            effective_preemptible=FieldResolution(value=pre_value, source=pre_source),
-            effective_requires=FieldResolution(value=req_value, source=req_source),
-            effective_escalate_to_arc=FieldResolution(value=arc_value, source=arc_source),
-            submit_warning=warning,
+            effective_priority=eff.priority,
+            effective_host_pin=eff.host_pin,
+            effective_max_wall_s=eff.max_wall_s,
+            effective_idle_timeout_s=eff.idle_timeout_s,
+            effective_checkpoint_grace_s=eff.checkpoint_grace_s,
+            effective_preemptible=eff.preemptible,
+            effective_requires=FieldResolution(
+                value=requires_value.model_dump() if requires_value is not None else None,
+                source=eff.requires.source,
+            ),
+            effective_escalate_to_arc=eff.escalate_to_arc,
+            submit_warning=eff.unknown_project_warning,
         )
 
     def _prune_old_jobs(now: datetime | None = None) -> int:

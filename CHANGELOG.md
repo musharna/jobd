@@ -2,6 +2,12 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **`/submit` and `/resolve` now share one field-resolution cascade (audit 2026-07-01, Quality-3).** Both endpoints hand-encoded the same `CLI > project_default > profile > global` precedence (docs/projects-yaml.md §3) — `/submit` for values, `/resolve` for value+source — and had already drifted: `/resolve`'s profile `host_pin` branch carried a `!= "any"` guard (so a profile `host_hint: any` is not mistaken for a real pin) that `/submit` lacked. The divergence was latent (source-label only; no resolved-value difference today), but any future edit to one copy would silently diverge the other — exactly the class of bug where a dry-run preview stops matching the real submit. The precedence now lives once in `jobd.config.resolve_effective_config`, returning a `(value, source)` per field; `/resolve` surfaces it verbatim and `/submit` reads `.value` (submit-only `vram_gb`/`ram_gb`/`cpus`/`fast_path`, which have no source label and a single consumer, stay inline). A new `tests/test_submit_resolve_agreement.py` locks the invariant: for a matrix of project/profile/CLI inputs, every field `/submit` persists equals what `/resolve` previewed.
+
 ## [0.5.8] — 2026-07-02
 
 ### Fixed

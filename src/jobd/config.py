@@ -8,7 +8,13 @@ from typing import Literal
 
 import yaml
 
-from jobd.models import JobRequires, ProfileSpec
+from jobd.models import (
+    FieldResolution,
+    JobRequires,
+    JobSubmit,
+    ProfileSpec,
+    ResolutionSource,
+)
 
 
 @dataclass
@@ -168,3 +174,166 @@ def resolve_project_defaults(
     if entry is None:
         return ProjectDefaults()
     return entry.defaults
+
+
+@dataclass
+class EffectiveConfig:
+    """Resolved (value, source) for every field whose precedence is shared by
+    POST /submit and POST /resolve. The precedence — CLI > project_default >
+    profile > global (docs/projects-yaml.md §3) — lives ONCE here so the two
+    endpoints cannot drift (they did: /resolve carried a `!= "any"` guard on
+    the profile host_pin branch that /submit lacked).
+
+    `requires.value` is the JobRequires OBJECT (or None): /submit serializes it
+    to requires_json, /resolve model_dumps it for the API. `submit`-only fields
+    (vram_gb/ram_gb/cpus/fast_path) are NOT here — they have no source label and
+    only one consumer, so no duplication to unify. `escalate_to_arc` is reported
+    by /resolve and currently ignored by /submit (no Job column)."""
+
+    priority: FieldResolution
+    host_pin: FieldResolution
+    max_wall_s: FieldResolution
+    idle_timeout_s: FieldResolution
+    checkpoint_grace_s: FieldResolution
+    preemptible: FieldResolution
+    requires: FieldResolution  # value: JobRequires | None
+    escalate_to_arc: FieldResolution
+    unknown_project_warning: str | None
+
+
+def resolve_effective_config(
+    req: JobSubmit,
+    projects: dict[str, ProjectEntry],
+    profile_spec: ProfileSpec | None,
+) -> EffectiveConfig:
+    """Resolve every source-tracked field once, applying CLI > project_default
+    > profile > global. Callers resolve `profile_spec` themselves (the unknown-
+    profile 404 is an HTTP concern) and pass it in.
+
+    The returned FieldResolution objects are what /resolve surfaces verbatim;
+    /submit reads only `.value`. This is the single source of truth for the
+    precedence cascade both endpoints used to hand-encode separately."""
+    proj_defaults = resolve_project_defaults(projects, req.project)
+    known_project = req.project in projects
+
+    # priority: value from resolve_priority; source mirrors /resolve's rule
+    # (unknown project always attributes to global, even with a CLI delta).
+    priority_value = resolve_priority(projects, req.project, req.priority_delta)
+    priority_source: ResolutionSource
+    if not known_project:
+        priority_source = "global"
+    elif req.priority_delta != 0:
+        priority_source = "cli"
+    else:
+        priority_source = "project_default"
+
+    # host_pin: the `!= "any"` guard on the profile branch is the divergence
+    # this dedup removes — a profile host_hint of "any" is not a real pin, so it
+    # must not be attributed to (or override toward) the profile.
+    host_pin_source: ResolutionSource
+    if req.host_pin != "any":
+        host_pin_value = req.host_pin
+        host_pin_source = "cli"
+    elif proj_defaults.host_pin:
+        host_pin_value = proj_defaults.host_pin
+        host_pin_source = "project_default"
+    elif profile_spec and profile_spec.host_hint and profile_spec.host_hint != "any":
+        host_pin_value = profile_spec.host_hint
+        host_pin_source = "profile"
+    else:
+        host_pin_value = "any"
+        host_pin_source = "global"
+
+    # max_wall_s / idle_timeout_s / checkpoint_grace_s: CLI > project > global
+    # (None). No profile-level default for these.
+    max_wall_source: ResolutionSource
+    if req.max_wall_s is not None:
+        max_wall_value = req.max_wall_s
+        max_wall_source = "cli"
+    elif proj_defaults.max_wall_s is not None:
+        max_wall_value = proj_defaults.max_wall_s
+        max_wall_source = "project_default"
+    else:
+        max_wall_value = None
+        max_wall_source = "global"
+
+    idle_source: ResolutionSource
+    if req.idle_timeout_s is not None:
+        idle_value = req.idle_timeout_s
+        idle_source = "cli"
+    elif proj_defaults.idle_timeout_s is not None:
+        idle_value = proj_defaults.idle_timeout_s
+        idle_source = "project_default"
+    else:
+        idle_value = None
+        idle_source = "global"
+
+    ckpt_source: ResolutionSource
+    if req.checkpoint_grace_s is not None:
+        ckpt_value = req.checkpoint_grace_s
+        ckpt_source = "cli"
+    elif proj_defaults.checkpoint_grace_s is not None:
+        ckpt_value = proj_defaults.checkpoint_grace_s
+        ckpt_source = "project_default"
+    else:
+        ckpt_value = None
+        ckpt_source = "global"
+
+    # preemptible: profile only contributes when truthy (matches both prior
+    # copies' resolved value; False/None from a profile falls through to global).
+    pre_source: ResolutionSource
+    if req.preemptible is not None:
+        pre_value = req.preemptible
+        pre_source = "cli"
+    elif proj_defaults.preemptible is not None:
+        pre_value = proj_defaults.preemptible
+        pre_source = "project_default"
+    elif profile_spec is not None and profile_spec.preemptible:
+        pre_value = profile_spec.preemptible
+        pre_source = "profile"
+    else:
+        pre_value = False
+        pre_source = "global"
+
+    # requires: value is the JobRequires OBJECT (or None); callers serialize.
+    req_source: ResolutionSource
+    req_value: JobRequires | None
+    if req.requires is not None:
+        req_value = req.requires
+        req_source = "cli"
+    elif proj_defaults.requires is not None:
+        req_value = proj_defaults.requires
+        req_source = "project_default"
+    elif profile_spec is not None and profile_spec.requires is not None:
+        req_value = profile_spec.requires
+        req_source = "profile"
+    else:
+        req_value = None
+        req_source = "global"
+
+    # escalate_to_arc: project_default or global only.
+    arc_source: ResolutionSource
+    if proj_defaults.escalate_to_arc:
+        arc_value = True
+        arc_source = "project_default"
+    else:
+        arc_value = False
+        arc_source = "global"
+
+    unknown_project_warning: str | None = None
+    if not known_project and "_default" in projects:
+        unknown_project_warning = (
+            f"project {req.project!r} has no entry in projects.yaml; using global defaults"
+        )
+
+    return EffectiveConfig(
+        priority=FieldResolution(value=priority_value, source=priority_source),
+        host_pin=FieldResolution(value=host_pin_value, source=host_pin_source),
+        max_wall_s=FieldResolution(value=max_wall_value, source=max_wall_source),
+        idle_timeout_s=FieldResolution(value=idle_value, source=idle_source),
+        checkpoint_grace_s=FieldResolution(value=ckpt_value, source=ckpt_source),
+        preemptible=FieldResolution(value=pre_value, source=pre_source),
+        requires=FieldResolution(value=req_value, source=req_source),
+        escalate_to_arc=FieldResolution(value=arc_value, source=arc_source),
+        unknown_project_warning=unknown_project_warning,
+    )
