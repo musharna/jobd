@@ -4,6 +4,10 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /wait/{id}` streams the log in bounded slices instead of reading the whole backlog into memory (audit 2026-07-01, LOW).** The SSE generator opened the log and did `f.read()` from the last position; on the first iteration `position` is `0`, so attaching `/wait` to a job that had already produced a large log pulled the entire file into one allocation (plus a second full copy on `.decode()`) — for the exact case `/wait` is built for (babysitting a long-running job with lots of output), each connection could balloon broker memory. It now reads in 64 KiB slices (`WAIT_STREAM_CHUNK_BYTES`), reopening the file per slice so no fd is held across an SSE yield, and decodes through an incremental UTF-8 decoder so a multibyte char split across a slice boundary isn't corrupted into replacement chars. A final drain on terminal-state detection also closes a latent race where bytes the worker wrote as it exited (between the read and the state flip) could be dropped.
+
 ## [0.5.9] — 2026-07-03
 
 ### Fixed

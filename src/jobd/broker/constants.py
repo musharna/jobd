@@ -52,6 +52,7 @@ UNMATCHEABLE_THRESHOLD_SECONDS = 60
 QUEUE_BLOCKED_THRESHOLD_SECONDS = 300  # 5 min: above this, surface load-blocker
 AUTO_PREEMPT_MIN_RUNTIME_SECONDS = 300  # don't auto-preempt jobs that just started
 MAX_LOG_CHUNK_BYTES = 10 * 1024 * 1024  # 10 MiB cap per /log append
+WAIT_STREAM_CHUNK_BYTES = 64 * 1024  # /wait reads the log in 64 KiB slices to bound memory
 
 _UNMATCHEABLE_WARNING_PREFIX = "no matching worker —"
 _BLOCKED_WARNING_PREFIX = "queue-age "
