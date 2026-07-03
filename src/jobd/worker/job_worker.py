@@ -822,12 +822,14 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
 
     env = os.environ.copy()
 
-    # Apply caller-submitted env vars (`job["env"]`) so `--env FOO=bar` actually
-    # reaches the workload. These layer over the worker's inherited environment;
-    # the jobd-internal JOBD_CHECKPOINT_* vars set below are written afterward
-    # and intentionally take precedence. Trusted-tailnet feature: a caller who
-    # can reach /submit can already run arbitrary commands, so env injection
-    # grants no additional privilege (see docs/security.md).
+    # Apply caller-submitted env vars (the `env` field on the /submit payload,
+    # delivered here via the /next-job claim response — the one read surface that
+    # returns real env values; all others mask them, see docs/security.md) so
+    # they reach the workload. These layer over the worker's inherited
+    # environment; the jobd-internal JOBD_CHECKPOINT_* vars set below are written
+    # afterward and intentionally take precedence. Trusted-tailnet feature: a
+    # caller who can reach /submit can already run arbitrary commands, so env
+    # injection grants no additional privilege (see docs/security.md).
     submitted_env = job.get("env") or {}
     if submitted_env:
         env.update({str(k): str(v) for k, v in submitted_env.items()})

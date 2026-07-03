@@ -18,14 +18,30 @@ from jobd.estimator import (
 )
 from jobd.models import JobInfo, JobRequires, JobState
 
+# Placeholder that replaces env VALUES on observability read surfaces. Keys are
+# preserved (operators can still see WHICH vars a job sets) but values are hidden.
+ENV_REDACTED_PLACEHOLDER = "***"
 
-def _to_info(job: Job, eta_ctx: dict | None = None) -> JobInfo:
+
+def _redact_env(env: dict[str, str]) -> dict[str, str]:
+    """Mask env values (keys preserved) for read surfaces that must not echo
+    submitted secrets. Submitted `env` can carry tokens; `GET /jobs`,
+    `GET /jobs/{id}`, submit/cancel/preempt responses, and the MCP
+    status/get tools (which read through those endpoints) all flow through
+    `_to_info` and would otherwise return the plaintext values. Only the
+    worker-claim `/next-job` path passes ``redact_env=False`` so the job still
+    runs with the real values (audit 2026-07-01, LOW-Sec `--env`)."""
+    return {k: ENV_REDACTED_PLACEHOLDER for k in env}
+
+
+def _to_info(job: Job, eta_ctx: dict | None = None, *, redact_env: bool = True) -> JobInfo:
     req = None
     if job.requires_json and job.requires_json != "{}":
         try:
             req = JobRequires.model_validate_json(job.requires_json)
         except Exception:
             req = None
+    env_dict = json.loads(job.env_json or "{}")
     info = JobInfo(
         id=job.id,
         project=job.project,
@@ -44,7 +60,7 @@ def _to_info(job: Job, eta_ctx: dict | None = None) -> JobInfo:
         vram_gb=job.vram_gb,
         ram_gb=job.ram_gb,
         cpus=job.cpus,
-        env=json.loads(job.env_json or "{}"),
+        env=_redact_env(env_dict) if redact_env else env_dict,
         requires=req,
         warning=job.warning,
         depends_on=json.loads(job.depends_on_json or "[]"),
