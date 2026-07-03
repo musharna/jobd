@@ -1092,10 +1092,12 @@ def test_running_job_within_wall_clock_left_running(client):
     assert got["state"] == "running", got
 
 
-def test_submitted_env_round_trips_to_worker(client):
-    """P0.3 (CRIT M1): env submitted with a job is stored and returned on the
-    /next-job dispatch payload (and /jobs/{id}) so the worker can apply it.
-    Previously env was stored but never returned, so --env silently no-op'd."""
+def test_submitted_env_redacted_on_reads_real_on_dispatch(client):
+    """Submitted env is delivered to the claiming worker via /next-job with its
+    REAL values, but every observability read surface (the /submit response and
+    GET /jobs/{id}) masks the values to a placeholder — keys stay visible so an
+    operator can see WHICH vars are set without the plaintext leaking to any
+    token-holder or into MCP/agent context (audit 2026-07-01, LOW-Sec --env)."""
     client.post(
         "/heartbeat",
         json={
@@ -1121,8 +1123,16 @@ def test_submitted_env_round_trips_to_worker(client):
         },
     )
     assert r.status_code == 200, r.text
-    assert r.json()["env"] == {"FOO": "bar", "BAZ": "qux"}
+    # /submit response: keys present, values masked (no plaintext echoed back).
+    assert r.json()["env"] == {"FOO": "***", "BAZ": "***"}
+    job_id = r.json()["id"]
 
+    # GET /jobs/{id} and GET /jobs: same masking.
+    assert client.get(f"/jobs/{job_id}").json()["env"] == {"FOO": "***", "BAZ": "***"}
+    listed = next(j for j in client.get("/jobs").json() if j["id"] == job_id)
+    assert listed["env"] == {"FOO": "***", "BAZ": "***"}
+
+    # /next-job: the worker claim gets the REAL values so the job actually runs.
     claim = client.post(
         "/next-job",
         json={

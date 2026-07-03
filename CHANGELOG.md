@@ -4,6 +4,10 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security
+
+- **Submitted `env` values are now masked on observability reads (audit 2026-07-01, LOW-Sec).** A job's `env` was stored plaintext and echoed verbatim on every job-info read — `GET /jobs`, `GET /jobs/{id}`, the submit/cancel/preempt responses, and the MCP `jobd_status`/`jobd_job_get` tools (all via `broker.jobinfo._to_info`) — so a token someone passed in `env` leaked to any other token-holder and, worse, into an agent's context on a routine status read. Those surfaces now return `{"KEY": "***"}` (keys preserved so operators can see _which_ vars are set; values hidden). The masking is fail-safe by default in `_to_info`; only the worker-claim `/next-job` path opts out (`redact_env=False`) so the job still runs with the real values. **Not** covered: env is still stored plaintext at rest in `jobs.env_json` (DB-file/backup exposure is out of scope for this change) — see `docs/security.md`. Note: there is no `--env` CLI flag on `job submit` in this tree; env enters only via MCP or a direct `POST /submit`.
+
 ### Changed
 
 - **mypy now checks the bodies of un-annotated functions (`check_untyped_defs = true`; audit 2026-07-01, Quality-4).** The `mypy src/jobd src/job_cli` gate was passing but largely vacuous over the hot path: mypy skips the bodies of every def lacking a full signature by default, and the broker/worker (`app.py`, `job_worker.py`) are mostly un-annotated endpoint closures and helpers, so their bodies were never type-checked. Enabling `check_untyped_defs` type-checks those bodies (params default to `Any`, so it catches internal inconsistencies, not missing annotations) and produced **zero** new errors — the code was already clean under it. A `tests/test_deploy_lint.py::test_mypy_checks_untyped_defs` guard keeps the flag from being silently dropped.

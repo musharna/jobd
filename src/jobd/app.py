@@ -1332,7 +1332,10 @@ def build_app(
                     worker=q.host,
                     queue_wait_s=round(queue_wait_s, 2),
                 )
-                return _to_info(pick)
+                # The claiming worker needs the REAL env to run the job — this is
+                # the one read surface that must not redact (all other _to_info
+                # callers keep the default redact_env=True). See _redact_env.
+                return _to_info(pick, redact_env=False)
 
         # Long-poll: hold the request up to q.wait_s, re-attempting whenever a
         # dispatcher wake fires (or every _LONGPOLL_RECHECK_S as a backstop for
