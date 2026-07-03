@@ -3609,3 +3609,53 @@ def test_next_job_skips_excluded_worker(client):
     ).json()
     # Only one job exists and desktop is excluded -> desktop gets nothing.
     assert got is None
+
+
+def test_wait_streams_log_in_bounded_slices_without_utf8_corruption(client, tmp_path, monkeypatch):
+    """LOW: /wait must read the backlog in bounded slices (not f.read() the
+    whole file into one allocation) and must not corrupt a multibyte UTF-8
+    char that lands on a slice boundary."""
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Job
+    from jobd.models import JobState
+
+    # Force a tiny slice so the 4-byte emoji straddles a read boundary and the
+    # 20-byte log is delivered across several slices.
+    monkeypatch.setattr(app_mod, "WAIT_STREAM_CHUNK_BYTES", 8)
+
+    job_id = client.post(
+        "/submit",
+        json={"cmd": ["bash", "-c", "x"], "cwd": "/tmp", "project": "project-a"},
+    ).json()["id"]
+
+    # Emoji bytes span offsets 6..9, so with an 8-byte slice its four bytes are
+    # split across slice 1 (offsets 0-7) and slice 2 (offsets 8-15).
+    content = "ABCDEF" + "\U0001f600" + "GHIJKLMNOP"
+    log_file = tmp_path / "logs" / f"{job_id}.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_bytes(content.encode("utf-8"))
+
+    # Flip to a terminal state so the generator drains and returns immediately
+    # instead of polling.
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(
+            update(Job).where(Job.id == job_id).values(state=JobState.COMPLETED.value, exit_code=0)
+        )
+
+    resp = client.get(f"/wait/{job_id}")
+    assert resp.status_code == 200
+    raw = resp.text
+
+    # Reassemble the log payload (content has no newlines -> one data line per
+    # slice). The trailing terminal event's JSON data is also a data: line, so
+    # assert the log content is a contiguous substring rather than equal.
+    payload = "".join(
+        line[len("data:") :].lstrip(" ") for line in raw.splitlines() if line.startswith("data:")
+    )
+    assert content in payload  # full backlog delivered, emoji intact
+    assert "�" not in payload  # no replacement char -> boundary handled
+    assert raw.count("event: log") >= 2  # delivered across multiple slices
+    assert '"state": "completed"' in raw or '"state":"completed"' in raw
