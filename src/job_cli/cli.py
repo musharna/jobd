@@ -1109,5 +1109,30 @@ def audit(
         typer.echo(f"{ts_short}  {event_name:<22}  {job_str:>6}  {proj:<14}  {payload_str}")
 
 
+def main() -> None:
+    """Console-script entry point (`job`).
+
+    Wraps the Typer app in a broker-error boundary so a down or erroring broker
+    yields a one-line diagnostic + a clean exit code instead of a raw traceback
+    (audit 2026-07-01, LOW: most CLI commands tracebacked on
+    BrokerUnreachable/BrokerServerError/BrokerRefusal — only a handful handled
+    them). This is a backstop: per-command handlers (e.g. preempt, ping) still
+    run first and keep their tailored messages; only exceptions they don't catch
+    reach here. SystemExit from normal completion or `typer.Exit` passes through
+    untouched — we catch only the broker exception types."""
+    try:
+        app()
+    except BrokerUnreachable as e:
+        typer.secho(f"broker unreachable at {BASE}: {e}", fg="red", err=True)
+        typer.secho("  is the broker running? check with `job ping`.", fg="red", err=True)
+        raise SystemExit(2) from None
+    except BrokerServerError as e:
+        typer.secho(f"broker error ({e.status_code}) at {BASE}: {e}", fg="red", err=True)
+        raise SystemExit(2) from None
+    except BrokerRefusal as e:
+        typer.secho(f"broker refused ({e.status_code}): {e.detail}", fg="red", err=True)
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    app()
+    main()

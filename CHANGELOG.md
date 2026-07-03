@@ -4,6 +4,10 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **`job` CLI no longer dumps a Python traceback when the broker is down (audit 2026-07-01, LOW).** Most subcommands wrapped their broker call with no error handling, so a `BrokerUnreachable` (broker down / wrong `JOBD_URL`), `BrokerServerError` (5xx), or `BrokerRefusal` (4xx) surfaced as a raw stack trace; only a few (`preempt`, `preempt-blockers`, `delete-worker`, `ping`) handled any of them. The console entry point is now `job_cli.cli:main`, which wraps the Typer app in a broker-error boundary: a one-line stderr diagnostic + a clean exit code (2 for unreachable/5xx, 1 for a 4xx refusal), never a traceback. It's a backstop — per-command handlers still run first and keep their tailored messages; only exceptions they don't catch reach the boundary, and normal `SystemExit`/`typer.Exit` pass through untouched.
+
 ### Changed
 
 - **mypy now checks the bodies of un-annotated functions (`check_untyped_defs = true`; audit 2026-07-01, Quality-4).** The `mypy src/jobd src/job_cli` gate was passing but largely vacuous over the hot path: mypy skips the bodies of every def lacking a full signature by default, and the broker/worker (`app.py`, `job_worker.py`) are mostly un-annotated endpoint closures and helpers, so their bodies were never type-checked. Enabling `check_untyped_defs` type-checks those bodies (params default to `Any`, so it catches internal inconsistencies, not missing annotations) and produced **zero** new errors — the code was already clean under it. A `tests/test_deploy_lint.py::test_mypy_checks_untyped_defs` guard keeps the flag from being silently dropped.
