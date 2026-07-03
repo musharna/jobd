@@ -4,6 +4,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-07-03
+
 ### Fixed
 
 - **Config-mutation endpoints return 422, not 500, on a malformed body (audit 2026-07-01, LOW).** `POST /projects/{name}` and `POST /projects/{name}/nudge` took a raw `dict` and did `int(payload["priority"])` / `int(payload["delta"])`, so a missing key or non-integer value raised `KeyError`/`ValueError` inside the handler → an opaque 500. They now take pydantic request models (`SetPriorityRequest`/`NudgePriorityRequest`), so FastAPI rejects a bad body with a descriptive 422 before the handler runs. The `[0,100]` clamp stays in the handler (out-of-range is clamped, not rejected — unchanged behavior).
