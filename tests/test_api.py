@@ -565,6 +565,19 @@ def test_nudge_project_priority(client):
     assert r.json()["project-b"]["priority"] == 85
 
 
+def test_set_project_priority_malformed_payload_is_422_not_500(client):
+    """A missing or non-integer `priority` is a client error: pydantic validation
+    returns 422, not a handler KeyError/ValueError -> 500 (audit LOW)."""
+    assert client.post("/projects/project-b", json={}).status_code == 422
+    assert client.post("/projects/project-b", json={"priority": "high"}).status_code == 422
+    assert client.post("/projects/project-b", json={"priority": None}).status_code == 422
+
+
+def test_nudge_project_priority_malformed_payload_is_422_not_500(client):
+    assert client.post("/projects/project-b/nudge", json={}).status_code == 422
+    assert client.post("/projects/project-b/nudge", json={"delta": "lots"}).status_code == 422
+
+
 def test_reload_reloads_projects(client, sample_projects_yaml):
     sample_projects_yaml.write_text("""projects:
   project-b: { priority: 99 }

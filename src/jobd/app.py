@@ -88,7 +88,9 @@ from jobd.models import (
     JobState,
     JobSubmit,
     NextJobQuery,
+    NudgePriorityRequest,
     ResolvedConfig,
+    SetPriorityRequest,
     WorkerHeartbeat,
     WorkerInfo,
 )
@@ -1420,8 +1422,8 @@ def build_app(
         return _projects_to_jsonable(state["projects"])
 
     @app.post("/projects/{name}")
-    def set_project_priority(name: str, payload: dict):
-        priority = max(0, min(100, int(payload["priority"])))
+    def set_project_priority(name: str, payload: SetPriorityRequest):
+        priority = max(0, min(100, payload.priority))
         existing = state["projects"].get(name)
         if existing is None:
             state["projects"][name] = ProjectEntry(priority=priority)
@@ -1431,8 +1433,8 @@ def build_app(
         return _projects_to_jsonable(state["projects"])
 
     @app.post("/projects/{name}/nudge")
-    def nudge_project_priority(name: str, payload: dict):
-        delta = int(payload["delta"])
+    def nudge_project_priority(name: str, payload: NudgePriorityRequest):
+        delta = payload.delta
         existing = state["projects"].get(name)
         if existing is None:
             base_entry = state["projects"].get("_default")

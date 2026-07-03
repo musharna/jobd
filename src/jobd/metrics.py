@@ -11,6 +11,9 @@ port. Only non-sensitive aggregate counts are exposed.
 
 from __future__ import annotations
 
+import os
+import threading
+import time
 from collections.abc import Iterator
 
 from prometheus_client import CollectorRegistry, make_asgi_app
@@ -24,6 +27,15 @@ from jobd.models import JobState
 
 _WORKER_STATES: tuple[str, ...] = ("online", "offline")
 
+# /metrics is unauthenticated AND tailnet-ACL-exempt by design (an in-cluster
+# Prometheus scrapes from the docker-bridge IP, not a tailnet address — see the
+# module docstring). That makes the per-scrape DB query an amplification vector:
+# an unauthenticated caller can drive one GROUP BY per request in a tight loop.
+# Cache the aggregate counts for a short TTL so the DB is hit at most once per
+# window regardless of scrape rate. Tunable via JOBD_METRICS_CACHE_TTL_S; set to
+# 0 to disable (always query — real-time counts, pre-existing behavior).
+_DEFAULT_CACHE_TTL_S = 5.0
+
 
 def _ordered_states(known: tuple[str, ...] | list[str], counts: dict[str, int]) -> list[str]:
     """Known states first (emitted as 0 when absent so dashboard panels never
@@ -34,12 +46,20 @@ def _ordered_states(known: tuple[str, ...] | list[str], counts: dict[str, int]) 
 
 
 class _JobdCollector:
-    """prometheus_client custom collector: queries the broker DB on each scrape."""
+    """prometheus_client custom collector: aggregate job/worker counts from the
+    broker DB, cached for a short TTL so an unauthenticated /metrics scrape flood
+    can't drive one GROUP BY per request."""
 
-    def __init__(self, session_local: sessionmaker) -> None:
+    def __init__(self, session_local: sessionmaker, cache_ttl_s: float | None = None) -> None:
         self._session_local = session_local
+        if cache_ttl_s is None:
+            cache_ttl_s = float(os.environ.get("JOBD_METRICS_CACHE_TTL_S", _DEFAULT_CACHE_TTL_S))
+        self._cache_ttl_s = cache_ttl_s
+        self._lock = threading.Lock()
+        self._cache: tuple[dict[str, int], dict[str, int]] | None = None
+        self._cached_at = 0.0
 
-    def collect(self) -> Iterator[GaugeMetricFamily]:
+    def _query_counts(self) -> tuple[dict[str, int], dict[str, int]]:
         with self._session_local() as session:
             job_counts: dict[str, int] = dict(
                 session.execute(select(Job.state, func.count()).group_by(Job.state)).all()
@@ -47,6 +67,24 @@ class _JobdCollector:
             worker_counts: dict[str, int] = dict(
                 session.execute(select(Worker.state, func.count()).group_by(Worker.state)).all()
             )
+        return job_counts, worker_counts
+
+    def _counts(self) -> tuple[dict[str, int], dict[str, int]]:
+        """Return (job_counts, worker_counts), served from a TTL cache. The query
+        runs under the lock so a scrape burst that all misses the cache issues a
+        single DB round-trip (dogpile-proof), not one per concurrent request. A
+        TTL of 0 disables caching (always query — real-time counts)."""
+        if self._cache_ttl_s <= 0:
+            return self._query_counts()
+        with self._lock:
+            now = time.monotonic()
+            if self._cache is None or (now - self._cached_at) >= self._cache_ttl_s:
+                self._cache = self._query_counts()
+                self._cached_at = now
+            return self._cache
+
+    def collect(self) -> Iterator[GaugeMetricFamily]:
+        job_counts, worker_counts = self._counts()
 
         jobs = GaugeMetricFamily(
             "jobd_jobs",
