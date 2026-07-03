@@ -80,6 +80,25 @@ def test_server_json_version_matches_pyproject():
     )
 
 
+def test_mypy_checks_untyped_defs():
+    """The mypy gate must keep `check_untyped_defs = true`.
+
+    Without it, mypy skips the bodies of every un-annotated function, so most of
+    the broker/worker hot path (app.py, job_worker.py — full of un-annotated
+    endpoint closures and helpers) is never type-checked and "mypy green" means
+    almost nothing there (audit Quality-4, 2026-07-01). Enabling it produced
+    zero new errors; this test stops the flag from being silently dropped and
+    the checking from quietly going vacuous again."""
+    import tomllib
+
+    mypy_cfg = tomllib.loads(_PYPROJECT.read_text()).get("tool", {}).get("mypy", {})
+    assert mypy_cfg.get("check_untyped_defs") is True, (
+        "[tool.mypy] check_untyped_defs must be true — without it mypy skips "
+        "un-annotated function bodies and the type gate is vacuous over the "
+        "broker/worker hot path (audit Quality-4)."
+    )
+
+
 def test_compose_file_exists():
     assert _COMPOSE.exists(), f"missing {_COMPOSE}"
 

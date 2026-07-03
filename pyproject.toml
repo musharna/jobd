@@ -89,6 +89,12 @@ markers = [
 python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_ignores = true
+# Check the bodies of un-annotated functions too. Without this, mypy silently
+# skips the bodies of every def lacking a full signature — which is most of the
+# broker/worker hot path (app.py, job_worker.py) — making the "mypy green" gate
+# vacuous there (audit Quality-4, 2026-07-01). The codebase already passes with
+# it on; test_deploy_lint.py::test_mypy_checks_untyped_defs keeps it enabled.
+check_untyped_defs = true
 
 [tool.ruff]
 line-length = 100
