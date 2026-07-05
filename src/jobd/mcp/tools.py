@@ -275,15 +275,41 @@ _LIST_SUMMARY_FIELDS = (
 )
 
 
+_LIST_DEFAULT_STATES = ("queued", "assigned", "running")
+_LIST_LIMIT_DEFAULT = 50
+_LIST_LIMIT_MAX = 200
+
+
 def jobd_list(client: JobdClient, args: dict) -> dict:
-    states = args.get("state") or []
-    state = states[0] if states else None
+    # Schema defaults are documentation only — the model may omit the key, so
+    # apply them here: absent `state` = the active set (a long-lived broker
+    # with retention off holds every job ever run; dumping the full history
+    # into the model's context was the audit 2026-07-05 A6 bug). An explicit
+    # [] opts into all states.
+    states = args.get("state")
+    if states is None:
+        states = list(_LIST_DEFAULT_STATES)
+    # GET /jobs takes a single state_filter; forward one state, filter
+    # multi-state client-side over the unfiltered (newest-first) list.
+    state = states[0] if len(states) == 1 else None
     raw_list = client.list_jobs(state=state, project=args.get("project"))
-    wrapped = wrap_jobs(raw_list if isinstance(raw_list, list) else raw_list.get("jobs", []))
-    return {
-        "jobs": [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in wrapped["jobs"]],
-        "counts": wrapped["counts"],
-    }
+    rows = raw_list if isinstance(raw_list, list) else raw_list.get("jobs", [])
+    if len(states) > 1:
+        wanted = set(states)
+        rows = [j for j in rows if j.get("state") in wanted]
+    wrapped = wrap_jobs(rows)
+    try:
+        limit = int(args.get("limit", _LIST_LIMIT_DEFAULT))
+    except (TypeError, ValueError):
+        limit = _LIST_LIMIT_DEFAULT
+    limit = max(1, min(limit, _LIST_LIMIT_MAX))
+    jobs = [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in wrapped["jobs"]]
+    # counts cover the full filtered set; the jobs array is capped to the
+    # newest `limit` (broker order is id desc) with the overflow noted.
+    result = {"jobs": jobs[:limit], "counts": wrapped["counts"]}
+    if len(jobs) > limit:
+        result["truncated"] = len(jobs) - limit
+    return result
 
 
 STALE_AFTER_S = 60

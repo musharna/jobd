@@ -10,6 +10,10 @@ import re
 
 from jobd.client import BrokerRefusal
 
+# Regexes are matched against the broker's REAL detail strings (app.py /submit
+# validation + matcher.cwd_routability) — audit 2026-07-05 A7 found the old
+# "unknown parent job" / "no eligible worker" rules matched nothing the broker
+# ever emits, while the actual mount-root hard-fails fell through to "unknown".
 _RULES: list[tuple[int, re.Pattern, str, str]] = [
     (
         400,
@@ -19,15 +23,28 @@ _RULES: list[tuple[int, re.Pattern, str, str]] = [
     ),
     (
         400,
-        re.compile(r"unknown parent job", re.I),
+        # matcher.cwd_routability: "cwd '…' is under no mount_root of
+        # host_pin='…'" / "cwd '…' is under no known worker's mount_roots".
+        re.compile(r"cwd .* is under no (mount_root|known worker)", re.I),
+        "cwd_outside_mount_roots",
+        "No worker advertises a mount root covering this cwd. Pass --host "
+        "<a-host-that-has-it> in extra, or stage the data under a shared path.",
+    ),
+    (
+        400,
+        # app.py /submit: "depends_on refers to missing job: N".
+        re.compile(r"depends_on refers to missing job", re.I),
         "unknown_parent",
         "Verify the parent job_id with jobd_status before depending on it.",
     ),
     (
         400,
-        re.compile(r"no eligible worker", re.I),
-        "no_eligible_worker",
-        "Check jobd_workers — host_pin may not match any live worker.",
+        # app.py /submit: "depends_on parent N is already <state> (a
+        # failed-side terminal)".
+        re.compile(r"depends_on parent \d+ is already", re.I),
+        "parent_failed",
+        "The parent already reached a failed-side terminal state. Resubmit the "
+        "parent, or pass depends_on_any_exit=true to proceed on any exit.",
     ),
     (
         400,
