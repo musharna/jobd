@@ -82,7 +82,7 @@ asyncio_mode = "auto"
 # Per-test override: @pytest.mark.timeout(N).
 timeout = 300
 markers = [
-    "live: hits the real jobd broker; skipped unless RUN_LIVE_JOBD=1",
+    "live: real-execution/live-broker suite behind an explicit opt-in env (RUN_LIVE_JOBD / JOBD_LIVE / JOBD_E2E); structurally deselected in CI via -m 'not live'",
 ]
 
 [tool.mypy]

@@ -28,16 +28,25 @@ jobs:
         # the PyPI package + its mcp-name marker, so block until it is live.
         run: |
           VER=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          for i in $(seq 1 30); do
+          # 10 minutes: release.yml's PyPI job runs in the `pypi` environment,
+          # so a slow upload (or a future required reviewer on that
+          # environment) must not fail this run after the tag is already cut.
+          for i in $(seq 1 60); do
             if curl -fsSL "https://pypi.org/pypi/jobd/$VER/json" >/dev/null; then
               echo "PyPI $VER is live"; exit 0
             fi
-            echo "waiting for PyPI $VER ($i/30)"; sleep 10
+            echo "waiting for PyPI $VER ($i/60)"; sleep 10
           done
-          echo "PyPI $VER did not appear within 5 minutes"; exit 1
+          echo "PyPI $VER did not appear within 10 minutes"; exit 1
       - name: Install mcp-publisher
-        # Pinned; bump alongside registry server.json schema changes.
-        run: curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/v1.7.9/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+        # Pinned by tag AND sha256: release tags/assets are mutable (unlike the
+        # SHA-pinned actions elsewhere in these workflows), so verify the
+        # digest before executing the binary. Recompute when bumping the
+        # version: curl -fsSL <url> | sha256sum
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/v1.7.9/mcp-publisher_linux_amd64.tar.gz" -o mcp-publisher.tar.gz
+          echo "ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
       - name: Log in to the MCP registry via GitHub Actions OIDC
         run: ./mcp-publisher login github-oidc
       - name: Publish server.json
