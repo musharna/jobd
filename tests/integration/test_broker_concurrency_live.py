@@ -40,10 +40,14 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("JOBD_LIVE") != "1",
-    reason="Set JOBD_LIVE=1 to run the live broker+worker integration harness",
-)
+# live marker + env skipif: see tests/test_e2e.py (audit 2026-07-05, L2).
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        os.environ.get("JOBD_LIVE") != "1",
+        reason="Set JOBD_LIVE=1 to run the live broker+worker integration harness",
+    ),
+]
 
 # Run the code under test from THIS worktree, not whatever `jobd` is installed.
 _SRC = str(Path(__file__).resolve().parents[2] / "src")

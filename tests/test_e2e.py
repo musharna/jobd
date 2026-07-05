@@ -10,10 +10,16 @@ import httpx
 import pytest
 
 BASE = os.environ.get("JOBD_URL", "http://127.0.0.1:8765")
-pytestmark = pytest.mark.skipif(
-    os.environ.get("JOBD_E2E") != "1",
-    reason="Set JOBD_E2E=1 to run",
-)
+# live marker + env skipif: the skipif is the runtime gate; the marker makes
+# CI's `-m "not live"` deselect structural, so a typo'd env check can't run a
+# live suite in CI (audit 2026-07-05, L2).
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        os.environ.get("JOBD_E2E") != "1",
+        reason="Set JOBD_E2E=1 to run",
+    ),
+]
 
 
 @pytest.fixture

@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -135,4 +138,32 @@ def test_jobd_host_binds_to_safe_interface():
         f"JOBD_HOST={host!r} is unsafe. Use either 127.0.0.1 (loopback) or a "
         "100.x.y.z address inside 100.64.0.0/10 (Tailscale CGNAT). Public "
         "bind would expose the broker to the internet."
+    )
+
+
+def test_pytest_timeout_plugin_active(request):
+    """pyproject declares pytest-timeout (timeout = 300) as the CI hang guard —
+    but the committed uv.lock predated the dependency for days (audit
+    2026-07-05): `uv sync --frozen` installs the lock verbatim WITHOUT checking
+    it against pyproject, so CI ran with the ini option silently ignored and no
+    hang protection. Mechanism check: the plugin must actually be loaded in the
+    environment running the tests."""
+    assert request.config.pluginmanager.hasplugin("timeout"), (
+        "pytest-timeout is not installed/active — regenerate uv.lock (`uv lock`) "
+        "so the dev extra matches pyproject.toml"
+    )
+
+
+def test_uv_lock_in_sync_with_pyproject():
+    """CI installs with `uv sync --frozen`, which never validates the lock
+    against pyproject.toml — a stale committed lock silently drops added or
+    bumped dependencies (how pytest-timeout went missing). `uv lock --check`
+    is that missing gate."""
+    if shutil.which("uv") is None:
+        pytest.skip("uv not on PATH")
+    result = subprocess.run(
+        ["uv", "lock", "--check"], cwd=_REPO_ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"uv.lock is stale vs pyproject.toml — run `uv lock` and commit:\n{result.stderr}"
     )
