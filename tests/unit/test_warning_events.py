@@ -59,7 +59,6 @@ def test_sweep_emits_sweep_warning_for_unmatcheable(client, logs_dir):
     """Submit a job whose requires can't be satisfied by any online worker;
     fast-forward sweep clock; expect a sweep_warning event with the
     unmatcheable text."""
-    import jobd.app as app_mod
     from jobd.db import Job
 
     # Submit a job requiring GPU; no worker registered → unmatcheable
@@ -78,7 +77,7 @@ def test_sweep_emits_sweep_warning_for_unmatcheable(client, logs_dir):
     job_id = r.json()["id"]
 
     # Backdate submitted_at so the unmatcheable threshold (60s) trips.
-    eng = app_mod._engine_for_testing()
+    eng = client.app.state.engine
     with eng.begin() as conn:
         conn.execute(
             update(Job)
@@ -86,7 +85,7 @@ def test_sweep_emits_sweep_warning_for_unmatcheable(client, logs_dir):
             .values(submitted_at=datetime.now(UTC) - timedelta(minutes=5))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     rows = [r for r in _events(logs_dir, "sweep_warning") if r["job_id"] == job_id]
     assert rows, (
@@ -104,7 +103,6 @@ def test_sweep_does_not_re_emit_same_warning(client, logs_dir):
     """Two sweep ticks against the same unmatcheable job emit only ONE
     sweep_warning event — the second tick sees `j.warning != new_w` is false
     and skips."""
-    import jobd.app as app_mod
     from jobd.db import Job
 
     r = client.post(
@@ -120,14 +118,14 @@ def test_sweep_does_not_re_emit_same_warning(client, logs_dir):
     )
     assert r.status_code == 200, r.text
     job_id = r.json()["id"]
-    eng = app_mod._engine_for_testing()
+    eng = client.app.state.engine
     with eng.begin() as conn:
         conn.execute(
             update(Job)
             .where(Job.id == job_id)
             .values(submitted_at=datetime.now(UTC) - timedelta(minutes=5))
         )
-    app_mod._sweep_once()
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
+    client.app.state.sweep_once()
     rows = [r for r in _events(logs_dir, "sweep_warning") if r["job_id"] == job_id]
     assert len(rows) == 1, f"expected ONE sweep_warning across two ticks, got {len(rows)}: {rows}"

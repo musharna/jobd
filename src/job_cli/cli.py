@@ -481,7 +481,7 @@ def list_jobs(
     state: str | None = typer.Option(None),
     project: str | None = typer.Option(None),
     warnings: bool = typer.Option(
-        False, "--warnings", "-w", help="Show only jobs with a non-null warning."
+        False, "--warnings", help="Show only jobs with a non-null warning."
     ),
     array: str | None = typer.Option(
         None, "--array", help="show only members of an array, e.g. --array A42"
@@ -648,7 +648,7 @@ def status(
 
 @app.command()
 def cancel(job_id: int):
-    with JobdClient(base_url=BASE) as c:
+    with _client() as c:
         job = c.cancel(job_id)
         typer.echo(json.dumps(job, default=str))
 
@@ -689,7 +689,10 @@ def preempt_blockers(
         body = r.json()
         if body.get("signaled") is None:
             typer.secho(f"no blocker signaled: {body.get('reason')}", fg="yellow")
-            raise typer.Exit(code=2)
+            # 3, not 2: exit 2 means broker-unreachable/server-error (see
+            # main()'s code map) and scripts must be able to tell "nothing
+            # to preempt" from "broker down".
+            raise typer.Exit(code=3)
         typer.echo(json.dumps(body, default=str))
 
 
@@ -723,7 +726,7 @@ def logs(
 @app.command()
 def workers():
     """List registered workers and their health status."""
-    with JobdClient(base_url=BASE) as c:
+    with _client() as c:
         data = c.workers()
         typer.echo(json.dumps(data, default=str))
 
@@ -746,7 +749,7 @@ def gpu_holders(
     primarily useful when the broker and a worker share a host, or for
     operators ssh'd to the GPU host running a local broker.
     """
-    with JobdClient(base_url=BASE) as c:
+    with _client() as c:
         r = c.get("/gpu-holders")
         rows = r.json()
         if only_unknown:
@@ -1119,7 +1122,13 @@ def main() -> None:
     them). This is a backstop: per-command handlers (e.g. preempt, ping) still
     run first and keep their tailored messages; only exceptions they don't catch
     reach here. SystemExit from normal completion or `typer.Exit` passes through
-    untouched — we catch only the broker exception types."""
+    untouched — we catch only the broker exception types.
+
+    Exit-code map: 0 = success; 1 = broker refusal (4xx); 2 = broker
+    unreachable or server error (5xx); 3 = preempt-blockers found no candidate
+    to signal (benign); 130 = interrupted. Command-specific overloads:
+    `job status --watch`/`job wait` deliberately exit with the terminal job's
+    own status (nonzero for a failed job) so scripts can gate on it."""
     try:
         app()
     except BrokerUnreachable as e:

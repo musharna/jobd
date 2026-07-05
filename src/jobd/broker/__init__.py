@@ -11,6 +11,7 @@ DB session and models — so `app.py` can shrink to wiring and endpoints:
 - ``scheduling``  — preemption/blocker probes + worker snapshots.
 - ``jobinfo``     — Job ORM row -> JobInfo (+ ETA population).
 - ``projects``    — projects.yaml (de)serialization.
+- ``sweeper``     — background sweep passes + retention pruning (the largest piece).
 
 `jobd.app` re-imports these, so existing `jobd.app.<name>` references (incl.
 the ones tests monkeypatch) keep working.

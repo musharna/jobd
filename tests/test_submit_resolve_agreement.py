@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from jobd import app as app_mod
 from jobd.app import build_app
 from jobd.db import Job
 
@@ -98,7 +97,7 @@ def test_submit_matches_resolve(client, project, profile, extra, expected_host_p
     s = client.post("/submit", json=body_req)
     assert s.status_code == 200, s.text
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with Session(engine) as sess:
         rows = sess.execute(select(Job)).scalars().all()
         assert len(rows) == 1, f"expected exactly one persisted job, got {len(rows)}"
