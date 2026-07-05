@@ -91,6 +91,38 @@ def test_collector_caches_db_query_within_ttl():
     assert samples[("jobd_workers", "online")] == 1.0
 
 
+def test_collector_requeries_after_ttl_expiry(monkeypatch):
+    """Companion gap to the two tests around it (audit 2026-07-05): hit-within-
+    TTL and TTL=0 were covered, but nothing pinned that the cache actually
+    EXPIRES — a cache that never refreshed would freeze the dashboard at the
+    first scrape's counts forever."""
+    from types import SimpleNamespace
+
+    from jobd import metrics as metrics_mod
+    from jobd.metrics import _JobdCollector
+
+    calls = {"n": 0}
+
+    class _Collector(_JobdCollector):
+        def _query_counts(self):
+            calls["n"] += 1
+            return {"queued": calls["n"]}, {}
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(metrics_mod, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+    c = _Collector(session_local=None, cache_ttl_s=5.0)
+    list(c.collect())
+    clock["t"] += 4.9
+    list(c.collect())
+    assert calls["n"] == 1  # still within TTL — served from cache
+
+    clock["t"] += 0.2  # 5.1s since the query — TTL elapsed
+    families = list(c.collect())
+    assert calls["n"] == 2  # re-queried
+    samples = {(f.name, s.labels.get("state")): s.value for f in families for s in f.samples}
+    assert samples[("jobd_jobs", "queued")] == 2.0  # fresh value served
+
+
 def test_collector_ttl_zero_disables_cache():
     """TTL=0 restores the pre-existing behavior: every scrape queries the DB."""
     from jobd.metrics import _JobdCollector

@@ -23,10 +23,14 @@ LIVE = os.environ.get("RUN_LIVE_JOBD") == "1"
 BASE = os.environ.get("JOBD_URL", "http://127.0.0.1:8765")
 
 
-pytestmark = pytest.mark.skipif(
-    not LIVE,
-    reason="set RUN_LIVE_JOBD=1 (and JOBD_URL) to run live integration tests",
-)
+# live marker + env skipif: see tests/test_e2e.py (audit 2026-07-05, L2).
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        not LIVE,
+        reason="set RUN_LIVE_JOBD=1 (and JOBD_URL) to run live integration tests",
+    ),
+]
 
 
 def _broker_reachable() -> bool:
