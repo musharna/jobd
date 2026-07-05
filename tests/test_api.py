@@ -759,10 +759,13 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
     assert got["worker"] is None
 
 
-def test_sweeper_reclaim_clears_pending_signal(client):
-    """M1: a job assigned to a dead worker with a pending cancel signal must be
-    re-queued with signal cleared. Otherwise the fresh worker it re-dispatches
-    to reads the stale 'cancel' on its first /signal poll and kills the re-run."""
+def test_sweeper_reclaim_honors_pending_cancel(client):
+    """A2 (audit 2026-07-05, supersedes the M1 contract this test used to pin):
+    a job assigned to a dead worker with a pending user CANCEL must land
+    CANCELLED — not be requeued with the signal silently cleared, which re-ran
+    a job the user was already told was being cancelled. (M1's clear-on-requeue
+    still holds for non-cancel signals: see
+    test_sweeper_reclaim_still_clears_preempt_signal.)"""
     from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import update
@@ -813,8 +816,62 @@ def test_sweeper_reclaim_clears_pending_signal(client):
     app_mod._sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
+    assert got["state"] == "cancelled", got
+    assert got["finished_at"] is not None
+    assert client.get(f"/jobs/{job_id}/signal").json()["signal"] is None
+
+
+def test_sweeper_reclaim_still_clears_preempt_signal(client):
+    """M1: a pending non-cancel signal (preempt) on a dead worker's ASSIGNED
+    job is cleared by the requeue so the fresh worker it re-dispatches to
+    doesn't read it on the first /signal poll and kill the re-run."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from jobd import app as app_mod
+    from jobd.db import Job, Worker
+
+    client.post(
+        "/heartbeat",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": [],
+            "host_aliases": [],
+        },
+    )
+    job_id = client.post(
+        "/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
+    ).json()["id"]
+    client.post(
+        "/next-job",
+        json={
+            "host": "ghost",
+            "free_vram_gb": 0,
+            "unregistered_vram_gb": 0,
+            "free_ram_gb": 8,
+            "idle_cpus": 4,
+        },
+    )
+    engine = app_mod._engine_for_testing()
+    with engine.begin() as conn:
+        conn.execute(update(Job).where(Job.id == job_id).values(signal="preempt"))
+        conn.execute(
+            update(Worker)
+            .where(Worker.host == "ghost")
+            .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=6))
+        )
+    app_mod._sweep_once()
+
+    got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued", got
-    # The stale signal must be gone so the re-dispatch isn't killed on poll.
     assert client.get(f"/jobs/{job_id}/signal").json()["signal"] is None
 
 
@@ -824,9 +881,11 @@ def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatc
     between the sweep's SELECT and its write is NOT clobbered back to QUEUED
     (which would lose the result and re-dispatch → double execution).
 
-    The race is injected deterministically: right as the reclaim's _cas_state
-    runs, we flip the row to COMPLETED (as a concurrent /complete would), then
-    delegate to the real guard — which must match 0 rows and leave it completed.
+    The race is injected deterministically: right as the reclaim's teardown
+    write (_requeue_or_honor_cancel, whose WHERE carries the same
+    state=ASSIGNED guard) runs, we flip the row to COMPLETED (as a concurrent
+    /complete would), then delegate to the real guard — which must match 0
+    rows and leave it completed.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -873,21 +932,21 @@ def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatc
             .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=10))
         )
 
-    # The sweeper resolves _cas_state from its own module (jobd.broker.sweeper),
-    # not jobd.app, so patch it there.
-    real_cas = sweeper_mod._cas_state
+    # The sweeper resolves the teardown helper from its own module
+    # (jobd.broker.sweeper), not jobd.app, so patch it there.
+    real_teardown = sweeper_mod._requeue_or_honor_cancel
 
-    def racing_cas(session, jid, expected, **values):
-        # Fire once, on the ASSIGNED->QUEUED reclaim write: simulate a /complete
+    def racing_teardown(session, jid, expected, *, now, **requeue_values):
+        # Fire once, on the ASSIGNED reclaim write: simulate a /complete
         # landing in the same window by flipping the row COMPLETED first.
-        if expected == (JobState.ASSIGNED,) and values.get("state") == JobState.QUEUED:
-            monkeypatch.setattr(sweeper_mod, "_cas_state", real_cas)  # only once
+        if expected == (JobState.ASSIGNED,):
+            monkeypatch.setattr(sweeper_mod, "_requeue_or_honor_cancel", real_teardown)
             session.execute(
                 update(Job).where(Job.id == jid).values(state=JobState.COMPLETED.value, exit_code=0)
             )
-        return real_cas(session, jid, expected, **values)
+        return real_teardown(session, jid, expected, now=now, **requeue_values)
 
-    monkeypatch.setattr(sweeper_mod, "_cas_state", racing_cas)
+    monkeypatch.setattr(sweeper_mod, "_requeue_or_honor_cancel", racing_teardown)
     app_mod._sweep_once()
 
     # The concurrent completion must survive — not be overwritten to queued.

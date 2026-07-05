@@ -40,6 +40,7 @@ from jobd.broker.state import (
     _cas_state,
     _cascade_on_parent_terminal,
     _emit_cascade_cancellations,
+    _requeue_or_honor_cancel,
 )
 from jobd.db import Job, Worker
 from jobd.matcher import eligible_workers, selectors_only_match
@@ -117,6 +118,9 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
     # once after the single commit below.
     orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
     cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
+    # (job_id, project, prior_state) — reclaim found a pending user cancel and
+    # honored it instead of requeuing (A2).
+    cancelled_records: list[tuple[int, str, str]] = []
     with session_local() as session:
         # Audit 2026-05-18 (runtime-zombies S3): expire queued jobs whose
         # caller-supplied scheduling_timeout_s elapsed. Hatchet pattern,
@@ -183,7 +187,20 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
             .all()
         )
         for w in going_offline:
-            w.state = "offline"
+            # Guarded write (WHERE re-checks the cutoff): a heartbeat committing
+            # between the SELECT above and this write must not be clobbered to
+            # offline — the worker just proved it's alive. rowcount 0 = it won.
+            fresh = session.execute(
+                Worker.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
+                .where(
+                    Worker.host == w.host,
+                    Worker.last_heartbeat < offline_cutoff,
+                    Worker.state != "offline",
+                )
+                .values(state="offline")
+            )
+            if not fresh.rowcount:
+                continue
             # Capture into local Python values BEFORE commit to avoid
             # SQLA detached-instance issues when emitting after commit.
             going_offline_records.append((w.host, w.last_heartbeat))
@@ -216,7 +233,19 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
         )
         going_stale_records: list[tuple[str, datetime | None]] = []
         for w in going_stale:
-            w.state = "stale"
+            # Same guarded write as the offline transition above: don't mark a
+            # worker stale over a heartbeat that landed after our SELECT.
+            fresh = session.execute(
+                Worker.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
+                .where(
+                    Worker.host == w.host,
+                    Worker.last_heartbeat < stale_cutoff,
+                    Worker.state == "online",
+                )
+                .values(state="stale")
+            )
+            if not fresh.rowcount:
+                continue
             going_stale_records.append((w.host, w.last_heartbeat))
 
         # Reclaim assigned jobs whose worker is stale
@@ -240,16 +269,23 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 # a /complete that a briefly-revived worker commits between this
                 # pass's SELECT and its trailing commit (review finding F1). If
                 # the row already left ASSIGNED, skip it. Clears a pending
-                # cancel/preempt signal (M1) on the requeue.
-                _cas_state(
+                # preempt signal (M1) on the requeue; a pending user CANCEL is
+                # honored — the job goes CANCELLED, not back to QUEUED (A2).
+                outcome = _requeue_or_honor_cancel(
                     session,
                     j.id,
                     (JobState.ASSIGNED,),
+                    now=now,
                     state=JobState.QUEUED,
                     worker=None,
                     started_at=None,
-                    signal=None,
                 )
+                if outcome == "cancelled":
+                    session.refresh(j)  # sync ORM state so the cascade fires
+                    cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                    if cascaded:
+                        cascade_records.append((j.id, j.state, cascaded))
+                    cancelled_records.append((j.id, j.project, JobState.ASSIGNED.value))
 
         # Pre-launch CRIT-2: reclaim RUNNING jobs whose worker has died.
         # A worker crash mid-run otherwise strands the job in RUNNING
@@ -320,17 +356,24 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
             last_hb = w.last_heartbeat if w is not None else None
             # Both branches CAS-guard (WHERE state=RUNNING) so a /complete from
             # a briefly-revived worker isn't clobbered (F1). M1: clear the stale
-            # signal on the requeue.
+            # preempt signal on the requeue; a pending user CANCEL is honored —
+            # CANCELLED, not a silent re-run (A2).
             if idempotent:
-                _cas_state(
+                outcome = _requeue_or_honor_cancel(
                     session,
                     j.id,
                     (JobState.RUNNING,),
+                    now=now,
                     state=JobState.QUEUED,
                     worker=None,
                     started_at=None,
-                    signal=None,
                 )
+                if outcome == "cancelled":
+                    session.refresh(j)  # sync ORM state so the cascade fires
+                    cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                    if cascaded:
+                        cascade_records.append((j.id, j.state, cascaded))
+                    cancelled_records.append((j.id, j.project, JobState.RUNNING.value))
             else:
                 # Set the string value (not the enum) so the cascade's
                 # `parent.state in {...value}` membership test fires.
@@ -366,6 +409,17 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
             )
         for parent_id, parent_state, cascaded in cascade_records:
             _emit_cascade_cancellations(logs_dir, cascaded, parent_id, parent_state)
+        for jid, proj, prior_state in cancelled_records:
+            _emit_event(
+                logs_dir,
+                "job_cancelled",
+                source="broker",
+                job_id=jid,
+                project=proj,
+                prior_state=prior_state,
+                by="user",
+                via="sweeper_reclaim",
+            )
         for host, last_hb in going_offline_records:
             _emit_event(
                 logs_dir,
@@ -409,6 +463,11 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
         workers = session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
         snapshots = _build_snapshots(list(workers))
         host_list = [w.host for w in workers]
+        # Phase-2 events are collected here and emitted after the commit below —
+        # same emit-after-commit invariant as phase 1 (M3): a failed commit must
+        # not leave events.jsonl claiming a signal/warning the DB never recorded.
+        auto_preempt_records: list[dict] = []
+        sweep_warning_records: list[tuple[int, str, str]] = []
         for j in stale_queued:
             sq_req: JobRequires | None = None
             if j.requires_json and j.requires_json != "{}":
@@ -438,22 +497,33 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                     if elig:
                         candidate = _find_preemptible_candidate(elig, j, session, now)
                         if candidate is not None:
-                            candidate.signal = "preempt"
-                            candidate.warning = f"{_AUTO_PREEMPT_WARNING_PREFIX}{j.id}"
-                            candidate.warning_at = now
-                            _emit_event(
-                                logs_dir,
-                                "auto_preempt",
-                                source="broker",
-                                job_id=candidate.id,
-                                project=candidate.project,
-                                cause="sweeper",
-                                queued_job=j.id,
-                                worker=candidate.worker,
-                                queued_priority=j.priority,
-                                candidate_priority=candidate.priority,
-                                queue_age_s=int(age_s),
+                            # CAS on the states the candidate was selected in: a
+                            # /complete or reconcile-requeue landing between the
+                            # SELECT and this write must not get a stale
+                            # 'preempt' stamped over it — a requeued job would
+                            # carry the signal into its next claim and be killed
+                            # seconds into the fresh run (audit 2026-07-05 A1).
+                            won = _cas_state(
+                                session,
+                                candidate.id,
+                                (JobState.ASSIGNED, JobState.RUNNING),
+                                signal="preempt",
+                                warning=f"{_AUTO_PREEMPT_WARNING_PREFIX}{j.id}",
+                                warning_at=now,
                             )
+                            if won:
+                                auto_preempt_records.append(
+                                    dict(
+                                        job_id=candidate.id,
+                                        project=candidate.project,
+                                        cause="sweeper",
+                                        queued_job=j.id,
+                                        worker=candidate.worker,
+                                        queued_priority=j.priority,
+                                        candidate_priority=candidate.priority,
+                                        queue_age_s=int(age_s),
+                                    )
+                                )
                         else:
                             blocker = _find_nonpreemptible_blocker(elig, session)
                             if blocker is not None:
@@ -471,26 +541,12 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 if j.warning != new_w:
                     j.warning = new_w
                     j.warning_at = now
-                    _emit_event(
-                        logs_dir,
-                        "sweep_warning",
-                        source="broker",
-                        job_id=j.id,
-                        project=j.project,
-                        warning_text=j.warning,
-                    )
+                    sweep_warning_records.append((j.id, j.project, new_w))
             elif blocker_warning is not None:
                 if j.warning != blocker_warning:
                     j.warning = blocker_warning
                     j.warning_at = now
-                    _emit_event(
-                        logs_dir,
-                        "sweep_warning",
-                        source="broker",
-                        job_id=j.id,
-                        project=j.project,
-                        warning_text=j.warning,
-                    )
+                    sweep_warning_records.append((j.id, j.project, blocker_warning))
             elif j.warning and (
                 j.warning.startswith(_UNMATCHEABLE_WARNING_PREFIX)
                 or j.warning.startswith(_BLOCKED_WARNING_PREFIX)
@@ -501,6 +557,17 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 j.warning = None
                 j.warning_at = None
         session.commit()
+        for rec in auto_preempt_records:
+            _emit_event(logs_dir, "auto_preempt", source="broker", **rec)
+        for jid, proj, text in sweep_warning_records:
+            _emit_event(
+                logs_dir,
+                "sweep_warning",
+                source="broker",
+                job_id=jid,
+                project=proj,
+                warning_text=text,
+            )
 
     # Retention prune (own session, opt-in via JOBD_JOB_RETENTION_DAYS).
     prune_old_jobs(session_local, logs_dir, now)
