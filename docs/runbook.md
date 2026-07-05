@@ -140,3 +140,22 @@ configuration. A worker pointed at an older broker that doesn't support the hold
 falls back to a 2s re-poll automatically. If you run the broker behind a reverse
 proxy, make sure its idle/read timeout exceeds ~35s so it doesn't sever the held
 connection.
+
+# Troubleshooting
+
+## `job` (or jobd / jobd-mcp / jobd-worker) throws `ModuleNotFoundError: No module named 'job_cli'`
+
+The canonical CLI lives in the install venv (`~/jobd/.venv/bin/job`), but a stray
+`pip install jobd` into another interpreter (commonly base conda,
+`~/miniconda3/bin`) can leave a broken entry-point shim there. If that dir precedes
+`~/jobd/.venv/bin` on `PATH`, the broken shim wins and fails to import `job_cli`.
+
+Confirm: `command -v job` points at the wrong dir, and
+`~/jobd/.venv/bin/job workers` works while `job workers` does not.
+
+Fix (idempotent): `scripts/fix-cli-shims.sh` — backs up each shadowing broken shim
+and symlinks it to the canonical venv entry point. Set `JOBD_VENV_BIN` if the venv
+is elsewhere. Run `hash -r` (or open a new shell) afterwards — an already-running
+shell may have the old broken path cached. Alternatively, put `~/jobd/.venv/bin`
+ahead of the offending dir on `PATH`, or `pip uninstall jobd` from the interpreter
+that shouldn't have it.
