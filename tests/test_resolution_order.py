@@ -63,9 +63,8 @@ def client_with_defaults(
 
 def _job_row(client, job_id: int) -> Job:
     """Fetch the Job row directly from SQLAlchemy to inspect resolved fields."""
-    from jobd import app as app_mod
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     from sqlalchemy.orm import Session
 
     with Session(engine) as s:

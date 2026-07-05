@@ -108,7 +108,14 @@ def prune_old_jobs(session_local, logs_dir: Path, now: datetime | None = None) -
 
 
 def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], None]) -> None:
-    """One pass: reclaim orphans, mark offline workers."""
+    """One full sweep pass. In order: expire queued jobs past their
+    scheduling_timeout_s (with dependency cascade); mark silent workers
+    offline/stale; reclaim ASSIGNED jobs from dead workers; reclaim or orphan
+    RUNNING jobs (wall-clock backstop + dead-worker check, honoring pending
+    cancels); then the phase-2 queue probes — auto-preempt a blocker for a
+    starved high-priority job, set/clear unmatcheable + blocked warnings — and
+    finally retention pruning. Events are emitted only after each phase's
+    commit."""
     # SQLite stores datetimes as naive UTC; compare naive-to-naive.
     now = datetime.now(UTC).replace(tzinfo=None)
     going_offline_records: list[tuple[str, datetime | None]] = []
@@ -169,7 +176,7 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
             # 2026-07-01 H2; the deps test only passed by calling the hook
             # manually).
             session.refresh(j)  # sync ORM state so the cascade sees the terminal
-            cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+            cascaded = _cascade_on_parent_terminal(session, j)
             if cascaded:
                 cascade_records.append((j.id, j.state, cascaded))
             scheduling_timeout_records.append((j.id, j.project, int(j.scheduling_timeout_s)))
@@ -282,7 +289,7 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 )
                 if outcome == "cancelled":
                     session.refresh(j)  # sync ORM state so the cascade fires
-                    cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                    cascaded = _cascade_on_parent_terminal(session, j)
                     if cascaded:
                         cascade_records.append((j.id, j.state, cascaded))
                     cancelled_records.append((j.id, j.project, JobState.ASSIGNED.value))
@@ -333,7 +340,7 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                     ):
                         continue
                     session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
-                    cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                    cascaded = _cascade_on_parent_terminal(session, j)
                     cascade_records.append((j.id, j.state, cascaded))
                     orphan_records.append(
                         (j.id, j.project, j.worker, last_hb, "wall_clock_exceeded")
@@ -370,13 +377,11 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 )
                 if outcome == "cancelled":
                     session.refresh(j)  # sync ORM state so the cascade fires
-                    cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                    cascaded = _cascade_on_parent_terminal(session, j)
                     if cascaded:
                         cascade_records.append((j.id, j.state, cascaded))
                     cancelled_records.append((j.id, j.project, JobState.RUNNING.value))
             else:
-                # Set the string value (not the enum) so the cascade's
-                # `parent.state in {...value}` membership test fires.
                 if not _cas_state(
                     session,
                     j.id,
@@ -388,7 +393,7 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 ):
                     continue
                 session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
-                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                cascaded = _cascade_on_parent_terminal(session, j)
                 cascade_records.append((j.id, j.state, cascaded))
                 orphan_records.append((j.id, j.project, j.worker, last_hb, "worker_died"))
 

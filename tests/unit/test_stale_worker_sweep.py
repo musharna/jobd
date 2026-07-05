@@ -23,7 +23,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
-from jobd import app as app_mod
 from jobd.app import build_app
 from jobd.db import Worker
 
@@ -40,8 +39,8 @@ def client(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifi
     return TestClient(app)
 
 
-def _backdate_worker(host: str, seconds_ago: int) -> None:
-    engine = app_mod._engine_for_testing()
+def _backdate_worker(client, host: str, seconds_ago: int) -> None:
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
@@ -50,8 +49,8 @@ def _backdate_worker(host: str, seconds_ago: int) -> None:
         )
 
 
-def _worker_state(host: str) -> str:
-    engine = app_mod._engine_for_testing()
+def _worker_state(client, host: str) -> str:
+    engine = client.app.state.engine
     with engine.begin() as conn:
         rows = conn.execute(select(Worker.state).where(Worker.host == host)).all()
     assert len(rows) == 1
@@ -76,13 +75,13 @@ def test_stale_worker_marked_after_threshold(client, monkeypatch):
             "host_aliases": [],
         },
     )
-    assert _worker_state("ghost") == "online"
+    assert _worker_state(client, "ghost") == "online"
 
     # 90s ago: past the 60s stale threshold but not yet at the 120s offline
     # threshold (sweep drift makes exact-120 backdates flap into offline).
-    _backdate_worker("ghost", 90)
-    app_mod._sweep_once()
-    assert _worker_state("ghost") == "stale"
+    _backdate_worker(client, "ghost", 90)
+    client.app.state.sweep_once()
+    assert _worker_state(client, "ghost") == "stale"
 
 
 def test_stale_worker_excluded_from_matcher(client, monkeypatch):
@@ -103,9 +102,9 @@ def test_stale_worker_excluded_from_matcher(client, monkeypatch):
             "host_aliases": [],
         },
     )
-    _backdate_worker("ghost", 90)
-    app_mod._sweep_once()
-    assert _worker_state("ghost") == "stale"
+    _backdate_worker(client, "ghost", 90)
+    client.app.state.sweep_once()
+    assert _worker_state(client, "ghost") == "stale"
 
     # Submit a job; pick_next_job on the stale worker should NOT return it
     # (the broker filters to state == "online" before snapshot building).
@@ -161,9 +160,9 @@ def test_stale_worker_returns_to_online_on_heartbeat(client, monkeypatch):
             "host_aliases": [],
         },
     )
-    _backdate_worker("ghost", 90)
-    app_mod._sweep_once()
-    assert _worker_state("ghost") == "stale"
+    _backdate_worker(client, "ghost", 90)
+    client.app.state.sweep_once()
+    assert _worker_state(client, "ghost") == "stale"
 
     # Re-heartbeat → back to online (existing handler sets state="online").
     client.post(
@@ -181,7 +180,7 @@ def test_stale_worker_returns_to_online_on_heartbeat(client, monkeypatch):
             "host_aliases": [],
         },
     )
-    assert _worker_state("ghost") == "online"
+    assert _worker_state(client, "ghost") == "online"
 
 
 def test_stale_worker_threshold_default_60s(client):
@@ -201,14 +200,14 @@ def test_stale_worker_threshold_default_60s(client):
             "host_aliases": [],
         },
     )
-    _backdate_worker("ghost", 30)
-    app_mod._sweep_once()
+    _backdate_worker(client, "ghost", 30)
+    client.app.state.sweep_once()
     # Under 60s — still online.
-    assert _worker_state("ghost") == "online"
+    assert _worker_state(client, "ghost") == "online"
 
-    _backdate_worker("ghost", 75)
-    app_mod._sweep_once()
-    assert _worker_state("ghost") == "stale"
+    _backdate_worker(client, "ghost", 75)
+    client.app.state.sweep_once()
+    assert _worker_state(client, "ghost") == "stale"
 
 
 def test_stale_then_offline_progression(client, monkeypatch):
@@ -231,7 +230,7 @@ def test_stale_then_offline_progression(client, monkeypatch):
         },
     )
     # OFFLINE_AFTER_SECONDS is 120s; backdate well past.
-    _backdate_worker("ghost", 200)
-    app_mod._sweep_once()
+    _backdate_worker(client, "ghost", 200)
+    client.app.state.sweep_once()
     # Offline subsumes stale.
-    assert _worker_state("ghost") == "offline"
+    assert _worker_state(client, "ghost") == "offline"
