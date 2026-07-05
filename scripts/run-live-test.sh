@@ -36,10 +36,12 @@ if [ $status -eq 0 ]; then
 	summary=$(echo "$output" | tail -1)
 	echo "$start_ts PASS $summary" >>"$LOG"
 else
-	echo "$start_ts FAIL exit=$status" >>"$LOG"
-	echo "----- output -----" >>"$LOG"
-	echo "$output" >>"$LOG"
-	echo "----- end output -----" >>"$LOG"
+	{
+		echo "$start_ts FAIL exit=$status"
+		echo "----- output -----"
+		echo "$output"
+		echo "----- end output -----"
+	} >>"$LOG"
 fi
 
 exit 0

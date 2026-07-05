@@ -34,6 +34,12 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check .
 
+      # Shell scripts get the same lint gate as Python (ubuntu runners ship
+      # shellcheck). Caught-in-the-wild class: an un-timeouted probe of a
+      # stdio binary hanging scripts/fix-cli-shims.sh.
+      - name: Lint (shellcheck)
+        run: shellcheck scripts/*.sh
+
       - name: Format check (ruff)
         run: uv run ruff format --check .
 
