@@ -14,7 +14,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
 
-from jobd import app as app_mod
 from jobd.app import build_app
 from jobd.db import Job
 
@@ -77,7 +76,7 @@ def test_scheduling_timeout_unset_job_never_timed_out(client):
     job_id = r.json()["id"]
 
     # Backdate submitted_at far past the old 300s default.
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
@@ -85,7 +84,7 @@ def test_scheduling_timeout_unset_job_never_timed_out(client):
             .values(submitted_at=datetime.now(UTC) - timedelta(hours=2))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued", got
 
@@ -108,7 +107,7 @@ def test_scheduling_timeout_terminates_unscheduled_job(client):
     job_id = r.json()["id"]
 
     # Backdate submitted_at past the scheduling deadline.
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
@@ -116,7 +115,7 @@ def test_scheduling_timeout_terminates_unscheduled_job(client):
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=5))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "scheduling_timeout", got
@@ -141,7 +140,7 @@ def test_scheduling_timeout_long_override_keeps_job_queued(client):
     )
     job_id = r.json()["id"]
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
@@ -149,7 +148,7 @@ def test_scheduling_timeout_long_override_keeps_job_queued(client):
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=600))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     got = client.get(f"/jobs/{job_id}").json()
     # 600s elapsed << 7d override; still queued.
     assert got["state"] == "queued", got
@@ -199,7 +198,7 @@ def test_scheduling_timeout_not_applied_to_assigned_jobs(client):
     assert claim.json()["state"] == "assigned"
 
     # Backdate submitted_at way past the deadline.
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
@@ -207,7 +206,7 @@ def test_scheduling_timeout_not_applied_to_assigned_jobs(client):
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=60))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     got = client.get(f"/jobs/{job_id}").json()
     # Still assigned — sweeper does not retroactively kill assigned/running
     # jobs based on scheduling_timeout.

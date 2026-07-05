@@ -1,7 +1,9 @@
 """Job state-machine transitions, dependency cascade, and heartbeat reconcile.
 
-Pure helpers over a SQLAlchemy session + Job rows — no app/closure scope — so
-the app factory and the sweeper can share the exact same transition rules.
+Helpers over a SQLAlchemy session + Job rows — no app/closure scope — so the
+app factory and the sweeper can share the exact same transition rules. One
+layering wart: `_reject_stale_worker` raises `fastapi.HTTPException` directly,
+so this module isn't fully web-framework-free.
 """
 
 from __future__ import annotations
@@ -156,7 +158,7 @@ def _reject_stale_worker(
         )
 
 
-def _cascade_on_parent_terminal(session, parent: Job, logs_dir: Path) -> list[tuple[int, str]]:
+def _cascade_on_parent_terminal(session, parent: Job) -> list[tuple[int, str]]:
     """When `parent` reaches a failed-side terminal state, transitively cancel
     the QUEUED descendants that did not opt into depends_on_any_exit. Returns
     (child_id, project) for every cancelled job so the caller can emit
@@ -235,7 +237,6 @@ def _reconcile_worker_in_flight(
     session,
     host: str,
     reported: set[int],
-    logs_dir: Path,
 ) -> tuple[
     list[tuple[int, str]],
     list[tuple[int, str, list[tuple[int, str]]]],
@@ -316,12 +317,11 @@ def _reconcile_worker_in_flight(
                 requeued.append(j.id)
             elif outcome == "cancelled":
                 session.refresh(j)  # sync ORM state so the cascade sees CANCELLED
-                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                cascaded = _cascade_on_parent_terminal(session, j)
                 if cascaded:
                     cascade_records.append((j.id, j.state, cascaded))
                 cancelled_records.append((j.id, j.project, cur.value))
         else:
-            # String value (not the enum) so the cascade's membership test fires.
             if _cas_state(
                 session,
                 j.id,
@@ -332,7 +332,7 @@ def _reconcile_worker_in_flight(
                 signal=None,
             ):
                 session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
-                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                cascaded = _cascade_on_parent_terminal(session, j)
                 cascade_records.append((j.id, j.state, cascaded))
                 orphan_records.append((j.id, j.project))
     return orphan_records, cascade_records, requeued, cancelled_records

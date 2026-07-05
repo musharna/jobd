@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from jobd.models import TERMINAL_STATES, JobState
+from jobd.models import TERMINAL_FAIL_STATES, TERMINAL_STATES, JobState
 
 DEAD_WORKER_SECONDS = 300  # 5 min
 IDEMPOTENT_RECLAIM_SECONDS = 90
@@ -62,16 +62,12 @@ _SINCE_RELATIVE_RE = re.compile(r"^(\d+)([hdw])$")
 
 # depends_on terminal-state policy (see broker.state._deps_satisfied):
 #   default policy waits for COMPLETED; any-exit unblocks on any terminal.
-_DEPENDS_TERMINAL = {JobState.COMPLETED.value}
-_DEPENDS_TERMINAL_ANY = {
-    JobState.COMPLETED.value,
-    JobState.FAILED.value,
-    JobState.CANCELLED.value,
-    JobState.PREEMPTED.value,
-    JobState.ORPHANED.value,
-    JobState.SCHEDULING_TIMEOUT.value,
-}
+# Derived from the models.py sets (the promised single source of truth) rather
+# than re-enumerated — a hand-copied set here is exactly the drift that would
+# let a new terminal state silently miss the dependency cascade and strand
+# children in QUEUED (the H2 bug class; audit 2026-07-05 A4).
+_DEPENDS_TERMINAL = frozenset({JobState.COMPLETED.value})
+_DEPENDS_TERMINAL_ANY = frozenset(s.value for s in TERMINAL_STATES)
 # Failed-side terminal states: a parent here can never produce the output a
 # default-policy (non-any-exit) child needs, so the child is cascade-cancelled.
-# Everything terminal except COMPLETED.
-_FAILED_SIDE_TERMINAL = _DEPENDS_TERMINAL_ANY - _DEPENDS_TERMINAL
+_FAILED_SIDE_TERMINAL = frozenset(s.value for s in TERMINAL_FAIL_STATES)

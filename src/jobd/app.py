@@ -1,7 +1,11 @@
 """FastAPI application factory for jobd.
 
-All endpoints in this file for now; split into submodules when it grows past
-~500 lines or gets distinct subsystems.
+Endpoints + wiring only: non-endpoint internals (state machine, sweeper,
+scheduling, events, job-info shaping) live in the ``jobd.broker`` package —
+see that package's docstring for the module map. Moving the endpoint closures
+themselves onto APIRouters (Stage 3 of the 2026-07-02 split) is deliberately
+parked: it's a ~90-reference rewrite of the live HTTP surface with zero
+behavior change.
 """
 
 from __future__ import annotations
@@ -85,6 +89,7 @@ from jobd.models import (
     AdmissionRefusal,
     ClassifyRequest,
     ClassifyResult,
+    CompletePayload,
     EventIngest,
     FieldResolution,
     JobInfo,
@@ -623,10 +628,12 @@ def build_app(
             return _to_info(job)
 
     @app.post("/jobs/{job_id}/complete", response_model=JobInfo)
-    def complete_job(job_id: int, payload: dict, x_jobd_worker: str | None = Header(default=None)):
-        exit_code = payload.get("exit_code")
-        final_state = payload.get("final_state")
-        termination_reason = payload.get("termination_reason")
+    def complete_job(
+        job_id: int, payload: CompletePayload, x_jobd_worker: str | None = Header(default=None)
+    ):
+        exit_code = payload.exit_code
+        final_state = payload.final_state
+        termination_reason = payload.termination_reason
         if final_state is None:
             # Worker didn't specify — derive from exit code. This keeps the
             # depends_on cascade honest: nonzero rc must land in a failed-side
@@ -684,7 +691,7 @@ def build_app(
                 session.refresh(job)
                 return _to_info(job)
             session.refresh(job)
-            cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+            cascaded = _cascade_on_parent_terminal(session, job)
             session.commit()
             session.refresh(job)
             wall_s = None
@@ -731,7 +738,7 @@ def build_app(
                 )
                 if won:
                     session.refresh(job)  # sync ORM state for the cascade below
-                    cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                    cascaded = _cascade_on_parent_terminal(session, job)
                     cancel_event_kw = dict(prior_state=JobState.QUEUED.value, by="user")
                 else:
                     # Lost the race to the claim — re-read and fall through to
@@ -958,7 +965,7 @@ def build_app(
             # lands after this point.
             if _honor_pending_cancel(session, job_id, (JobState.ASSIGNED,), now=datetime.now(UTC)):
                 session.refresh(job)  # sync ORM state so the cascade fires
-                cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                cascaded = _cascade_on_parent_terminal(session, job)
                 session.commit()
                 _emit_event(
                     logs_dir,
@@ -1047,7 +1054,7 @@ def build_app(
                     # ran, so its default-policy dependents can't proceed and
                     # must cascade-cancel (audit 2026-07-01 H2 — this path used
                     # to strand them in QUEUED forever).
-                    cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                    cascaded = _cascade_on_parent_terminal(session, job)
                     session.commit()
                     try:
                         with (logs_dir / f"{job_id}.log").open("a") as lf:
@@ -1084,7 +1091,7 @@ def build_app(
                     return _to_info(job)
                 if outcome == "cancelled":
                     session.refresh(job)  # sync ORM state so the cascade fires
-                    cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                    cascaded = _cascade_on_parent_terminal(session, job)
                     session.commit()
                     _emit_cwd_refused()
                     _emit_event(
@@ -1127,7 +1134,7 @@ def build_app(
                 return _to_info(job)
             if outcome == "cancelled":
                 session.refresh(job)  # sync ORM state so the cascade fires
-                cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                cascaded = _cascade_on_parent_terminal(session, job)
                 session.commit()
                 _emit_event(
                     logs_dir,
@@ -1295,9 +1302,7 @@ def build_app(
             cancelled_records: list[tuple[int, str, str]] = []
             if hb.in_flight_job_ids is not None:
                 orphan_records, cascade_records, requeued, cancelled_records = (
-                    _reconcile_worker_in_flight(
-                        session, hb.host, set(hb.in_flight_job_ids), logs_dir
-                    )
+                    _reconcile_worker_in_flight(session, hb.host, set(hb.in_flight_job_ids))
                 )
             session.commit()
         if is_first_heartbeat:
@@ -1490,8 +1495,8 @@ def build_app(
                 if result.rowcount == 0:  # type: ignore[attr-defined]  # SQLAlchemy: CursorResult.rowcount
                     return None  # lost race; re-attempt / re-wait
                 session.refresh(pick)
-                # SQLite stores naive UTC; mirror the sweeper pattern (line ~999)
-                # so the subtract is naive-to-naive.
+                # SQLite stores naive UTC; mirror sweep_once's naive-to-naive
+                # comparison so the subtract can't mix aware and naive.
                 queue_wait_s = (
                     datetime.now(UTC).replace(tzinfo=None) - pick.submitted_at
                 ).total_seconds()
@@ -1662,9 +1667,13 @@ def build_app(
     def _sweep_once() -> None:
         sweep_once(SessionLocal, logs_dir, _wake_dispatchers)
 
-    # Expose as test seams at module scope
-    globals()["_sweep_once"] = _sweep_once
-    globals()["_prune_old_jobs"] = _prune_old_jobs
-    globals()["_engine_for_testing"] = lambda: engine
+    # Test seams, scoped to THIS app instance. These used to be injected into
+    # module globals ("last build_app() wins"), which silently bound
+    # jobd.app._sweep_once to another app's engine whenever two apps existed
+    # in one process, kept that engine alive via the closure, and hid the
+    # names from static analysis (audit 2026-07-05, A5).
+    app.state.sweep_once = _sweep_once
+    app.state.prune_old_jobs = _prune_old_jobs
+    app.state.engine = engine
 
     return app

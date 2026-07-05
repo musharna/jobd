@@ -80,9 +80,7 @@ def test_explain_returns_resolved_body_without_job(client_with_defaults):
     # Confirm no Job row was created.
     from sqlalchemy.orm import Session
 
-    from jobd import app as app_mod
-
-    engine = app_mod._engine_for_testing()
+    engine = client_with_defaults.app.state.engine
     with Session(engine) as s:
         rows = s.execute(select(Job)).scalars().all()
         assert rows == []

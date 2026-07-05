@@ -735,7 +735,7 @@ def _missing_launcher_path(cmd: list[str], cwd: str) -> str | None:
     was never committed / shipped (BACKLOG "First-byte smoke" piece 3,
     motivated by jobs 261/262 on 2026-04-30). PATH-resolved executables
     (`bash`, `python`, `ctest`) are not checked here — Popen's
-    FileNotFoundError catches those at line ~436.
+    FileNotFoundError catches those in run_job's Popen block.
     """
     if not cmd:
         return None

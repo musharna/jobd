@@ -22,7 +22,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
-from jobd import app as app_mod
 from jobd.app import build_app
 from jobd.db import Job
 
@@ -74,8 +73,8 @@ def _claim_job(client: TestClient, host: str, submit_payload: dict, *, start: bo
     return job_id
 
 
-def _backdate_claim(job_id: int, seconds_ago: int) -> None:
-    engine = app_mod._engine_for_testing()
+def _backdate_claim(client: TestClient, job_id: int, seconds_ago: int) -> None:
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
@@ -84,8 +83,8 @@ def _backdate_claim(job_id: int, seconds_ago: int) -> None:
         )
 
 
-def _misses(job_id: int) -> int:
-    engine = app_mod._engine_for_testing()
+def _misses(client: TestClient, job_id: int) -> int:
+    engine = client.app.state.engine
     with engine.begin() as conn:
         rows = conn.execute(select(Job.reconcile_misses).where(Job.id == job_id)).all()
     return rows[0][0]
@@ -99,7 +98,7 @@ def test_legacy_heartbeat_without_field_reconciles_nothing(client):
     """Old workers don't report in-flight ids; their heartbeats must never
     trigger reconcile, no matter how many arrive."""
     job_id = _claim_job(client, "ghost", _SUBMIT)
-    _backdate_claim(job_id, 600)
+    _backdate_claim(client, job_id, 600)
     for _ in range(4):
         _hb(client, "ghost")  # no in_flight_job_ids field
     assert client.get(f"/jobs/{job_id}").json()["state"] == "running"
@@ -107,11 +106,11 @@ def test_legacy_heartbeat_without_field_reconciles_nothing(client):
 
 def test_reported_job_survives_heartbeats(client):
     job_id = _claim_job(client, "ghost", _SUBMIT)
-    _backdate_claim(job_id, 600)
+    _backdate_claim(client, job_id, 600)
     for _ in range(3):
         _hb(client, "ghost", in_flight=[job_id])
     assert client.get(f"/jobs/{job_id}").json()["state"] == "running"
-    assert _misses(job_id) == 0
+    assert _misses(client, job_id) == 0
 
 
 def test_unreported_running_job_orphaned_after_two_misses(client, tmp_path):
@@ -120,7 +119,7 @@ def test_unreported_running_job_orphaned_after_two_misses(client, tmp_path):
     worker_restarted, dependents cascade-cancelled, event emitted."""
     parent_id = _claim_job(client, "ghost", _SUBMIT)
     child_id = client.post("/submit", json={**_SUBMIT, "depends_on": [parent_id]}).json()["id"]
-    _backdate_claim(parent_id, 600)
+    _backdate_claim(client, parent_id, 600)
 
     _hb(client, "ghost", in_flight=[])
     assert client.get(f"/jobs/{parent_id}").json()["state"] == "running"  # one miss: debounced
@@ -142,7 +141,7 @@ def test_unreported_running_job_orphaned_after_two_misses(client, tmp_path):
 
 def test_unreported_idempotent_running_job_requeued(client):
     job_id = _claim_job(client, "ghost", _SUBMIT_IDEM)
-    _backdate_claim(job_id, 600)
+    _backdate_claim(client, job_id, 600)
     _hb(client, "ghost", in_flight=[])
     _hb(client, "ghost", in_flight=[])
     got = client.get(f"/jobs/{job_id}").json()
@@ -158,7 +157,7 @@ def test_unreported_assigned_job_requeued_regardless_of_idempotency(client):
     job ASSIGNED forever because the worker's heartbeat stayed fresh."""
     job_id = _claim_job(client, "ghost", _SUBMIT, start=False)
     assert client.get(f"/jobs/{job_id}").json()["state"] == "assigned"
-    _backdate_claim(job_id, 600)
+    _backdate_claim(client, job_id, 600)
     _hb(client, "ghost", in_flight=[])
     _hb(client, "ghost", in_flight=[])
     got = client.get(f"/jobs/{job_id}").json()
@@ -170,11 +169,11 @@ def test_miss_counter_resets_when_job_reported_again(client):
     """Two misses must be CONSECUTIVE — a report in between (e.g. the
     /complete-in-flight race resolving) resets the counter."""
     job_id = _claim_job(client, "ghost", _SUBMIT)
-    _backdate_claim(job_id, 600)
+    _backdate_claim(client, job_id, 600)
     _hb(client, "ghost", in_flight=[])
-    assert _misses(job_id) == 1
+    assert _misses(client, job_id) == 1
     _hb(client, "ghost", in_flight=[job_id])
-    assert _misses(job_id) == 0
+    assert _misses(client, job_id) == 0
     _hb(client, "ghost", in_flight=[])
     assert client.get(f"/jobs/{job_id}").json()["state"] == "running"
 
@@ -186,13 +185,13 @@ def test_young_claim_never_accumulates_misses(client):
     _hb(client, "ghost", in_flight=[])
     _hb(client, "ghost", in_flight=[])
     assert client.get(f"/jobs/{job_id}").json()["state"] == "running"
-    assert _misses(job_id) == 0
+    assert _misses(client, job_id) == 0
 
 
 def test_other_hosts_jobs_untouched(client):
     """Reconcile is scoped to the reporting host."""
     job_id = _claim_job(client, "ghost", _SUBMIT)
-    _backdate_claim(job_id, 600)
+    _backdate_claim(client, job_id, 600)
     _hb(client, "other-host", in_flight=[])
     _hb(client, "other-host", in_flight=[])
     assert client.get(f"/jobs/{job_id}").json()["state"] == "running"

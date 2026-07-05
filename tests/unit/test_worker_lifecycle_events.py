@@ -81,7 +81,6 @@ def test_distinct_hosts_each_register_once(client, logs_dir):
 def test_sweep_marks_workers_offline_emits_event(client, logs_dir):
     from sqlalchemy import update
 
-    import jobd.app as cli_mod
     from jobd.db import Worker
 
     client.post("/heartbeat", json=_heartbeat_payload(host="host-a"))
@@ -94,7 +93,7 @@ def test_sweep_marks_workers_offline_emits_event(client, logs_dir):
         s.execute(update(Worker).where(Worker.host == "host-a").values(last_heartbeat=stale))
         s.commit()
 
-    cli_mod._sweep_once()  # type: ignore[attr-defined]
+    client.app.state.sweep_once()
 
     rows = _all_events(logs_dir, "worker_offline")
     host_a_rows = [r for r in rows if r["payload"]["host"] == "host-a"]
@@ -115,7 +114,6 @@ def test_sweep_marks_workers_offline_emits_event(client, logs_dir):
 def test_sweep_does_not_re_emit_for_already_offline_worker(client, logs_dir):
     from sqlalchemy import update
 
-    import jobd.app as cli_mod
     from jobd.db import Worker
 
     client.post("/heartbeat", json=_heartbeat_payload(host="host-b"))
@@ -126,9 +124,9 @@ def test_sweep_does_not_re_emit_for_already_offline_worker(client, logs_dir):
         s.execute(update(Worker).where(Worker.host == "host-b").values(last_heartbeat=stale))
         s.commit()
 
-    cli_mod._sweep_once()  # type: ignore[attr-defined]
-    cli_mod._sweep_once()  # type: ignore[attr-defined]
-    cli_mod._sweep_once()  # type: ignore[attr-defined]
+    client.app.state.sweep_once()
+    client.app.state.sweep_once()
+    client.app.state.sweep_once()
 
     rows = _all_events(logs_dir, "worker_offline")
     host_b_rows = [r for r in rows if r["payload"]["host"] == "host-b"]

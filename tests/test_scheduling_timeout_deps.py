@@ -72,10 +72,9 @@ def _expire_parent_to_scheduling_timeout(client, parent_id):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
@@ -85,7 +84,7 @@ def _expire_parent_to_scheduling_timeout(client, parent_id):
                 submitted_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=60),
             )
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
 
 def test_scheduling_timeout_parent_unblocks_any_exit_child(client):

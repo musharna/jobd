@@ -25,7 +25,7 @@ from jobd import __version__
 from jobd.db import Job, Worker
 from jobd.models import JobState
 
-_WORKER_STATES: tuple[str, ...] = ("online", "offline")
+_WORKER_STATES: tuple[str, ...] = ("online", "stale", "offline")
 
 # /metrics is unauthenticated AND tailnet-ACL-exempt by design (an in-cluster
 # Prometheus scrapes from the docker-bridge IP, not a tailnet address — see the

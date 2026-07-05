@@ -256,7 +256,6 @@ def test_delete_offline_worker_succeeds(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Worker
 
     client.post(
@@ -269,7 +268,7 @@ def test_delete_offline_worker_succeeds(client):
             "idle_cpus": 2,
         },
     )
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
@@ -699,8 +698,6 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
-
     # Worker heartbeats once
     client.post(
         "/heartbeat",
@@ -743,7 +740,7 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
     # Fast-forward: manually backdate the worker's heartbeat >5min
     from jobd.db import Worker
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
@@ -752,7 +749,7 @@ def test_orphan_sweeper_reclaims_after_timeout(client):
         )
 
     # Trigger sweeper manually (exposed via private test hook)
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued"
@@ -770,7 +767,6 @@ def test_sweeper_reclaim_honors_pending_cancel(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Worker
 
     client.post(
@@ -806,14 +802,14 @@ def test_sweeper_reclaim_honors_pending_cancel(client):
     assert client.get(f"/jobs/{job_id}/signal").json()["signal"] == "cancel"
 
     # Worker goes silent past the reclaim threshold; sweep re-queues the job.
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
             .where(Worker.host == "ghost")
             .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=6))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "cancelled", got
@@ -829,7 +825,6 @@ def test_sweeper_reclaim_still_clears_preempt_signal(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job, Worker
 
     client.post(
@@ -860,7 +855,7 @@ def test_sweeper_reclaim_still_clears_preempt_signal(client):
             "idle_cpus": 4,
         },
     )
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(update(Job).where(Job.id == job_id).values(signal="preempt"))
         conn.execute(
@@ -868,7 +863,7 @@ def test_sweeper_reclaim_still_clears_preempt_signal(client):
             .where(Worker.host == "ghost")
             .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=6))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued", got
@@ -891,7 +886,6 @@ def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatc
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.broker import sweeper as sweeper_mod
     from jobd.db import Job, Worker
     from jobd.models import JobState
@@ -924,7 +918,7 @@ def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatc
             "idle_cpus": 4,
         },
     )
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
@@ -947,7 +941,7 @@ def test_sweeper_reclaim_does_not_clobber_concurrent_complete(client, monkeypatc
         return real_teardown(session, jid, expected, now=now, **requeue_values)
 
     monkeypatch.setattr(sweeper_mod, "_requeue_or_honor_cancel", racing_teardown)
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     # The concurrent completion must survive — not be overwritten to queued.
     assert client.get(f"/jobs/{job_id}").json()["state"] == "completed"
@@ -998,7 +992,6 @@ def test_running_job_on_dead_worker_orphaned_and_cascades(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Worker
 
     parent_id = _start_job_on_worker(
@@ -1016,7 +1009,7 @@ def test_running_job_on_dead_worker_orphaned_and_cascades(client):
     )
     child_id = child.json()["id"]
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
@@ -1024,7 +1017,7 @@ def test_running_job_on_dead_worker_orphaned_and_cascades(client):
             .values(last_heartbeat=datetime.now(UTC) - timedelta(minutes=6))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     parent = client.get(f"/jobs/{parent_id}").json()
     assert parent["state"] == "orphaned", parent
@@ -1041,7 +1034,6 @@ def test_running_idempotent_job_on_dead_worker_requeued(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Worker
 
     job_id = _start_job_on_worker(
@@ -1055,7 +1047,7 @@ def test_running_idempotent_job_on_dead_worker_requeued(client):
         },
     )
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
@@ -1063,7 +1055,7 @@ def test_running_idempotent_job_on_dead_worker_requeued(client):
             .values(last_heartbeat=datetime.now(UTC) - timedelta(seconds=120))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued", got
@@ -1087,7 +1079,6 @@ def test_running_job_past_wall_clock_orphaned_despite_live_worker(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job, Worker
 
     job_id = _start_job_on_worker(
@@ -1107,7 +1098,7 @@ def test_running_job_past_wall_clock_orphaned_despite_live_worker(client):
     )
     child_id = child.json()["id"]
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         # Worker is HEALTHY (fresh heartbeat) — the dead-worker reaper would NOT
         # fire. Only the wall-clock backstop should.
@@ -1121,7 +1112,7 @@ def test_running_job_past_wall_clock_orphaned_despite_live_worker(client):
             .values(started_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=4))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "orphaned", got
@@ -1139,7 +1130,6 @@ def test_running_job_within_wall_clock_left_running(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job, Worker
 
     job_id = _start_job_on_worker(
@@ -1147,7 +1137,7 @@ def test_running_job_within_wall_clock_left_running(client):
         "alive",
         {"cmd": ["true"], "cwd": "/tmp", "project": "project-a", "max_wall_s": 900},
     )
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker).where(Worker.host == "alive").values(last_heartbeat=datetime.now(UTC))
@@ -1158,7 +1148,7 @@ def test_running_job_within_wall_clock_left_running(client):
             .values(started_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=60))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "running", got
@@ -1261,7 +1251,6 @@ def test_no_requires_job_never_gets_warning_on_empty_fleet(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     # No heartbeats — empty fleet
@@ -1271,7 +1260,7 @@ def test_no_requires_job_never_gets_warning_on_empty_fleet(client):
     )
     job_id = r.json()["id"]
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
@@ -1279,7 +1268,7 @@ def test_no_requires_job_never_gets_warning_on_empty_fleet(client):
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=90))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     assert client.get(f"/jobs/{job_id}").json()["warning"] is None
 
 
@@ -1289,7 +1278,6 @@ def test_warning_clears_when_matching_worker_appears(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     client.post(
@@ -1318,14 +1306,14 @@ def test_warning_clears_when_matching_worker_appears(client):
     )
     job_id = r.json()["id"]
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
             .where(Job.id == job_id)
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=90))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     assert client.get(f"/jobs/{job_id}").json()["warning"] is not None
 
     # arm64 worker joins the fleet
@@ -1344,7 +1332,7 @@ def test_warning_clears_when_matching_worker_appears(client):
             "host_aliases": [],
         },
     )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     assert client.get(f"/jobs/{job_id}").json()["warning"] is None
 
 
@@ -1354,7 +1342,6 @@ def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Worker
 
     client.post(
@@ -1394,7 +1381,7 @@ def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
     )
     assert claim.json()["id"] == job_id
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     # 2 minutes silent: past idempotent cutoff (90s) but under the 5min default
     with engine.begin() as conn:
         conn.execute(
@@ -1403,7 +1390,7 @@ def test_orphan_sweeper_idempotent_reclaims_at_90s(client):
             .values(last_heartbeat=datetime.now(UTC) - timedelta(seconds=120))
         )
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{job_id}").json()
     assert got["state"] == "queued"
@@ -2420,12 +2407,11 @@ def test_submit_preflight_offline_worker_satisfies_pin(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Worker
 
     _heartbeat_caps(client, "desktop")
     # Mark offline by aging last_heartbeat past OFFLINE_AFTER_SECONDS.
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Worker)
@@ -2589,7 +2575,6 @@ def test_sweep_blocked_warning_after_5min_with_nonpreemptible_blocker(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -2615,14 +2600,14 @@ def test_sweep_blocked_warning_after_5min_with_nonpreemptible_blocker(client):
     ).json()
 
     # Backdate submitted_at to >5min ago
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
             .where(Job.id == queued["id"])
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=400))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     got = client.get(f"/jobs/{queued['id']}").json()
     assert got["warning"] is not None
     assert got["warning"].startswith("queue-age ")
@@ -2666,7 +2651,7 @@ def test_sweep_auto_preempts_when_blocker_is_preemptible(client):
         },
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     runtime_floor = app_mod.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
     now = datetime.now(UTC)
     with engine.begin() as conn:
@@ -2683,7 +2668,7 @@ def test_sweep_auto_preempts_when_blocker_is_preemptible(client):
             .where(Job.id == queued["id"])
             .values(priority=90, submitted_at=now - timedelta(seconds=400))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     sig = client.get(f"/jobs/{blocker['id']}/signal").json()
     assert sig["signal"] == "preempt"
@@ -2704,7 +2689,6 @@ def test_sweep_no_auto_preempt_when_blocker_runtime_below_floor(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -2725,7 +2709,7 @@ def test_sweep_no_auto_preempt_when_blocker_runtime_below_floor(client):
         json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"},
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     now = datetime.now(UTC)
     with engine.begin() as conn:
         conn.execute(
@@ -2738,7 +2722,7 @@ def test_sweep_no_auto_preempt_when_blocker_runtime_below_floor(client):
             .where(Job.id == queued["id"])
             .values(priority=90, submitted_at=now - timedelta(seconds=400))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     sig = client.get(f"/jobs/{blocker['id']}/signal").json()
     assert sig["signal"] is None
@@ -2773,7 +2757,7 @@ def test_sweep_no_auto_preempt_when_blocker_priority_not_lower(client):
         json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"},
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     runtime_floor = app_mod.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
     now = datetime.now(UTC)
     with engine.begin() as conn:
@@ -2790,7 +2774,7 @@ def test_sweep_no_auto_preempt_when_blocker_priority_not_lower(client):
             .where(Job.id == queued["id"])
             .values(priority=50, submitted_at=now - timedelta(seconds=400))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     sig = client.get(f"/jobs/{blocker['id']}/signal").json()
     assert sig["signal"] is None
@@ -2830,7 +2814,7 @@ def test_sweep_auto_preempt_does_not_double_fire(client):
         },
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     runtime_floor = app_mod.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
     now = datetime.now(UTC)
     with engine.begin() as conn:
@@ -2847,12 +2831,12 @@ def test_sweep_auto_preempt_does_not_double_fire(client):
             .where(Job.id == queued["id"])
             .values(priority=90, submitted_at=now - timedelta(seconds=400))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     first_warning = client.get(f"/jobs/{blocker['id']}").json()["warning"]
     assert first_warning is not None and first_warning.startswith("auto-preempted in favor of job ")
 
     # Second sweep — signal already set, should not change warning text
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     second_warning = client.get(f"/jobs/{blocker['id']}").json()["warning"]
     assert second_warning == first_warning
 
@@ -2950,7 +2934,6 @@ def test_preempt_blockers_signals_lower_priority_blocker(client):
     queue-age or runtime guards."""
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -2971,7 +2954,7 @@ def test_preempt_blockers_signals_lower_priority_blocker(client):
         json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"},
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(update(Job).where(Job.id == blocker["id"]).values(priority=30))
         conn.execute(update(Job).where(Job.id == queued["id"]).values(priority=90))
@@ -3013,7 +2996,6 @@ def test_preempt_blockers_no_candidate_returns_reason(client):
     `signaled=null` with a reason explaining why."""
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -3035,7 +3017,7 @@ def test_preempt_blockers_no_candidate_returns_reason(client):
     ).json()
 
     # Make the queued job's priority NOT exceed the blocker's
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(update(Job).where(Job.id == blocker["id"]).values(priority=80))
         conn.execute(update(Job).where(Job.id == queued["id"]).values(priority=50))
@@ -3052,7 +3034,6 @@ def test_preempt_blockers_force_overrides_priority_guard(client):
     blockers at equal-or-higher priority."""
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -3073,7 +3054,7 @@ def test_preempt_blockers_force_overrides_priority_guard(client):
         json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"},
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(update(Job).where(Job.id == blocker["id"]).values(priority=80))
         conn.execute(update(Job).where(Job.id == queued["id"]).values(priority=50))
@@ -3089,13 +3070,12 @@ def test_list_jobs_warnings_only_filters(client):
     warning. Jobs without warnings drop out of the result."""
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat(client)
     no_warn = _submit(client).json()
     with_warn = _submit(client).json()
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(update(Job).where(Job.id == with_warn["id"]).values(warning="test marker"))
 
@@ -3115,7 +3095,6 @@ def test_sweep_clears_blocked_warning_when_blocker_finishes(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -3140,19 +3119,19 @@ def test_sweep_clears_blocked_warning_when_blocker_finishes(client):
         },
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
             .where(Job.id == queued["id"])
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=400))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     assert client.get(f"/jobs/{queued['id']}").json()["warning"].startswith("queue-age ")
 
     # Blocker finishes
     client.post(f"/jobs/{blocker['id']}/complete", json={"exit_code": 0})
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     got = client.get(f"/jobs/{queued['id']}").json()
     assert got["warning"] is None or not got["warning"].startswith("queue-age ")
 
@@ -3163,7 +3142,6 @@ def test_sweep_preserves_will_queue_behind_warning(client):
 
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -3180,14 +3158,14 @@ def test_sweep_preserves_will_queue_behind_warning(client):
     assert "will queue behind" in queued["warning"]
 
     # Push past UNMATCHEABLE threshold but well under the 5min blocked threshold.
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job)
             .where(Job.id == queued["id"])
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=90))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
     got = client.get(f"/jobs/{queued['id']}").json()
     assert got["warning"] is not None
     assert "will queue behind" in got["warning"]
@@ -3235,7 +3213,7 @@ def test_auto_preempt_emits_jsonl_event_from_sweeper(client, tmp_path):
         },
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     runtime_floor = app_mod.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
     now = datetime.now(UTC)
     with engine.begin() as conn:
@@ -3249,7 +3227,7 @@ def test_auto_preempt_emits_jsonl_event_from_sweeper(client, tmp_path):
             .where(Job.id == queued["id"])
             .values(priority=90, submitted_at=now - timedelta(seconds=400))
         )
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     events = [e for e in _read_events(tmp_path) if e["event"] == "auto_preempt"]
     assert len(events) == 1, events
@@ -3272,7 +3250,6 @@ def test_preempt_blockers_emits_jsonl_event(client, tmp_path):
     'manual_force' with --force)."""
     from sqlalchemy import update
 
-    from jobd import app as app_mod
     from jobd.db import Job
 
     _heartbeat_caps(client, "solo")
@@ -3291,7 +3268,7 @@ def test_preempt_blockers_emits_jsonl_event(client, tmp_path):
         "/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
     ).json()
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(update(Job).where(Job.id == blocker["id"]).values(priority=30))
         conn.execute(update(Job).where(Job.id == queued["id"]).values(priority=90))
@@ -3698,7 +3675,7 @@ def test_wait_streams_log_in_bounded_slices_without_utf8_corruption(client, tmp_
 
     # Flip to a terminal state so the generator drains and returns immediately
     # instead of polling.
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(
             update(Job).where(Job.id == job_id).values(state=JobState.COMPLETED.value, exit_code=0)
@@ -3718,3 +3695,16 @@ def test_wait_streams_log_in_bounded_slices_without_utf8_corruption(client, tmp_
     assert "�" not in payload  # no replacement char -> boundary handled
     assert raw.count("event: log") >= 2  # delivered across multiple slices
     assert '"state": "completed"' in raw or '"state":"completed"' in raw
+
+
+def test_complete_rejects_non_int_exit_code(client):
+    """/complete takes a typed CompletePayload (audit 2026-07-05): an untyped
+    dict used to let a malformed worker payload store a string exit_code in the
+    int column; now it's a 422 at the Pydantic boundary."""
+    job_id = client.post(
+        "/submit", json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}
+    ).json()["id"]
+    r = client.post(f"/jobs/{job_id}/complete", json={"exit_code": "not-an-int"})
+    assert r.status_code == 422
+    # And the job is untouched.
+    assert client.get(f"/jobs/{job_id}").json()["state"] == "queued"

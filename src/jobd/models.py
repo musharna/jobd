@@ -39,7 +39,6 @@ class JobState(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     PREEMPTED = "preempted"
-    PREEMPT_REQUESTED = "preempt-requested"
     ORPHANED = "orphaned"
     # Audit 2026-05-18 (runtime-zombies S3): terminal state for jobs whose
     # caller-supplied scheduling_timeout_s elapsed while still queued. Pattern
@@ -341,6 +340,20 @@ class AdmissionRefusal(BaseModel):
     free_gb: float | None = None
     foreign_pids: list[int] = Field(default_factory=list)
     foreign_vram_gb: float = 0.0
+
+
+class CompletePayload(BaseModel):
+    """Worker's terminal report to POST /jobs/{id}/complete.
+
+    Typed for the same reason the config-mutation endpoints are (audit
+    2026-07-01 #25 / 2026-07-05): an untyped dict let a malformed worker
+    payload store a non-int exit_code in an int column, and a missing body
+    raised an opaque 422 with no field names. final_state still gets its
+    richer terminal-set validation in the handler (400 with the allowed set)."""
+
+    exit_code: int | None = None
+    final_state: str | None = None
+    termination_reason: str | None = None
 
 
 class ClassifyRequest(BaseModel):

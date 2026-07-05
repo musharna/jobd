@@ -6,16 +6,15 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from jobd import app as app_mod
 from jobd.app import build_app
 from jobd.db import Job
 
 
-def _stored_env(jid):
+def _stored_env(client, jid):
     """Real (un-redacted) env as stored and delivered to the worker via
     /next-job. The observability read surfaces (GET /jobs/{id}) mask the values,
     so array-substitution assertions must check the stored row, not the GET."""
-    with Session(app_mod._engine_for_testing()) as s:
+    with Session(client.app.state.engine) as s:
         return json.loads(s.get(Job, jid).env_json)
 
 
@@ -95,7 +94,7 @@ def test_index_substituted_into_env(client):
     for jid in body["job_ids"]:
         # GET masks values (redaction applies to array members too) — keys only.
         assert client.get(f"/jobs/{jid}").json()["env"] == {"FOLD": "***", "STATIC": "***"}
-        stored = _stored_env(jid)
+        stored = _stored_env(client, jid)
         assert stored["STATIC"] == "k"
         seen.append(stored["FOLD"])
     assert seen == ["0", "1"]
@@ -212,7 +211,7 @@ def test_sweep_substitutes_into_env(client):
     for jid in body["job_ids"]:
         # GET masks values; the swept value is verified against the stored row.
         assert client.get(f"/jobs/{jid}").json()["env"] == {"LR": "***", "STATIC": "***"}
-        stored = _stored_env(jid)
+        stored = _stored_env(client, jid)
         assert stored["STATIC"] == "k"
         seen.append(stored["LR"])
     assert seen == ["0.1", "0.01"]

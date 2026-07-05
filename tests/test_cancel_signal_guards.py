@@ -80,8 +80,8 @@ def _claim(client: TestClient, host: str) -> dict | None:
     return r.json()
 
 
-def _db_update(where_id: int, **values) -> None:
-    engine = app_mod._engine_for_testing()
+def _db_update(client: TestClient, where_id: int, **values) -> None:
+    engine = client.app.state.engine
     with engine.begin() as conn:
         conn.execute(update(Job).where(Job.id == where_id).values(**values))
 
@@ -97,7 +97,7 @@ def test_claim_clears_stale_signal_on_queued_row(client):
     would honor it on the first /signal poll and die ~2s in."""
     _hb(client, "w1")
     job_id = _submit(client)
-    _db_update(job_id, signal="preempt")
+    _db_update(client, job_id, signal="preempt")
 
     got = _claim(client, "w1")
     assert got is not None and got["id"] == job_id
@@ -116,6 +116,7 @@ def test_sweeper_auto_preempt_signal_write_is_cas_guarded(client, monkeypatch):
     client.post(f"/jobs/{candidate_id}/started")
     # Preemptible, low priority, running long enough to clear the runtime floor.
     _db_update(
+        client,
         candidate_id,
         preemptible=True,
         priority=10,
@@ -123,7 +124,7 @@ def test_sweeper_auto_preempt_signal_write_is_cas_guarded(client, monkeypatch):
     )
     # High-priority queued job, old enough to trip the blocked-queue probe.
     queued_id = _submit(client)
-    _db_update(queued_id, priority=90, submitted_at=datetime.now(UTC) - timedelta(hours=1))
+    _db_update(client, queued_id, priority=90, submitted_at=datetime.now(UTC) - timedelta(hours=1))
 
     real_cas = sweeper_mod._cas_state
 
@@ -136,7 +137,7 @@ def test_sweeper_auto_preempt_signal_write_is_cas_guarded(client, monkeypatch):
         return real_cas(session, jid, expected, **values)
 
     monkeypatch.setattr(sweeper_mod, "_cas_state", racing_cas)
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     got = client.get(f"/jobs/{candidate_id}").json()
     assert got["state"] == "completed"
@@ -152,15 +153,16 @@ def test_sweeper_auto_preempt_still_fires_on_live_candidate(client):
     assert _claim(client, "w1")["id"] == candidate_id
     client.post(f"/jobs/{candidate_id}/started")
     _db_update(
+        client,
         candidate_id,
         preemptible=True,
         priority=10,
         started_at=datetime.now(UTC) - timedelta(hours=1),
     )
     queued_id = _submit(client)
-    _db_update(queued_id, priority=90, submitted_at=datetime.now(UTC) - timedelta(hours=1))
+    _db_update(client, queued_id, priority=90, submitted_at=datetime.now(UTC) - timedelta(hours=1))
 
-    app_mod._sweep_once()
+    client.app.state.sweep_once()
 
     assert client.get(f"/jobs/{candidate_id}/signal").json()["signal"] == "preempt"
     events = client.get("/events", params={"event": "auto_preempt"}).json()
@@ -175,9 +177,9 @@ def test_preempt_blockers_lost_race_returns_unsignaled(client, monkeypatch):
     candidate_id = _submit(client)
     assert _claim(client, "w1")["id"] == candidate_id
     client.post(f"/jobs/{candidate_id}/started")
-    _db_update(candidate_id, preemptible=True, priority=10)
+    _db_update(client, candidate_id, preemptible=True, priority=10)
     queued_id = _submit(client)
-    _db_update(queued_id, priority=90)
+    _db_update(client, queued_id, priority=90)
 
     real_cas = app_mod._cas_state
 
@@ -262,7 +264,7 @@ def test_reconcile_requeue_honors_pending_cancel(client):
     ASSIGNED job has a pending cancel must see it CANCELLED, not requeued."""
     job_id = _assigned_job_with_pending_cancel(client, host="ghost")
     # Old enough to reconcile, and missing from 2 consecutive reports.
-    _db_update(job_id, started_at=datetime.now(UTC) - timedelta(minutes=5))
+    _db_update(client, job_id, started_at=datetime.now(UTC) - timedelta(minutes=5))
     _hb(client, "ghost", in_flight=[])
     _hb(client, "ghost", in_flight=[])
 
@@ -279,7 +281,9 @@ def test_reconcile_requeue_still_clears_preempt_signal(client):
     _hb(client, "ghost")
     job_id = _submit(client)
     assert _claim(client, "ghost")["id"] == job_id
-    _db_update(job_id, signal="preempt", started_at=datetime.now(UTC) - timedelta(minutes=5))
+    _db_update(
+        client, job_id, signal="preempt", started_at=datetime.now(UTC) - timedelta(minutes=5)
+    )
     _hb(client, "ghost", in_flight=[])
     _hb(client, "ghost", in_flight=[])
 
@@ -326,15 +330,16 @@ def test_sweeper_phase2_emits_nothing_when_commit_fails(client, tmp_path):
     assert _claim(client, "w1")["id"] == candidate_id
     client.post(f"/jobs/{candidate_id}/started")
     _db_update(
+        client,
         candidate_id,
         preemptible=True,
         priority=10,
         started_at=datetime.now(UTC) - timedelta(hours=1),
     )
     queued_id = _submit(client)
-    _db_update(queued_id, priority=90, submitted_at=datetime.now(UTC) - timedelta(hours=1))
+    _db_update(client, queued_id, priority=90, submitted_at=datetime.now(UTC) - timedelta(hours=1))
 
-    engine = app_mod._engine_for_testing()
+    engine = client.app.state.engine
 
     class ExplodingSecondCommit(Session):
         commits = 0

@@ -679,6 +679,32 @@ def test_preempt_success(monkeypatch):
     assert "preempt" in r.stdout
 
 
+def test_preempt_blockers_no_candidate_exits_3(monkeypatch):
+    """Benign "no blocker signaled" exits 3, NOT 2 — 2 is the error boundary's
+    broker-unreachable/server-error code, and scripts must be able to tell
+    "nothing to preempt" from "broker down" (audit 2026-07-05)."""
+    import job_cli.cli as cli_mod
+
+    class FakeResponse:
+        def json(self):
+            return {"signaled": None, "reason": "no preemptible candidate"}
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def post(self, path, **kw):
+            return FakeResponse()
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: FakeClient())
+    r = CliRunner().invoke(cli_mod.app, ["preempt-blockers", "42"])
+    assert r.exit_code == 3, r.output
+    assert "no blocker signaled" in r.output
+
+
 def test_preempt_409_exits_nonzero(monkeypatch):
     """Broker 409 (not preemptible / not running) → exit 1 with refusal message."""
     import job_cli.cli as cli_mod
