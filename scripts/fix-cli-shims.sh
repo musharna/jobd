@@ -28,8 +28,10 @@ for c in "${CMDS[@]}"; do
         canon="$VENV_BIN/$c"
         # already correct (same file or a symlink to the venv)?
         if [[ "$shim" -ef "$canon" ]]; then continue; fi
-        # does the shim actually work? (imports job_cli) — if so, leave it
-        if "$shim" --help >/dev/null 2>&1; then continue; fi
+        # does the shim actually work? (imports job_cli) — if so, leave it.
+        # </dev/null + timeout: jobd-mcp ignores argv and would otherwise sit
+        # reading stdin forever instead of printing help and exiting.
+        if timeout 5 "$shim" --help </dev/null >/dev/null 2>&1; then continue; fi
         echo "repairing broken shim: $shim -> $canon"
         mv -f "$shim" "$shim.broken-bak"
         ln -sf "$canon" "$shim"

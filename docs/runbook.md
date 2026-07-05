@@ -155,5 +155,7 @@ Confirm: `command -v job` points at the wrong dir, and
 
 Fix (idempotent): `scripts/fix-cli-shims.sh` — backs up each shadowing broken shim
 and symlinks it to the canonical venv entry point. Set `JOBD_VENV_BIN` if the venv
-is elsewhere. Alternatively, put `~/jobd/.venv/bin` ahead of the offending dir on
-`PATH`, or `pip uninstall jobd` from the interpreter that shouldn't have it.
+is elsewhere. Run `hash -r` (or open a new shell) afterwards — an already-running
+shell may have the old broken path cached. Alternatively, put `~/jobd/.venv/bin`
+ahead of the offending dir on `PATH`, or `pip uninstall jobd` from the interpreter
+that shouldn't have it.
