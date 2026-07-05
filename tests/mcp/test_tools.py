@@ -446,6 +446,80 @@ def test_jobd_list_summarizes_jobs():
     assert out["jobs"][1]["host"] == "desktop"
 
 
+def _job_row(i: int, state: str) -> dict:
+    return {
+        "id": i,
+        "project": "p",
+        "state": state,
+        "worker": None,
+        "exit_code": None,
+        "submitted_at": "2026-04-26T00:00:00+00:00",
+        "started_at": None,
+    }
+
+
+@respx.mock
+def test_jobd_list_defaults_to_active_states():
+    """A6 (audit 2026-07-05): with `state` omitted, jobd_list must apply the
+    documented active-set default instead of dumping the broker's full job
+    history (retention is off by default) into the model's context."""
+    respx.get("http://broker.test/jobs").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _job_row(4, "running"),
+                _job_row(3, "completed"),
+                _job_row(2, "failed"),
+                _job_row(1, "queued"),
+            ],
+        )
+    )
+    from jobd.mcp.tools import jobd_list
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_list(client, {})
+    assert {j["state"] for j in out["jobs"]} == {"running", "queued"}
+    assert out["counts"] == {"running": 1, "queued": 1}
+
+    # Explicit [] opts into all states.
+    out_all = jobd_list(client, {"state": []})
+    assert len(out_all["jobs"]) == 4
+
+
+@respx.mock
+def test_jobd_list_applies_limit_and_reports_truncation():
+    """A6: `limit` was advertised in the schema but never applied anywhere.
+    It now caps the jobs array (newest first — broker order), while counts
+    still cover the full filtered set and `truncated` reports the overflow."""
+    respx.get("http://broker.test/jobs").mock(
+        return_value=httpx.Response(200, json=[_job_row(i, "queued") for i in range(10, 0, -1)])
+    )
+    from jobd.mcp.tools import jobd_list
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_list(client, {"state": ["queued"], "limit": 3})
+    assert [j["job_id"] for j in out["jobs"]] == [10, 9, 8]  # newest kept
+    assert out["counts"] == {"queued": 10}
+    assert out["truncated"] == 7
+
+
+@respx.mock
+def test_jobd_list_forwards_single_state_to_broker():
+    """One state = broker-side filter (state_filter param); multiple states
+    fetch unfiltered and filter client-side."""
+    route = respx.get("http://broker.test/jobs").mock(
+        return_value=httpx.Response(200, json=[_job_row(1, "queued")])
+    )
+    from jobd.mcp.tools import jobd_list
+
+    client = JobdClient(base_url="http://broker.test")
+    jobd_list(client, {"state": ["queued"]})
+    assert route.calls[0].request.url.params.get("state_filter") == "queued"
+
+    jobd_list(client, {"state": ["queued", "running"]})
+    assert "state_filter" not in route.calls[1].request.url.params
+
+
 @respx.mock
 def test_jobd_workers_healthy_when_recent_heartbeat():
     recent = datetime.now(UTC).isoformat()

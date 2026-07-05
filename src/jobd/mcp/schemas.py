@@ -111,7 +111,7 @@ LIST_INPUT = {
             "type": "array",
             "items": {"type": "string"},
             "default": ["queued", "assigned", "running"],
-            "description": "States to include — any of: queued, assigned, running, completed, failed, cancelled, preempted, orphaned, scheduling_timeout. Currently only the first is forwarded to the broker (single state_filter).",
+            "description": "States to include — any of: queued, assigned, running, completed, failed, cancelled, preempted, orphaned, scheduling_timeout. Omit for the active set (queued/assigned/running); pass [] for all states.",
         },
         "project": {
             "type": "string",
@@ -121,7 +121,7 @@ LIST_INPUT = {
             "type": "integer",
             "default": 50,
             "maximum": 200,
-            "description": "Advisory cap on returned jobs (the broker currently returns its default window).",
+            "description": "Max jobs returned (newest first; clamped to [1,200]). `counts` still covers every job matching the filters; a `truncated` field reports how many were cut.",
         },
     },
 }
