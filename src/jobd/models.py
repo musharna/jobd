@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import (
     BaseModel,
@@ -376,6 +376,24 @@ class EventIngest(BaseModel):
     job_id: int | None = None
     project: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    # Envelope fields _emit_event sets itself (ts server-side; the rest are
+    # explicit params). A payload key shadowing one used to blow up the call
+    # with "got multiple values for keyword argument" — an uncaught 500. 422
+    # instead; it also closes the only route to forging envelope fields.
+    _RESERVED_ENVELOPE_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {"ts", "source", "event", "job_id", "project"}
+    )
+
+    @field_validator("payload")
+    @classmethod
+    def _reject_reserved_envelope_keys(cls, v: dict[str, Any]) -> dict[str, Any]:
+        collisions = cls._RESERVED_ENVELOPE_KEYS.intersection(v)
+        if collisions:
+            raise ValueError(
+                f"payload keys collide with reserved event envelope fields: {sorted(collisions)}"
+            )
+        return v
 
 
 class ProjectPriority(BaseModel):

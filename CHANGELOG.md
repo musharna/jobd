@@ -4,6 +4,21 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **Preempt-signal writes are now CAS-guarded, and the `/next-job` claim clears any leftover signal (audit 2026-07-05, A1).** The sweeper's auto-preempt and `POST /jobs/{id}/preempt-blockers` stamped `signal='preempt'` with plain ORM writes — no guard on the state the candidate was selected in — so a `/complete` or reconcile-requeue landing in the window could carry a stale preempt onto a requeued job; and since the atomic queued→assigned claim never touched `signal`, the fresh worker would read it on its first poll and kill the brand-new run seconds in. Both writers now CAS on `(assigned, running)` (a lost race returns `signaled: null` from `/preempt-blockers` instead of a false success), and the claim UPDATE clears `signal`, killing the stale-signal class outright.
+- **A pending user cancel is honored, not erased, when a claim is torn down (audit 2026-07-05, A2).** Cancelling an `assigned` job sets `signal='cancel'` and tells the user "cancelling" — but every requeue path (admission refusal ×2, sweeper dead-worker reclaims, heartbeat reconcile) cleared `signal` unconditionally (the M1 fix, aimed at stale *preempt* signals), so the cancel vanished and the job silently re-ran, possibly on another host. Teardown now goes through a signal-qualified CAS (`_requeue_or_honor_cancel`): a pending cancel transitions the job to `cancelled` (with dependency cascade + `job_cancelled` event, `via=refuse_admission|sweeper_reclaim|reconcile`), while non-cancel signals are still cleared on requeue. `/refuse-admission` also checks first, so a cancelled job can't be mislabeled `failed/cwd_unreachable` on the no-eligible-worker branch.
+- **`cwd_unreachable` failures now stamp `finished_at` (audit 2026-07-05, F-3).** The terminal transition omitted it, and retention pruning filters on `finished_at` — so these rows (and their logs) were never pruned. Also clears any pending signal, matching `/complete`.
+- **Sweeper phase-2 events (`auto_preempt`, `sweep_warning`) are emitted only after their commit (audit 2026-07-05, F-4).** They fired mid-transaction, so a failed commit could leave `events.jsonl` claiming a preempt signal or warning the DB never recorded — the same emit-after-commit invariant the M3 fix established for phase 1.
+- **Worker offline/stale marking re-checks `last_heartbeat` in the write (audit 2026-07-05, F-7).** The sweeper's SELECT-then-set could clobber a heartbeat that committed in between, briefly taking a live worker out of matching and emitting a spurious `worker_offline`/`worker_stale` event.
+- **Heartbeat reconcile wakes long-pollers when it orphans or cancels jobs (audit 2026-07-05, F-6).** It only woke on requeues; orphans/cancels are failed-side terminals that can unblock `depends_on_any_exit` dependents, which previously waited out the ~10s recheck backstop.
+- **Concurrent `/next-job` attempts can no longer 500 on the skip-dedup cleanup (audit 2026-07-05, F-5).** Two attempts share the dedup dict; `del` raced (`KeyError`) — now `pop(…, None)`.
+- **`POST /events` returns 422 (not 500) when a payload key collides with an envelope field (audit 2026-07-05).** A payload containing `source`/`job_id`/`project`/`event`/`ts` blew up the emit call with `TypeError: got multiple values for keyword argument`; it's now rejected at the Pydantic boundary (which also closes the only route to forging envelope fields).
+
+### Security
+
+- **`POST /jobs/{id}/log` no longer buffers an oversized body before the size check (audit 2026-07-05, LOW).** `await request.body()` pulled the whole request into memory and only then compared against the 10 MiB cap, so a token-holder could drive broker memory arbitrarily high per request. The body is now rejected from the `Content-Length` header when one is declared, and read in bounded stream chunks with the cap enforced mid-read either way.
+
 ## [0.5.10] — 2026-07-03
 
 ### Fixed

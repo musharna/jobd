@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from jobd.broker.constants import (
     _DEPENDS_TERMINAL,
@@ -65,6 +65,70 @@ def _cas_state(session, job_id: int, expected: tuple[JobState, ...], **values) -
         Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
         .where(Job.id == job_id, Job.state.in_([s.value for s in expected]))
         .values(**values)
+    )
+    return int(result.rowcount)
+
+
+def _requeue_or_honor_cancel(
+    session,
+    job_id: int,
+    expected: tuple[JobState, ...],
+    *,
+    now: datetime,
+    **requeue_values,
+) -> str:
+    """Tear down a claim: requeue the job — unless a user cancel is pending.
+
+    Every requeue site clears `signal` (M1) so a stale preempt can't kill the
+    re-run. But a pending *cancel* is durable user intent, not an
+    incarnation-scoped artifact: erasing it re-runs — possibly on another
+    host — a job the user was already told was being cancelled (audit
+    2026-07-05 A2). Honor it instead: the workload never started (ASSIGNED)
+    or is being torn down anyway, so CANCELLED is the truthful outcome.
+
+    Both writes qualify the WHERE on `signal` as well as `state`, so a cancel
+    landing between the caller's read and this write can't be dropped either.
+
+    Returns "cancelled" (caller must refresh, cascade, and emit job_cancelled
+    after its commit — a cancel is a failed-side terminal), "requeued" (normal
+    requeue; any non-cancel signal cleared), or "lost" (the row left
+    `expected` under us — caller must not touch it)."""
+    if _honor_pending_cancel(session, job_id, expected, now=now):
+        return "cancelled"
+    result = session.execute(
+        Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
+        .where(
+            Job.id == job_id,
+            Job.state.in_([s.value for s in expected]),
+            or_(Job.signal.is_(None), Job.signal != "cancel"),
+        )
+        .values(signal=None, **requeue_values)
+    )
+    return "requeued" if int(result.rowcount) else "lost"
+
+
+def _honor_pending_cancel(
+    session, job_id: int, expected: tuple[JobState, ...], *, now: datetime
+) -> int:
+    """Signal-qualified CAS: transition the job to CANCELLED iff it is still in
+    one of `expected` AND a user 'cancel' signal is pending. Returns rowcount
+    (1 = cancel honored; the caller must refresh, cascade, and emit
+    job_cancelled after its commit). Used wherever a claim is being torn down
+    and a pending cancel makes the teardown disposition moot (A2)."""
+    result = session.execute(
+        Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
+        .where(
+            Job.id == job_id,
+            Job.state.in_([s.value for s in expected]),
+            Job.signal == "cancel",
+        )
+        .values(
+            state=JobState.CANCELLED.value,
+            finished_at=now,
+            worker=None,
+            started_at=None,
+            signal=None,
+        )
     )
     return int(result.rowcount)
 
@@ -172,7 +236,12 @@ def _reconcile_worker_in_flight(
     host: str,
     reported: set[int],
     logs_dir: Path,
-) -> tuple[list[tuple[int, str]], list[tuple[int, str, list[tuple[int, str]]]], list[int]]:
+) -> tuple[
+    list[tuple[int, str]],
+    list[tuple[int, str, list[tuple[int, str]]]],
+    list[int],
+    list[tuple[int, str, str]],
+]:
     """SIGTERM-drain Phase 2: reconcile a worker's reported in-flight set
     against broker-side claims (docs/plans/sigterm-drain.md).
 
@@ -189,12 +258,13 @@ def _reconcile_worker_in_flight(
     with termination_reason="worker_restarted" and cascade to dependents.
 
     Mutates job rows only — the caller commits, then emits the returned
-    (orphan_records, cascade_records, requeued_ids).
+    (orphan_records, cascade_records, requeued_ids, cancelled_records).
     """
     now = datetime.now(UTC).replace(tzinfo=None)
     orphan_records: list[tuple[int, str]] = []
     cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
     requeued: list[int] = []
+    cancelled_records: list[tuple[int, str, str]] = []
     claimed = (
         session.execute(
             select(Job).where(
@@ -229,19 +299,27 @@ def _reconcile_worker_in_flight(
         # the row already left that state, skip it (don't requeue/orphan/emit).
         cur = JobState(j.state)
         if cur == JobState.ASSIGNED or idempotent:
-            # M1: clear a stale cancel/preempt signal so the fresh worker this
-            # requeue re-dispatches to doesn't honor it and kill the re-run.
-            if _cas_state(
+            # M1: clear a stale preempt signal so the fresh worker this requeue
+            # re-dispatches to doesn't honor it and kill the re-run — but a
+            # pending user CANCEL is honored, not erased (A2).
+            outcome = _requeue_or_honor_cancel(
                 session,
                 j.id,
                 (cur,),
+                now=now,
                 state=JobState.QUEUED.value,
                 worker=None,
                 started_at=None,
                 reconcile_misses=0,
-                signal=None,
-            ):
+            )
+            if outcome == "requeued":
                 requeued.append(j.id)
+            elif outcome == "cancelled":
+                session.refresh(j)  # sync ORM state so the cascade sees CANCELLED
+                cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
+                if cascaded:
+                    cascade_records.append((j.id, j.state, cascaded))
+                cancelled_records.append((j.id, j.project, cur.value))
         else:
             # String value (not the enum) so the cascade's membership test fires.
             if _cas_state(
@@ -257,7 +335,7 @@ def _reconcile_worker_in_flight(
                 cascaded = _cascade_on_parent_terminal(session, j, logs_dir)
                 cascade_records.append((j.id, j.state, cascaded))
                 orphan_records.append((j.id, j.project))
-    return orphan_records, cascade_records, requeued
+    return orphan_records, cascade_records, requeued, cancelled_records
 
 
 def _excluded_workers(job: Job) -> list[str]:

@@ -57,8 +57,10 @@ from jobd.broker.state import (
     _deps_satisfied,
     _emit_cascade_cancellations,
     _excluded_workers,
+    _honor_pending_cancel,
     _reconcile_worker_in_flight,
     _reject_stale_worker,
+    _requeue_or_honor_cancel,
 )
 from jobd.broker.sweeper import prune_old_jobs, sweep_once
 from jobd.config import (
@@ -560,9 +562,22 @@ def build_app(
             # re-dispatched elsewhere must not have the original worker's output
             # interleaved into the new run's log file.
             _reject_stale_worker(job.worker, x_jobd_worker, job_id, "log append")
-        body = await request.body()
-        if len(body) > MAX_LOG_CHUNK_BYTES:
+        # Bounded read: reject an oversized chunk from the Content-Length header
+        # when one is declared, and cap the streamed read either way — the old
+        # `await request.body()` buffered an arbitrarily large body into memory
+        # BEFORE the size check ran (audit 2026-07-05).
+        try:
+            declared = int(request.headers.get("content-length", ""))
+        except ValueError:
+            declared = None
+        if declared is not None and declared > MAX_LOG_CHUNK_BYTES:
             raise HTTPException(status_code=413, detail="log chunk too large")
+        received = bytearray()
+        async for chunk in request.stream():
+            received.extend(chunk)
+            if len(received) > MAX_LOG_CHUNK_BYTES:
+                raise HTTPException(status_code=413, detail="log chunk too large")
+        body = bytes(received)
         log_file = logs_dir / f"{job_id}.log"
         with log_file.open("ab") as f:
             f.write(body)
@@ -838,10 +853,24 @@ def build_app(
                 )
                 return {"signaled": None, "reason": reason}
 
-            candidate.signal = "preempt"
-            candidate.warning = f"{_AUTO_PREEMPT_WARNING_PREFIX}{job.id} (manual)"
-            candidate.warning_at = now
+            # CAS on the states the candidate was selected in (same guard as
+            # the sweeper's auto-preempt): a /complete or requeue landing
+            # between the SELECT and this write must not get a stale 'preempt'
+            # stamped over it (audit 2026-07-05 A1).
+            won = _cas_state(
+                session,
+                candidate.id,
+                (JobState.ASSIGNED, JobState.RUNNING),
+                signal="preempt",
+                warning=f"{_AUTO_PREEMPT_WARNING_PREFIX}{job.id} (manual)",
+                warning_at=now,
+            )
             session.commit()
+            if not won:
+                return {
+                    "signaled": None,
+                    "reason": "candidate left running/assigned before it could be signalled; retry",
+                }
             _emit_event(
                 logs_dir,
                 "auto_preempt",
@@ -919,6 +948,34 @@ def build_app(
                 )
             prior_worker = job.worker
 
+            # A pending user cancel makes the refusal disposition moot: the
+            # user already asked to stop this job (and was told "cancelling"),
+            # and the workload never started here. Honor it now — falling
+            # through would either erase it on the requeue and re-run the job
+            # elsewhere (audit 2026-07-05 A2), or mislabel a cancelled job as
+            # failed/cwd_unreachable on the terminal branch. Signal-qualified
+            # CAS; the per-branch teardowns below re-check for a cancel that
+            # lands after this point.
+            if _honor_pending_cancel(session, job_id, (JobState.ASSIGNED,), now=datetime.now(UTC)):
+                session.refresh(job)  # sync ORM state so the cascade fires
+                cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                session.commit()
+                _emit_event(
+                    logs_dir,
+                    "job_cancelled",
+                    source="broker",
+                    job_id=job_id,
+                    project=job.project,
+                    prior_state=JobState.ASSIGNED.value,
+                    by="user",
+                    via="refuse_admission",
+                )
+                _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.CANCELLED.value)
+                if cascaded:
+                    _wake_dispatchers()
+                session.refresh(job)
+                return _to_info(job)
+
             if payload.reason == "cwd_missing":
                 # The worker found the job's cwd absent on its host (e.g. a git
                 # worktree that lives only on another machine). Record this host in
@@ -968,13 +1025,19 @@ def build_app(
 
                 if not elig:
                     # Guarded terminal transition: if the job left ASSIGNED under
-                    # us (a concurrent /complete), don't clobber it.
+                    # us (a concurrent /complete), don't clobber it. finished_at
+                    # is stamped like every other terminalizing write — without
+                    # it the row never ages out of retention pruning, which
+                    # filters on finished_at (audit 2026-07-05 F-3). A pending
+                    # signal is cleared for the same reason /complete clears it.
                     if not _cas_state(
                         session,
                         job_id,
                         (JobState.ASSIGNED,),
                         state=JobState.FAILED,
                         worker=None,
+                        finished_at=datetime.now(UTC),
+                        signal=None,
                         termination_reason="cwd_unreachable",
                     ):
                         session.refresh(job)
@@ -1001,17 +1064,44 @@ def build_app(
                         _wake_dispatchers()
                     session.refresh(job)
                     return _to_info(job)
-                # Guarded requeue (clears the stale signal, M1). If the job left
-                # ASSIGNED under us (concurrent /complete), don't clobber it.
-                if not _cas_state(
+                # Guarded requeue (clears a stale preempt signal, M1). If the
+                # job left ASSIGNED under us (concurrent /complete), don't
+                # clobber it. A pending user CANCEL is honored, not erased: the
+                # user was already told "cancelling", and the workload never
+                # started here — requeuing would run it elsewhere anyway
+                # (audit 2026-07-05 A2).
+                outcome = _requeue_or_honor_cancel(
                     session,
                     job_id,
                     (JobState.ASSIGNED,),
+                    now=datetime.now(UTC),
                     state=JobState.QUEUED,
                     worker=None,
                     started_at=None,
-                    signal=None,
-                ):
+                )
+                if outcome == "lost":
+                    session.refresh(job)
+                    return _to_info(job)
+                if outcome == "cancelled":
+                    session.refresh(job)  # sync ORM state so the cascade fires
+                    cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                    session.commit()
+                    _emit_cwd_refused()
+                    _emit_event(
+                        logs_dir,
+                        "job_cancelled",
+                        source="broker",
+                        job_id=job_id,
+                        project=job.project,
+                        prior_state=JobState.ASSIGNED.value,
+                        by="user",
+                        via="refuse_admission",
+                    )
+                    _emit_cascade_cancellations(
+                        logs_dir, cascaded, job_id, JobState.CANCELLED.value
+                    )
+                    if cascaded:
+                        _wake_dispatchers()
                     session.refresh(job)
                     return _to_info(job)
                 session.commit()
@@ -1022,16 +1112,36 @@ def build_app(
                 return _to_info(job)
 
             # --- default: gpu_contention (unchanged) ---
-            # Guarded requeue — same CAS as the cwd branch above.
-            if not _cas_state(
+            # Guarded requeue — same cancel-honoring teardown as the cwd branch.
+            outcome = _requeue_or_honor_cancel(
                 session,
                 job_id,
                 (JobState.ASSIGNED,),
+                now=datetime.now(UTC),
                 state=JobState.QUEUED,
                 worker=None,
                 started_at=None,
-                signal=None,
-            ):
+            )
+            if outcome == "lost":
+                session.refresh(job)
+                return _to_info(job)
+            if outcome == "cancelled":
+                session.refresh(job)  # sync ORM state so the cascade fires
+                cascaded = _cascade_on_parent_terminal(session, job, logs_dir)
+                session.commit()
+                _emit_event(
+                    logs_dir,
+                    "job_cancelled",
+                    source="broker",
+                    job_id=job_id,
+                    project=job.project,
+                    prior_state=JobState.ASSIGNED.value,
+                    by="user",
+                    via="refuse_admission",
+                )
+                _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.CANCELLED.value)
+                if cascaded:
+                    _wake_dispatchers()
                 session.refresh(job)
                 return _to_info(job)
             session.commit()
@@ -1182,9 +1292,12 @@ def build_app(
             orphan_records: list[tuple[int, str]] = []
             cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
             requeued: list[int] = []
+            cancelled_records: list[tuple[int, str, str]] = []
             if hb.in_flight_job_ids is not None:
-                orphan_records, cascade_records, requeued = _reconcile_worker_in_flight(
-                    session, hb.host, set(hb.in_flight_job_ids), logs_dir
+                orphan_records, cascade_records, requeued, cancelled_records = (
+                    _reconcile_worker_in_flight(
+                        session, hb.host, set(hb.in_flight_job_ids), logs_dir
+                    )
                 )
             session.commit()
         if is_first_heartbeat:
@@ -1212,7 +1325,22 @@ def build_app(
             )
         for parent_id, parent_state, cascaded in cascade_records:
             _emit_cascade_cancellations(logs_dir, cascaded, parent_id, parent_state)
-        if requeued:
+        for jid, proj, prior_state in cancelled_records:
+            _emit_event(
+                logs_dir,
+                "job_cancelled",
+                source="broker",
+                job_id=jid,
+                project=proj,
+                prior_state=prior_state,
+                by="user",
+                via="reconcile",
+            )
+        # Requeues make jobs dispatchable again; orphans and cancels are
+        # failed-side terminals that can unblock any-exit dependents (and their
+        # cascades). All three change what the matcher would pick — wake
+        # long-pollers rather than waiting out the recheck backstop.
+        if requeued or orphan_records or cancelled_records:
             _wake_dispatchers()
         return {"ok": True}
 
@@ -1335,15 +1463,28 @@ def build_app(
                             )
                     # Drop dedup entries for jobs no longer in the queue (so a
                     # job that ran or was cancelled doesn't leak memory, and a
-                    # resubmit gets a fresh slot).
+                    # resubmit gets a fresh slot). pop, not del: concurrent
+                    # /next-job attempts share this dict, and another thread can
+                    # remove the same key between our list-build and here.
                     for stale in [k for k in skip_state if k not in queued_by_id]:
-                        del skip_state[stale]
+                        skip_state.pop(stale, None)
                     return None
                 # Atomic claim: only one worker can transition queued -> assigned
                 result = session.execute(
                     Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
                     .where(Job.id == pick.id, Job.state == JobState.QUEUED)
-                    .values(state=JobState.ASSIGNED, worker=q.host, started_at=datetime.now(UTC))
+                    .values(
+                        state=JobState.ASSIGNED,
+                        worker=q.host,
+                        started_at=datetime.now(UTC),
+                        # A signal on a QUEUED row is always a leftover from a
+                        # previous incarnation (cancel of a queued job goes
+                        # straight to CANCELLED; preempt applies only to
+                        # assigned/running). Clear it at claim so a fresh run
+                        # can never inherit a stale cancel/preempt an unguarded
+                        # writer stamped mid-requeue (audit 2026-07-05 A1).
+                        signal=None,
+                    )
                 )
                 session.commit()
                 if result.rowcount == 0:  # type: ignore[attr-defined]  # SQLAlchemy: CursorResult.rowcount
