@@ -4,6 +4,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.11] — 2026-07-05
+
 ### Changed
 
 - **Quality batch from the 2026-07-05 audit (A4/A5 + LOWs).** (a) The dependency-cascade terminal sets in `broker/constants.py` are now *derived* from the `models.py` single-source sets instead of hand-re-enumerated — a new terminal state can no longer silently miss the cascade (the H2 stranded-children class). (b) `build_app` no longer injects its test seams into module `globals()` (where the last-built app silently won module-wide and pinned its engine alive); they live on `app.state` (`sweep_once` / `prune_old_jobs` / `engine`) and all ~100 test references were updated. (c) `POST /jobs/{id}/complete` takes a typed `CompletePayload` (an untyped dict let a malformed worker payload store a non-int `exit_code`). (d) Dead `JobState.PREEMPT_REQUESTED` removed (nothing ever set it, but it sat inside `NON_TERMINAL_STATES`). (e) `jobd_workers{state="stale"}` is a fixed metrics series instead of appearing/disappearing. (f) CLI: `preempt-blockers` exits 3 (not 2, which means broker-unreachable) for the benign "no blocker signaled" outcome; the exit-code map is documented in `main()`; `list` loses its `-w` short flag (`-w` means wait/watch elsewhere); `cancel`/`workers`/`gpu-holders` use the `_client()` helper. (g) Dead `logs_dir` param dropped from `_cascade_on_parent_terminal`/`_reconcile_worker_in_flight`; stale docstrings (app.py "split at 500 lines" header, missing `sweeper` in the broker package map, `sweep_once` one-liner) and false "string value (not the enum)" StrEnum comments corrected.
