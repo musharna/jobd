@@ -57,6 +57,7 @@ dev = [
     "ruff>=0.3",
     "mypy>=1.8",
     "types-PyYAML",
+    "hypothesis>=6.0",
 ]
 mcp = ["mcp>=1.0", "httpx>=0.27"]
 

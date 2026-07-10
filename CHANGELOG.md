@@ -4,6 +4,10 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### CI
+
+- **Property-based fuzzing of the broker state machine (H-4, audit 2026-07-10).** A `hypothesis` `RuleBasedStateMachine` (`tests/property/`) generates arbitrary interleavings of submit / claim / start / complete / cancel / worker-death-reclaim / scheduling-timeout / sweep against the real broker (in-process FastAPI + SQLite + sweeper) and asserts the invariants the CAS discipline guarantees: no terminal state is ever clobbered, a job is terminally cancelled at most once, and a reclaim never silently drops a pending user cancel. Runs bounded in CI (`JOBD_H4_EXAMPLES` / `JOBD_H4_STEPS` env overrides for a deep run). This is the coverage class the audit's systemic finding called for — H-1/H-2 shipped because no real-execution test exercised these read-decide-write windows.
+
 ## [0.5.12] — 2026-07-10
 
 Fixes from the 2026-07-10 v0.5.11 4-reviewer audit (security / broker-correctness / worker-reliability / hygiene).
