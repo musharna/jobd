@@ -1038,6 +1038,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # its own terminal post.
     _terminal_posted = False
     try:
+
         def _signal_workload(sig_name: str) -> None:
             """SIGTERM/SIGKILL the workload. When wrapped in a systemd scope we
             must target the scope unit (the cgroup), not proc.pid — that pid is
@@ -1182,7 +1183,9 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                         sig = r.json().get("signal")
                         if sig in ("cancel", "preempt"):
                             if sig == "preempt":
-                                grace_s = checkpoint_grace_s if checkpoint_grace_s is not None else 60
+                                grace_s = (
+                                    checkpoint_grace_s if checkpoint_grace_s is not None else 60
+                                )
                             else:
                                 grace_s = 60
                             _initiate_termination(sig, None, grace_s)
