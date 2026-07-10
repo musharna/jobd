@@ -145,7 +145,13 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
             .all()
         )
         for j in timeout_candidates:
-            deadline_age_s = (now - j.submitted_at).total_seconds()
+            # M-1 (audit 2026-07-10): key the scheduling_timeout on the last
+            # time the job entered QUEUED, not its original submit — a job that
+            # dispatched, ran, then got reclaimed on a worker death must get a
+            # fresh queue clock (last_enqueued_at is reset on every requeue).
+            # NULL on pre-migration rows → fall back to submitted_at.
+            queue_clock = j.last_enqueued_at or j.submitted_at
+            deadline_age_s = (now - queue_clock).total_seconds()
             if deadline_age_s <= j.scheduling_timeout_s:
                 continue
             # Guarded so a job the matcher claims (queued->assigned) at the

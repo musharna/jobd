@@ -49,6 +49,14 @@ class Job(Base):
     worker: Mapped[str | None] = mapped_column(String(50), nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # M-1 (audit 2026-07-10): the queue-clock for scheduling_timeout. Distinct
+    # from submitted_at (which orders the queue and must NOT move on requeue,
+    # else a reclaimed job is sent to the back). Reset to `now` on every requeue
+    # so a job that dispatched, ran, then got reclaimed on a worker death isn't
+    # killed by scheduling_timeout measured from its original submit. NULL until
+    # the first requeue (and on pre-migration rows) → the sweeper falls back to
+    # submitted_at, so a never-dispatched job still times out from submit.
+    last_enqueued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -164,6 +172,7 @@ _JOB_ADDS = [
     ("submitted_via", "VARCHAR(10)"),
     ("excluded_workers_json", "TEXT DEFAULT '[]'"),
     ("scheduling_timeout_s", "INTEGER"),
+    ("last_enqueued_at", "DATETIME"),
     ("array_id", "INTEGER"),
     ("array_index", "INTEGER"),
     ("array_size", "INTEGER"),

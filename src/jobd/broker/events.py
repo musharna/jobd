@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from jobd import events as _events
 from jobd.broker.constants import _SINCE_RELATIVE_RE
+from jobd.metrics import EVENTS_TOTAL
 
 log = logging.getLogger("jobd")
 
@@ -59,6 +60,13 @@ def _emit_event(
     Best-effort: errors are logged at WARNING and swallowed so observability
     never breaks broker liveness.
     """
+    # M-3: mirror every event to a Prometheus Counter for rate-based alerting.
+    # Guarded like the jsonl append below — observability never breaks liveness.
+    try:
+        EVENTS_TOTAL.labels(event=event, source=source).inc()
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("event metric inc failed (%s): %s", event, e)
+
     row = {
         "ts": datetime.now(UTC).isoformat(),
         "source": source,
