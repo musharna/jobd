@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Iterator
 
-from prometheus_client import CollectorRegistry, make_asgi_app
+from prometheus_client import CollectorRegistry, Counter, make_asgi_app
 from prometheus_client.core import GaugeMetricFamily
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
@@ -26,6 +26,22 @@ from jobd.db import Job, Worker
 from jobd.models import JobState
 
 _WORKER_STATES: tuple[str, ...] = ("online", "stale", "offline")
+
+# M-3 (audit 2026-07-10): the gauges above are point-in-time; cumulative failure
+# signals (cancellations/cascades/preempts/refusals) and event throughput were
+# only reconstructable from events.jsonl, so Prometheus couldn't alert on RATES.
+# Every broker/worker event already funnels through broker.events._emit_event;
+# mirror it to one process-global Counter incremented there. registry=None keeps
+# it out of the default global registry — build_metrics_app registers it into the
+# same private registry /metrics serves (so the series stays jobd_*-only), and a
+# single Counter object registered across per-app registries accumulates once,
+# process-wide. Rate example: rate(jobd_events_total{event="job_cancelled"}[5m]).
+EVENTS_TOTAL = Counter(
+    "jobd_events",
+    "Total broker/worker events emitted, by event type and source.",
+    ["event", "source"],
+    registry=None,
+)
 
 # /metrics is unauthenticated AND tailnet-ACL-exempt by design (an in-cluster
 # Prometheus scrapes from the docker-bridge IP, not a tailnet address — see the
@@ -121,4 +137,8 @@ def build_metrics_app(session_local: sessionmaker):
     """
     registry = CollectorRegistry()
     registry.register(_JobdCollector(session_local))
+    # M-3: expose the process-global event counter through this app's private
+    # registry. Registering the same Counter object across multiple per-app
+    # registries (e.g. in tests) is safe — collection just reads its value.
+    registry.register(EVENTS_TOTAL)
     return make_asgi_app(registry)

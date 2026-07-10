@@ -56,3 +56,27 @@ jobs:
       # mypy is clean and now gates the build: type regressions fail CI.
       - name: Types (mypy)
         run: uv run mypy src/jobd src/job_cli
+
+  # H-3 (audit 2026-07-10): gate the real 2-process worker<->broker suite on
+  # every merge. The `test` job above runs `-m "not live"`, so the live HTTP +
+  # concurrent-CAS-contention tests — the only coverage that exercises real
+  # broker<->worker interleavings rather than single-threaded monkeypatch
+  # simulations — never gated CI. H-1/H-2 shipped precisely because that path
+  # was untested-on-merge. pytest-timeout bounds any hung subprocess/socket.
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (from lockfile)
+        run: uv sync --frozen --python 3.12 --extra dev --extra worker --extra mcp
+
+      - name: Live worker<->broker suite
+        env:
+          JOBD_LIVE: "1"
+        run: uv run pytest -m live -q
