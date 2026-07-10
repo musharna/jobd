@@ -142,6 +142,14 @@ def build_app(
         version=__version__,
         lifespan=lifespan,
         dependencies=[Depends(require_token)],
+        # LOW-sec (audit 2026-07-10): the interactive docs + schema routes are
+        # Starlette-mounted and bypass the app-level require_token dependency, so
+        # a tokenless tailnet peer can enumerate the whole API surface at /docs,
+        # /redoc, /openapi.json (live-proven 200 vs 401 on authed routes).
+        # Disable them — jobd is a machine API, not a browsable service.
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
     install_tailnet_acl(app)
 
@@ -486,6 +494,31 @@ def build_app(
                     j.array_id = array_id
             session.commit()
 
+            # H-1 (audit 2026-07-10): close the submit depends_on TOCTOU. The
+            # failed-side reject above is a point read of parent.state; between
+            # it and this insert a parent can reach a failed-side terminal and
+            # run its cascade over the then-current QUEUED set — which did NOT
+            # yet include these just-committed children. `_deps_satisfied` needs
+            # the parent COMPLETED (never happens) and the parent is terminal so
+            # no transition re-fires the cascade → a default-policy child would
+            # strand QUEUED forever, silently. Re-run the cascade for each
+            # distinct parent now that the children are committed and visible: a
+            # no-op unless the parent is already failed-side terminal, in which
+            # case the fresh child is cancelled exactly as it would have been had
+            # it existed when the parent failed. (any-exit children are unaffected
+            # — any terminal parent satisfies their dep.)
+            toctou_sweeps: list[tuple[int, str, list[tuple[int, str]]]] = []
+            if req.depends_on and not req.depends_on_any_exit:
+                for dep_id in dict.fromkeys(req.depends_on):
+                    parent = session.get(Job, dep_id)
+                    if parent is None:
+                        continue
+                    swept = _cascade_on_parent_terminal(session, parent)
+                    if swept:
+                        toctou_sweeps.append((parent.id, parent.state, swept))
+                if toctou_sweeps:
+                    session.commit()
+
             # Emit events from captured scalars (no post-commit ORM reload per
             # member — every member shares project/priority/host_pin/warning).
             for jid in member_ids:
@@ -509,6 +542,12 @@ def build_app(
                         project=req.project,
                         warning_text=warning_text,
                     )
+
+            # H-1: emit job_cancelled (by='cascade') for any child the TOCTOU
+            # sweep cancelled, AFTER the commit above (so a failed commit can't
+            # leave events.jsonl claiming a cancel the DB never recorded).
+            for _parent_id, _parent_state, _swept in toctou_sweeps:
+                _emit_cascade_cancellations(logs_dir, _swept, _parent_id, _parent_state)
 
             # New queued job(s) — wake any worker long-polling /next-job.
             _wake_dispatchers()
