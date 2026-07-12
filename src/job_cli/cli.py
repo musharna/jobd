@@ -794,7 +794,19 @@ def logs(
         r = c.get(f"/jobs/{job_id}/output", params={"tail": tail})
         body = r.json()
         if body["size_bytes"] == 0:
-            typer.secho(f"[no log captured for job {job_id}]", fg="yellow")
+            # A pruned log and a never-written one both leave nothing on disk,
+            # but they mean opposite things — don't report a job that emitted
+            # megabytes as having produced no output (audit 2026-07-12).
+            if body.get("pruned"):
+                when = (body.get("pruned_at") or "")[:10]
+                typer.secho(
+                    f"[log for job {job_id} was pruned by retention"
+                    f"{f' on {when}' if when else ''}; the job record is still available "
+                    f"via `job status {job_id}`]",
+                    fg="yellow",
+                )
+            else:
+                typer.secho(f"[no log captured for job {job_id}]", fg="yellow")
             return
         if body["truncated"]:
             typer.secho(

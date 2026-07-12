@@ -37,12 +37,28 @@ WALL_CLOCK_BACKSTOP_GRACE_SECONDS = 120
 # tune for heartbeat cadence.
 STALE_WORKER_THRESHOLD_S_DEFAULT = 60
 SWEEP_INTERVAL_SECONDS = 30
-# Job/log retention: terminal jobs (and their per-job .log files) whose
-# finished_at is older than this many days are pruned by the sweeper. 0
-# (default) keeps history forever — opt-in so existing deployments never
-# silently lose job records. Override via JOBD_JOB_RETENTION_DAYS. Bounds
-# jobs-table + log-dir growth; events.jsonl is bounded separately by rotation.
+# Retention runs on TWO independent clocks (audit 2026-07-12), because job rows
+# and job logs have wildly different cost/value profiles. Measured on the live
+# broker: 2,875 rows = 6.4 MB, but 2,605 logs = 2.0 GB (~0.7 GB/month).
+#
+#   A row  is ~2 KB and feeds the ETA estimator's per-project p50/p90 — it is
+#          cheap and gets MORE useful as history accumulates.
+#   A log  is ~800 KB and is write-once-read-maybe — you read it while debugging
+#          the job, then never again.
+#
+# A single shared clock forced a false choice: keep 8 GB/yr of logs, or throw
+# away the cheap history the estimator runs on. That is precisely why retention
+# was left off entirely. Splitting it lets logs be bounded aggressively while
+# rows are kept.
+#
+# Rows: terminal jobs whose finished_at is older than this are DELETED. 0
+# (default) keeps history forever — rows are ~7 MB/yr, so this stays opt-in.
+# Override via JOBD_JOB_RETENTION_DAYS.
 JOB_RETENTION_DAYS_DEFAULT = 0
+# Logs: the per-job .log of a terminal job finished longer ago than this is
+# unlinked, KEEPING the row. Bounds the log dir (the actual disk cost) without
+# losing job history. Override via JOBD_LOG_RETENTION_DAYS; 0 disables.
+LOG_RETENTION_DAYS_DEFAULT = 60
 # /next-job long-poll: a waiting worker re-attempts the pick at least this often
 # even with no wake, so a missed wake site costs at most this much latency (not
 # the full wait_s). Small enough to be a safe backstop, large enough that an

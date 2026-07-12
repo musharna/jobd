@@ -24,6 +24,7 @@ from jobd.broker.constants import (
     DEAD_WORKER_SECONDS,
     IDEMPOTENT_RECLAIM_SECONDS,
     JOB_RETENTION_DAYS_DEFAULT,
+    LOG_RETENTION_DAYS_DEFAULT,
     OFFLINE_AFTER_SECONDS,
     QUEUE_BLOCKED_THRESHOLD_SECONDS,
     STALE_WORKER_THRESHOLD_S_DEFAULT,
@@ -105,6 +106,80 @@ def prune_old_jobs(session_local, logs_dir: Path, now: datetime | None = None) -
         retention_days=retention_days,
     )
     return len(pruned_ids)
+
+
+def prune_old_logs(session_local, logs_dir: Path, now: datetime | None = None) -> int:
+    """Unlink the per-job ``.log`` of terminal jobs finished longer ago than
+    ``JOBD_LOG_RETENTION_DAYS``, **keeping the job row**. Returns the number of
+    files actually unlinked; 0 days disables it.
+
+    Logs and rows are pruned on separate clocks because their cost/value ratio
+    differs by ~400x — see ``LOG_RETENTION_DAYS_DEFAULT`` for the measurements
+    and the reasoning. In short: the log dir is the real disk cost, while the
+    rows are cheap and feed the ETA estimator, so bounding one should not
+    require discarding the other.
+
+    ``log_pruned_at`` is stamped on every job whose log is dealt with (unlinked,
+    or already absent). That keeps this scan shrinking monotonically instead of
+    re-stat'ing all of history on every 30s sweep, and it lets ``job logs``
+    distinguish "pruned by retention" from "the worker never captured output".
+    A job whose unlink genuinely FAILED is deliberately left unstamped so the
+    next sweep retries it.
+    """
+    raw = os.environ.get("JOBD_LOG_RETENTION_DAYS", "").strip()
+    try:
+        retention_days = int(raw) if raw else LOG_RETENTION_DAYS_DEFAULT
+    except ValueError:
+        retention_days = LOG_RETENTION_DAYS_DEFAULT
+    if retention_days <= 0:
+        return 0
+    if now is None:
+        now = datetime.now(UTC).replace(tzinfo=None)
+    cutoff = now - timedelta(days=retention_days)
+    terminal = [s.value for s in TERMINAL_STATES]
+    with session_local() as session:
+        candidates = list(
+            session.execute(
+                select(Job.id).where(
+                    Job.state.in_(terminal),
+                    Job.finished_at.is_not(None),
+                    Job.finished_at < cutoff,
+                    Job.log_pruned_at.is_(None),
+                )
+            ).scalars()
+        )
+        if not candidates:
+            return 0
+        settled: list[int] = []
+        unlinked = 0
+        for jid in candidates:
+            try:
+                (logs_dir / f"{jid}.log").unlink()
+                unlinked += 1
+                settled.append(jid)
+            except FileNotFoundError:
+                # Nothing to remove (job never produced output, or a previous
+                # prune raced). Still settle it so we stop re-checking.
+                settled.append(jid)
+            except OSError as e:
+                # Leave UNSTAMPED so the next sweep retries this one.
+                log.warning("log retention: could not unlink %s.log: %s", jid, e)
+        if settled:
+            session.execute(
+                Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
+                .where(Job.id.in_(settled))
+                .values(log_pruned_at=now)
+            )
+            session.commit()
+    if unlinked:
+        _emit_event(
+            logs_dir,
+            "logs_pruned",
+            source="broker",
+            count=unlinked,
+            retention_days=retention_days,
+        )
+    return unlinked
 
 
 def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], None]) -> None:
@@ -580,5 +655,9 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 warning_text=text,
             )
 
-    # Retention prune (own session, opt-in via JOBD_JOB_RETENTION_DAYS).
+    # Retention prunes (own sessions). Rows first — that path deletes a row AND
+    # its log together — then the log-only pass over whatever rows remain.
+    # Separate clocks: JOBD_JOB_RETENTION_DAYS (rows, default off) and
+    # JOBD_LOG_RETENTION_DAYS (logs, default 60d). See constants.py.
     prune_old_jobs(session_local, logs_dir, now)
+    prune_old_logs(session_local, logs_dir, now)

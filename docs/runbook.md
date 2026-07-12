@@ -149,15 +149,36 @@ or back the files up out-of-band for unbounded history.
 
 ### Job/log retention
 
-By default the broker keeps every job row and per-job `.log` forever. Set
-`JOBD_JOB_RETENTION_DAYS=N` to have the sweeper delete terminal jobs (and their
-`.log` files) whose `finished_at` is older than `N` days, bounding jobs-table and
-log-dir growth on a long-running broker. It emits a `jobs_pruned` event per pass
-that removes anything. Leave it unset (or `0`) to disable. The SQLite file
-reuses freed pages under WAL, so it stays bounded by the retention window
-without a `VACUUM`; if you need to reclaim file _size_ after a large one-time
-purge, run `VACUUM` manually during a maintenance window (it takes a global
-lock).
+Job **rows** and job **logs** prune on two independent clocks, because their
+cost/value profiles are opposite. Measured on the live broker (2026-07-12):
+
+| | Size | Growth | Value over time |
+|---|---|---|---|
+| 2,875 job **rows** | **6.4 MB** | ~7 MB/yr | **rises** — feeds the ETA estimator's per-project p50/p90 |
+| 2,605 job **logs** | **2.0 GB** | **~0.7 GB/mo** | **falls** — write-once-read-maybe; read while debugging, then never |
+
+A single shared clock forced a false choice — keep 8 GB/yr of logs, or discard
+the cheap history the estimator runs on — which is why retention used to be off
+entirely. Two knobs remove the choice:
+
+- **`JOBD_LOG_RETENTION_DAYS`** (default **60**) — unlink the `.log` of a terminal
+  job finished more than N days ago, **keeping the row**. This is the one that
+  bounds disk. Emits `logs_pruned`. `0` disables.
+- **`JOBD_JOB_RETENTION_DAYS`** (default **0** = keep forever) — delete the terminal
+  **row** itself (and its log) after N days. Rows are cheap and get more useful
+  with age, so this stays opt-in. Emits `jobs_pruned`.
+
+A job whose log was pruned reports `pruned: true` from `/jobs/{id}/output`, and
+`job logs` says so explicitly — a pruned log must never be confused with "the
+job produced no output".
+
+Each job is stamped `log_pruned_at` once its log is dealt with, so the prune scan
+shrinks monotonically instead of re-stat'ing all of history every 30s sweep.
+
+The SQLite file reuses freed pages under WAL, so it stays bounded by the
+retention window without a `VACUUM`; if you need to reclaim file _size_ after a
+large one-time purge, run `VACUUM` manually during a maintenance window (it takes
+a global lock).
 
 ### Worker polling / dispatch latency
 

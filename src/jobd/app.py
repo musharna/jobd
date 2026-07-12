@@ -1314,13 +1314,27 @@ def build_app(
         callers can diagnose a failed job without SSHing to the worker.
         Returns 404 if the job doesn't exist, empty string if the file
         hasn't been created yet (worker crashed before any output).
+
+        `pruned` distinguishes "log retention deleted this" from "the worker
+        never captured anything" (audit 2026-07-12) — both leave no file on
+        disk, but reporting a pruned log as empty output would make a job that
+        emitted megabytes look like it produced nothing.
         """
         with SessionLocal() as session:
-            if session.get(Job, job_id) is None:
+            job = session.get(Job, job_id)
+            if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
+            log_pruned_at = job.log_pruned_at
         log_file = logs_dir / f"{job_id}.log"
         if not log_file.exists():
-            return {"tail": "", "size_bytes": 0, "returned_bytes": 0, "truncated": False}
+            return {
+                "tail": "",
+                "size_bytes": 0,
+                "returned_bytes": 0,
+                "truncated": False,
+                "pruned": log_pruned_at is not None,
+                "pruned_at": log_pruned_at.isoformat() if log_pruned_at else None,
+            }
         size = log_file.stat().st_size
         tail = max(0, min(tail, 1_048_576))  # clamp to 1 MiB
         with log_file.open("rb") as f:
@@ -1332,6 +1346,8 @@ def build_app(
             "size_bytes": size,
             "returned_bytes": len(data),
             "truncated": size > len(data),
+            "pruned": False,
+            "pruned_at": None,
         }
 
     @app.get("/wait/{job_id}")
