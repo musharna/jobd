@@ -10,8 +10,12 @@ runner = CliRunner()
 
 
 class _FakeResp:
-    def __init__(self, data):
+    def __init__(self, data, headers=None):
         self._data = data
+        # Model the real response's headers. GET /jobs returns the full filtered
+        # count in X-Total-Count so the CLI can say "showing N of M"; a double
+        # without headers isn't a faithful stand-in (audit 2026-07-12).
+        self.headers = headers if headers is not None else {}
 
     def raise_for_status(self):
         pass

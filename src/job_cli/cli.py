@@ -13,12 +13,53 @@ from typing import Any
 
 import typer
 
+from jobd import __version__
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
 from jobd.models import TERMINAL_FAIL_STATES, TERMINAL_STATES
 
-app = typer.Typer(help="Submit and monitor jobs on jobd.")
+# Default cap for `job list` (audit 2026-07-12): a long-lived broker with
+# retention off holds every job ever run, and `list` used to print all of them.
+_LIST_DEFAULT_LIMIT = 50
+
+app = typer.Typer(
+    help="Submit and monitor jobs on jobd.",
+    # Bare `job` printed a usage error instead of help (audit 2026-07-12).
+    no_args_is_help=True,
+    epilog=(
+        "Environment:\n"
+        "  JOBD_URL        broker base URL (default: http://127.0.0.1:8765)\n"
+        "  JOBD_API_TOKEN  bearer token; required unless the broker allows no-auth\n"
+        "\n"
+        "Examples:\n"
+        "  job submit -- python train.py --epochs 10\n"
+        "  job submit --gpu --host laptop -- bash run.sh\n"
+        "  job list --state running\n"
+        "  job logs 123 --tail 200\n"
+        "  job status 123 --watch\n"
+    ),
+)
 
 BASE = os.environ.get("JOBD_URL", "http://127.0.0.1:8765")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"job (jobd) {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Show the jobd version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """Submit and monitor jobs on jobd."""
 
 
 def _client() -> JobdClient:
@@ -486,8 +527,20 @@ def list_jobs(
     array: str | None = typer.Option(
         None, "--array", help="show only members of an array, e.g. --array A42"
     ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help=f"Max jobs to show (default: {_LIST_DEFAULT_LIMIT}). --array shows the whole array.",
+    ),
+    show_all: bool = typer.Option(False, "--all", help="Show every matching job (no limit)."),
 ):
-    """List jobs."""
+    """List jobs, newest first.
+
+    Bounded by default (audit 2026-07-12): a broker with retention off holds
+    every job it has ever run, and this used to dump all of them. The MCP
+    surface already capped its output; the human CLI did not.
+    """
     array_id: int | None = None
     if array is not None:
         array_id = _parse_array_token(array)
@@ -496,6 +549,18 @@ def list_jobs(
                 f"invalid --array value {array!r}; expected A<id> like A42", fg="red", err=True
             )
             raise typer.Exit(2)
+
+    # --array shows the complete array (a truncated array is a lie about its
+    # shape); everything else is capped unless the user opts out.
+    if show_all:
+        effective_limit = None
+    elif limit is not None:
+        effective_limit = limit
+    elif array_id is not None:
+        effective_limit = None
+    else:
+        effective_limit = _LIST_DEFAULT_LIMIT
+
     with _client() as c:
         _worker_health_banner(c)
         params: dict[str, str | bool | int] = {}
@@ -507,8 +572,14 @@ def list_jobs(
             params["warnings_only"] = True
         if array_id is not None:
             params["array_id"] = array_id
+        if effective_limit is not None:
+            params["limit"] = effective_limit
         r = c.get("/jobs", params=params)
         jobs = r.json()
+        try:
+            total = int(r.headers.get("X-Total-Count", len(jobs)))
+        except (TypeError, ValueError):
+            total = len(jobs)
         state_by_id = {j["id"]: j["state"] for j in jobs}
         for j in jobs:
             typer.echo(
@@ -530,6 +601,13 @@ def list_jobs(
                 typer.secho(f"  ⚠ {j['warning']}", fg="yellow")
             for line in _eta_lines(j):
                 typer.echo(line)
+
+        # Never truncate silently — say what was withheld and how to see it.
+        if total > len(jobs):
+            typer.secho(
+                f"… showing {len(jobs)} of {total} — use --limit N, or --all for everything",
+                fg="cyan",
+            )
 
 
 def _render_status(j: dict) -> str:
@@ -648,6 +726,8 @@ def status(
 
 @app.command()
 def cancel(job_id: int):
+    """Cancel a job. A queued job goes straight to cancelled; a running one is
+    signalled, and its worker SIGTERMs the workload (SIGKILL after a grace)."""
     with _client() as c:
         job = c.cancel(job_id)
         typer.echo(json.dumps(job, default=str))
@@ -698,6 +778,8 @@ def preempt_blockers(
 
 @app.command()
 def wait(job_id: int):
+    """Block until a job reaches a terminal state, streaming its log. Exits with
+    the job's own exit code, so it composes in a shell pipeline."""
     _stream_wait(job_id)
 
 
@@ -825,6 +907,8 @@ def delete_worker(host: str):
 
 @app.command()
 def classify(cmd: str):
+    """Show which classifier rule a command matches, and the profile it implies.
+    Use it to check routing before you submit."""
     with _client() as c:
         r = c.post("/classify", json={"cmd": cmd})
         r.raise_for_status()
@@ -845,6 +929,7 @@ def _entry_priority(v) -> int:
 
 @projects_app.command("list")
 def projects_list():
+    """List projects with their effective priority and any defaults."""
     with _client() as c:
         r = c.get("/projects")
         items = r.json()
@@ -877,6 +962,8 @@ def projects_list():
 
 @projects_app.command("set")
 def projects_set(name: str, priority: int):
+    """Set a project's priority (0-100). Persists as a runtime override; the
+    projects.yaml baseline stays git-owned."""
     with _client() as c:
         r = c.post(f"/projects/{name}", json={"priority": priority})
         r.raise_for_status()
@@ -885,6 +972,8 @@ def projects_set(name: str, priority: int):
 
 @projects_app.command("nudge")
 def projects_nudge(name: str, delta: int):
+    """Adjust a project's priority by DELTA (may be negative), clamped to 0-100.
+    Persists as a runtime override."""
     with _client() as c:
         r = c.post(f"/projects/{name}/nudge", json={"delta": delta})
         r.raise_for_status()
