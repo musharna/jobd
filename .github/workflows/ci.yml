@@ -63,6 +63,16 @@ jobs:
   # broker<->worker interleavings rather than single-threaded monkeypatch
   # simulations — never gated CI. H-1/H-2 shipped precisely because that path
   # was untested-on-merge. pytest-timeout bounds any hung subprocess/socket.
+  #
+  # audit 2026-07-12: the `live` marker gates THREE opt-in vars, not one —
+  # test_broker_concurrency_live self-spawns its own broker+worker under
+  # JOBD_LIVE, but test_e2e (JOBD_E2E) and tests/mcp/test_live +
+  # test_project_defaults_live (RUN_LIVE_JOBD) hit an EXTERNAL broker at
+  # JOBD_URL. The prior job set only JOBD_LIVE, so 5 of 9 marked-live tests
+  # silently skipped (skips don't fail pytest) and the job ran ~half of what it
+  # claimed. Now: stand up a real broker + worker from the committed config,
+  # export all three vars, and assert the suite is non-vacuous (see the
+  # "0 passed" guard) so a broken gate can't silently run nothing again.
   live:
     runs-on: ubuntu-latest
     steps:
@@ -78,5 +88,55 @@ jobs:
 
       - name: Live worker<->broker suite
         env:
+          # broker/worker (loopback, auth+ACL off — same env the self-spawn
+          # fixture uses); the e2e/mcp tests read JOBD_URL.
+          JOBD_ALLOW_NO_AUTH: "1"
+          JOBD_DISABLE_TAILNET_ACL: "1"
+          JOBD_CONFIG_DIR: config
+          JOBD_HOST: "127.0.0.1"
+          JOBD_PORT: "8799"
+          JOBD_URL: "http://127.0.0.1:8799"
+          # opt-in gates for all three live buckets
           JOBD_LIVE: "1"
-        run: uv run pytest -m live -q
+          JOBD_E2E: "1"
+          RUN_LIVE_JOBD: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p ci-run/logs
+          export JOBD_DB_URL="sqlite:///$PWD/ci-run/jobd.db"
+          export JOBD_LOGS_DIR="$PWD/ci-run/logs"
+
+          uv run jobd >ci-run/broker.log 2>&1 &
+          BROKER=$!
+          uv run jobd-worker >ci-run/worker.log 2>&1 &
+          WORKER=$!
+          cleanup() { kill "$WORKER" "$BROKER" 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # broker readiness
+          for _ in $(seq 1 100); do
+            curl -sf -m2 "$JOBD_URL/health" >/dev/null 2>&1 && break
+            sleep 0.2
+          done
+          curl -sf -m2 "$JOBD_URL/health" || { echo "broker never healthy"; cat ci-run/broker.log; exit 1; }
+          # worker registration
+          for _ in $(seq 1 100); do
+            N=$(curl -sf -m2 "$JOBD_URL/workers" 2>/dev/null \
+                | python3 -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+            [ "$N" -ge 1 ] && break
+            sleep 0.2
+          done
+          [ "${N:-0}" -ge 1 ] || { echo "worker never registered"; cat ci-run/worker.log; exit 1; }
+
+          # -rs surfaces any skip + its reason (no more silent over-claim).
+          uv run pytest -m live -rs -q | tee ci-run/pytest.out
+          # Guard: the live suite must actually run tests. A broken env gate
+          # would deselect/skip everything and still exit 0 — fail loud instead.
+          grep -Eq "[1-9][0-9]* passed" ci-run/pytest.out || {
+            echo "::error::live suite ran no tests — the opt-in gates are broken"; exit 1; }
+
+      - name: Broker/worker logs on failure
+        if: failure()
+        run: |
+          echo "=== broker.log ==="; cat ci-run/broker.log 2>/dev/null || true
+          echo "=== worker.log ==="; cat ci-run/worker.log 2>/dev/null || true
