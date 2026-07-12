@@ -4,6 +4,19 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.15] — 2026-07-12
+
+### Added
+
+- **Split retention: job rows and job logs now prune on independent clocks.** Retention had been off entirely, and for a good reason — one shared clock forced a false choice. Measured on the live broker: 2,875 job **rows** = **6.4 MB** (~7 MB/yr), but 2,605 job **logs** = **2.0 GB** (~0.7 GB/month). A row is ~2 KB and feeds the ETA estimator's per-project p50/p90, so it is cheap and gets *more* useful with age; a log is ~800 KB and is write-once-read-maybe. Pruning them together meant discarding cheap, valuable history purely to reclaim expensive disk. Now:
+  - **`JOBD_LOG_RETENTION_DAYS`** (default **60**) unlinks the `.log` of a terminal job finished more than N days ago while **keeping the row** — this is what bounds disk. Emits `logs_pruned`. `0` disables.
+  - **`JOBD_JOB_RETENTION_DAYS`** (default **0**, unchanged) deletes the terminal row itself. Still opt-in, because rows are nearly free and the estimator wants the history.
+- **`/jobs/{id}/output` reports `pruned`.** A pruned log and a never-written one both leave no file on disk, but they mean opposite things — reporting a pruned log as empty output would make a job that emitted megabytes look like it produced nothing. `job logs` now says the log was pruned by retention and points at `job status`.
+
+### Changed
+
+- Jobs carry a `log_pruned_at` stamp (additive migration), so the log-prune scan shrinks monotonically instead of re-stat'ing every historical log on every 30s sweep. A log whose unlink genuinely fails is left unstamped and retried.
+
 ## [0.5.14] — 2026-07-12
 
 First batch from the 2026-07-12 improvement audit. Headline: `job projects set` / `nudge` were returning HTTP 500 in production — a documented feature was dead.
