@@ -89,6 +89,33 @@ See [security.md](security.md) — rotation is a coordinated push (broker first,
 then every worker unit and CLI/MCP wrapper). There's no overlap window; workers
 401 against the new broker until updated. Do it during a quiet moment.
 
+## Config vs state: who owns what
+
+Two different things live in two different places, and the split matters:
+
+| | Where | Owner | Mutable at runtime? |
+|---|---|---|---|
+| **Config** — projects, their baseline priority + `defaults:`, profiles, classifier | `$JOBD_CONFIG_DIR` (`./config`, bind-mounted **`:ro`**) | **git** | No |
+| **State** — runtime priority overrides from `job projects set` / `nudge` | `$JOBD_STATE_DIR/project-priorities.yaml` (defaults to the SQLite DB's directory, `./data`) | **the broker** | Yes |
+
+Why: `job projects set` / `nudge` used to rewrite `config/projects.yaml` in place.
+That file is git-owned *and* mounted read-only, so every call raised
+`OSError: Read-only file system` → **HTTP 500** — the feature was dead in
+production (audit 2026-07-12). Splitting ownership fixes the cause rather than
+widening the mount, and gives three properties:
+
+- **A redeploy never fights runtime state.** `git merge --ff-only` can't conflict
+  with a file the broker writes, because it doesn't write one.
+- **The overlay stores only *deltas* from the git baseline.** So a config-as-code
+  priority change still takes effect for any project nobody nudged, while a
+  nudged project keeps its override. `POST /reload` re-reads both layers.
+- **`defaults:` blocks are git-only.** The endpoints only ever touch `priority`,
+  so the old "one nudge silently erases every `defaults:` block" hazard is now
+  structurally impossible rather than merely tested against.
+
+The overlay lives next to the DB on purpose: it is state, so the DB backup below
+already covers it.
+
 ## Back up / restore the database
 
 The broker runs SQLite in WAL mode, so use the online-backup API rather than a
@@ -97,6 +124,9 @@ raw `cp` (which can miss the `-wal`/`-shm` sidecar files):
 ```bash
 # Online backup — safe while the broker is running:
 sqlite3 /app/data/jobd.db ".backup '/backups/jobd-backup.db'"
+
+# The runtime priority overlay is state, not config — back it up with the DB:
+cp /app/data/project-priorities.yaml /backups/
 
 # Restore: stop the broker, replace the file, restart.
 systemctl --user stop jobd-broker        # or: docker compose stop
