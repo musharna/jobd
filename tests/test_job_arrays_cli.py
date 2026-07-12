@@ -12,8 +12,11 @@ runner = CliRunner()
 
 
 class _FakeResp:
-    def __init__(self, data):
+    def __init__(self, data, headers=None):
         self._data = data
+        # GET /jobs sets X-Total-Count (audit 2026-07-12); a double without
+        # headers isn't a faithful stand-in for the real response.
+        self.headers = headers if headers is not None else {}
 
     def json(self):
         return self._data

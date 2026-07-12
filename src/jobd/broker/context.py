@@ -17,6 +17,10 @@ class BrokerState(TypedDict):
     """
 
     projects: dict[str, ProjectEntry]
+    # Priorities as declared in the git-owned projects.yaml, before the runtime
+    # overrides overlay is applied. `_persist_projects` diffs against this so the
+    # overlay only ever carries genuine runtime deltas (audit 2026-07-12).
+    base_priorities: dict[str, int]
     profiles: dict[str, ProfileSpec]
     classifier: list[ClassifierRule]
     paths: dict[str, Path]
