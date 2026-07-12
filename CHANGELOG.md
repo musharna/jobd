@@ -4,9 +4,20 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.13] — 2026-07-12
+
+Fixes from the 2026-07-12 focused re-audit of the v0.5.12 delta. Headline: the v0.5.12 H-1 fix was a no-op in production and is now actually closed.
+
+### Fixed
+
+- **Submit `depends_on` TOCTOU fix was a no-op (H-1, regression of the v0.5.12 fix).** The v0.5.12 post-commit cascade re-check read the parent through a cached identity-map object; with `expire_on_commit=False` the intervening commit never refreshed it, so the cascade gate saw a stale non-terminal state and never fired — a child concurrently orphaned by its parent still stranded QUEUED forever. `/submit` now `session.refresh()`es each parent before the cascade re-check (matching the idiom every other `_cascade_on_parent_terminal` caller already uses), guarded for a parent pruned mid-submit. New real-race regression test drives the actual `/submit` endpoint with a concurrent-session `/complete` and fails on the pre-fix code.
+- **`scheduling_timeout` queue-clock reset on refuse-admission re-routes (M-1 follow-up).** A refuse-admission requeue funnels through the same helper that resets `last_enqueued_at`, so a job that never ran but kept getting offered-and-refused (e.g. oscillating `gpu_contention`, which does not grow the exclusion set) reset its timeout clock every bounce and could evade `scheduling_timeout` forever. Refuse-admission re-routes now preserve the clock; only requeues of a job that actually dispatched reset it.
+- **Worker `run_job` exception path leaked a signal-poll thread and a fast_path child (F1/F2).** On a raise past the terminal path, the outer `finally` now stops the signal-poll thread (it would otherwise spin on `GET /signal` forever for a terminal job) and SIGKILLs a `fast_path` child that has no scope cgroup to reap.
+
 ### CI
 
-- **Property-based fuzzing of the broker state machine (H-4, audit 2026-07-10).** A `hypothesis` `RuleBasedStateMachine` (`tests/property/`) generates arbitrary interleavings of submit / claim / start / complete / cancel / worker-death-reclaim / scheduling-timeout / sweep against the real broker (in-process FastAPI + SQLite + sweeper) and asserts the invariants the CAS discipline guarantees: no terminal state is ever clobbered, a job is terminally cancelled at most once, and a reclaim never silently drops a pending user cancel. Runs bounded in CI (`JOBD_H4_EXAMPLES` / `JOBD_H4_STEPS` env overrides for a deep run). This is the coverage class the audit's systemic finding called for — H-1/H-2 shipped because no real-execution test exercised these read-decide-write windows.
+- **Property-based fuzzing of the broker state machine (H-4, audit 2026-07-10).** A `hypothesis` `RuleBasedStateMachine` (`tests/property/`) generates arbitrary interleavings of submit / claim / start / complete / cancel / worker-death-reclaim / scheduling-timeout / sweep against the real broker (in-process FastAPI + SQLite + sweeper) and asserts the invariants the CAS discipline guarantees: no terminal state is ever clobbered, a job is terminally cancelled at most once, a reclaim never silently drops a pending user cancel, and (added 2026-07-12) a default-policy dependent of a failed parent is never stranded on a runnable path. The harness now generates `depends_on` edges so it actually exercises the cascade (previously it created none, leaving the cancel-at-most-once invariant vacuous). Runs bounded in CI (`JOBD_H4_EXAMPLES` / `JOBD_H4_STEPS` env overrides for a deep run).
+- **The `live` CI job silently skipped 5 of 9 marked-live tests (H-3 follow-up).** It exported only `JOBD_LIVE`, while the e2e / MCP / project-defaults live tests gate on `JOBD_E2E` / `RUN_LIVE_JOBD` and require an external broker — so they skipped, and skips don't fail pytest. The job now stands up a real broker + worker from the committed `config/`, exports all three opt-in gates, and guards against a broken gate silently running zero tests.
 
 ## [0.5.12] — 2026-07-10
 
