@@ -12,7 +12,12 @@ import pytest
 import yaml
 
 from jobd.app import _persist_projects
-from jobd.config import ProjectDefaults, ProjectEntry, load_projects
+from jobd.config import (
+    ProjectDefaults,
+    ProjectEntry,
+    load_effective_projects,
+    load_projects,
+)
 
 
 def _full_projects_yaml(tmp_path):
@@ -102,28 +107,159 @@ def test_load_projects_unknown_keys_in_defaults(tmp_path):
     # No exception, no attribute on the dataclass; just dropped.
 
 
-def test_persist_projects_round_trip(tmp_path):
-    """Critical regression: writing a ProjectEntry with defaults, reloading,
-    must preserve the defaults block intact. Pre-fix, the persist path emitted
-    only ``{priority: ...}`` and any nudge silently erased every defaults
-    block."""
-    path = _full_projects_yaml(tmp_path)
-    projects = load_projects(path)
-    state = {"projects": projects, "paths": {"projects": path}}
+def _state(tmp_path, base_path):
+    """Build a BrokerState the way build_app does: git baseline + writable overlay."""
+    overrides = tmp_path / "state" / "project-priorities.yaml"
+    projects, base_priorities = load_effective_projects(base_path, overrides)
+    return {
+        "projects": projects,
+        "base_priorities": base_priorities,
+        "paths": {"projects": base_path, "project_overrides": overrides},
+    }
 
-    # Mutate priority via the same path that ``set_project_priority`` /
-    # ``nudge_project_priority`` use.
+
+def test_persist_writes_overlay_and_never_touches_git_config(tmp_path):
+    """THE bug (audit 2026-07-12): _persist_projects used to rewrite
+    projects.yaml, which is bind-mounted :ro in the container — so every
+    `job projects set/nudge` raised OSError -> HTTP 500. The git baseline must
+    now be left byte-identical, with the delta landing in the overlay."""
+    base_path = _full_projects_yaml(tmp_path)
+    before = base_path.read_text()
+    state = _state(tmp_path, base_path)
+
     state["projects"]["project-c"].priority = 65
     _persist_projects(state)
 
-    reloaded = load_projects(path)
+    # The git-owned baseline is untouched.
+    assert base_path.read_text() == before
+    # The delta is in the overlay.
+    overlay = yaml.safe_load(state["paths"]["project_overrides"].read_text())
+    assert overlay == {"priorities": {"project-c": 65}}
+
+
+def test_persist_survives_a_read_only_config_dir(tmp_path):
+    """Real-execution check of the production condition that caused the 500:
+    the config dir is genuinely read-only. Persist must still succeed."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    base_path = cfg_dir / "projects.yaml"
+    base_path.write_text("projects:\n  project-c: { priority: 55 }\n  _default: { priority: 40 }\n")
+    state = _state(tmp_path, base_path)
+
+    cfg_dir.chmod(0o555)  # read-only, exactly like the :ro bind mount
+    try:
+        state["projects"]["project-c"].priority = 70
+        _persist_projects(state)  # pre-fix: OSError: Read-only file system -> 500
+        reloaded, _ = load_effective_projects(base_path, state["paths"]["project_overrides"])
+        assert reloaded["project-c"].priority == 70
+    finally:
+        cfg_dir.chmod(0o755)
+
+
+def test_persist_round_trip_preserves_defaults(tmp_path):
+    """The original regression still holds — a nudge must not erase `defaults:`.
+    It is now structurally impossible: defaults live only in the git baseline,
+    which persist never rewrites."""
+    base_path = _full_projects_yaml(tmp_path)
+    state = _state(tmp_path, base_path)
+
+    state["projects"]["project-c"].priority = 65
+    _persist_projects(state)
+
+    reloaded, _ = load_effective_projects(base_path, state["paths"]["project_overrides"])
     agri = reloaded["project-c"]
-    assert agri.priority == 65
-    # The whole defaults block must survive.
-    assert agri.defaults.max_wall_s == 14400
+    assert agri.priority == 65  # override applied
+    assert agri.defaults.max_wall_s == 14400  # whole defaults block survives
     assert agri.defaults.idle_timeout_s == 1800
     assert agri.defaults.host_pin == "desktop"
     assert agri.defaults.preemptible is True
     assert agri.defaults.requires is not None
     assert agri.defaults.requires.gpu is True
     assert agri.defaults.requires.needs == ["cuda"]
+
+
+def test_overlay_holds_only_deltas_so_git_changes_still_flow(tmp_path):
+    """Why the overlay stores diffs, not a full snapshot: a project nobody
+    nudged must still pick up a later config-as-code priority change, while a
+    nudged project keeps its runtime override."""
+    base_path = _full_projects_yaml(tmp_path)
+    state = _state(tmp_path, base_path)
+
+    state["projects"]["project-c"].priority = 65  # nudged at runtime
+    _persist_projects(state)
+    overlay = yaml.safe_load(state["paths"]["project_overrides"].read_text())
+    assert "bare-project" not in overlay["priorities"]  # untouched -> not pinned
+
+    # Now `git pull` raises both priorities in the baseline.
+    base_path.write_text(
+        "projects:\n"
+        "  project-c: { priority: 99 }\n"
+        "  bare-project: { priority: 99 }\n"
+        "  _default: { priority: 40 }\n"
+    )
+    reloaded, _ = load_effective_projects(base_path, state["paths"]["project_overrides"])
+    assert reloaded["bare-project"].priority == 99  # git change lands
+    assert reloaded["project-c"].priority == 65  # runtime override still wins
+
+
+def test_overlay_can_materialize_a_project_absent_from_git(tmp_path):
+    """`job projects set brand-new 70` on a project not in projects.yaml."""
+    base_path = _full_projects_yaml(tmp_path)
+    state = _state(tmp_path, base_path)
+
+    state["projects"]["brand-new"] = ProjectEntry(priority=70)
+    _persist_projects(state)
+
+    reloaded, _ = load_effective_projects(base_path, state["paths"]["project_overrides"])
+    assert reloaded["brand-new"].priority == 70
+
+
+def test_priority_endpoints_work_against_a_read_only_config_dir(tmp_path):
+    """End-to-end regression for the live 500 (audit 2026-07-12).
+
+    Reproduces production exactly: config/ is read-only (the `:ro` bind mount),
+    the DB lives in a writable data dir. Pre-fix, `POST /projects/{name}/nudge`
+    returned HTTP 500 (`OSError: Read-only file system`) — verified against the
+    running gt76 broker. Both mutation endpoints must now return 200 and survive
+    a reload.
+    """
+    from fastapi.testclient import TestClient
+
+    from jobd.app import build_app
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "projects.yaml").write_text(
+        "projects:\n  project-a: { priority: 80 }\n  _default: { priority: 40 }\n"
+    )
+    (cfg / "profiles.yaml").write_text("profiles: {}\n")
+    (cfg / "classifier.yaml").write_text("rules: []\n")
+    data = tmp_path / "data"
+    data.mkdir()
+
+    app = build_app(
+        db_url=f"sqlite:///{data}/jobd.db",
+        projects_path=cfg / "projects.yaml",
+        profiles_path=cfg / "profiles.yaml",
+        classifier_path=cfg / "classifier.yaml",
+        logs_path=tmp_path / "logs",
+    )
+    client = TestClient(app)
+
+    cfg.chmod(0o555)  # the :ro mount
+    try:
+        r = client.post("/projects/project-a/nudge", json={"delta": -10})
+        assert r.status_code == 200, r.text  # was 500
+        assert r.json()["project-a"]["priority"] == 70
+
+        r = client.post("/projects/project-d", json={"priority": 55})
+        assert r.status_code == 200, r.text
+        assert r.json()["project-d"]["priority"] == 55
+
+        # Overrides survive a config reload (and the baseline is still readable).
+        assert client.post("/reload").status_code == 200
+        got = client.get("/projects").json()
+        assert got["project-a"]["priority"] == 70
+        assert got["project-d"]["priority"] == 55
+    finally:
+        cfg.chmod(0o755)

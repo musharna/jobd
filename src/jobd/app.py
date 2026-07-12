@@ -20,8 +20,8 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from sqlalchemy import create_engine, event, select
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.exc import ObjectDeletedError
 from sse_starlette.sse import EventSourceResponse
@@ -40,6 +40,7 @@ from jobd.broker.constants import (
     _FAILED_SIDE_TERMINAL,
     _LONGPOLL_RECHECK_S,
     AUTO_PREEMPT_MIN_RUNTIME_SECONDS,  # noqa: F401  # re-exported: tests read jobd.app.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
+    LIST_LIMIT_MAX,
     MAX_LOG_CHUNK_BYTES,
     NON_TERMINAL_STATES,
     SWEEP_INTERVAL_SECONDS,
@@ -71,8 +72,8 @@ from jobd.broker.sweeper import prune_old_jobs, sweep_once
 from jobd.config import (
     ProjectEntry,
     load_classifier_rules,
+    load_effective_projects,
     load_profiles,
-    load_projects,
     resolve_effective_config,
     resolve_profile,
 )
@@ -108,12 +109,33 @@ from jobd.models import (
 log = logging.getLogger("jobd")
 
 
+def _state_dir_for(db_url: str, logs_dir: Path) -> Path:
+    """Directory for MUTABLE broker state (the runtime priority overlay).
+
+    Prefer $JOBD_STATE_DIR; else the directory of a file-backed SQLite DB (the
+    ./data mount — writable by design, and already covered by the DB backup);
+    else fall back to logs_dir (also writable). NEVER the config dir, which is
+    git-owned and bind-mounted read-only — writing there is exactly the bug this
+    split fixes (audit 2026-07-12).
+    """
+    env_dir = os.environ.get("JOBD_STATE_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir)
+    prefix = "sqlite:///"
+    if db_url.startswith(prefix) and ":memory:" not in db_url:
+        parent = Path(db_url[len(prefix) :]).parent
+        if str(parent) not in ("", "."):
+            return parent
+    return logs_dir
+
+
 def build_app(
     db_url: str,
     projects_path: Path | str,
     profiles_path: Path | str,
     classifier_path: Path | str,
     logs_path: Path | str | None = None,
+    project_overrides_path: Path | str | None = None,
 ) -> FastAPI:
     # Long-poll plumbing (see _wake_dispatchers below). Defined up here so both
     # lifespan and the sweep can reach the loop handle.
@@ -154,7 +176,20 @@ def build_app(
     )
     install_tailnet_acl(app)
 
-    engine = create_engine(db_url, future=True)
+    # Connection pool (audit 2026-07-12): SQLAlchemy's QueuePool defaults to
+    # pool_size=5 + max_overflow=10 = 15 connections — but TWO threadpools feed
+    # this engine, and both open sessions: anyio's (40 tokens; every sync
+    # endpoint) and asyncio.to_thread's executor (min(32, cpu+4); the /next-job
+    # dispatch scan). Past 15 concurrent DB-touching requests the surplus threads
+    # block on pool checkout for up to pool_timeout (30s) — a hard cliff reached
+    # exactly when the dispatch fan-out wakes every parked worker at once. Size
+    # the pool above both ceilings. (In-memory SQLite uses SingletonThreadPool,
+    # which takes neither argument.)
+    engine_kwargs: dict = {"future": True}
+    if ":memory:" not in db_url:
+        engine_kwargs["pool_size"] = int(os.environ.get("JOBD_DB_POOL_SIZE", "20"))
+        engine_kwargs["max_overflow"] = int(os.environ.get("JOBD_DB_MAX_OVERFLOW", "60"))
+    engine = create_engine(db_url, **engine_kwargs)
 
     # SQLite tuning: WAL lets the broker's readers (CLI/MCP polls, ETA queries)
     # proceed concurrently with worker writes instead of blocking on a single
@@ -179,14 +214,26 @@ def build_app(
     logs_dir = Path(logs_path) if logs_path else Path(os.environ.get("JOBD_LOGS_DIR", "./logs"))
     logs_dir.mkdir(parents=True, exist_ok=True)
 
+    # Config ownership split (audit 2026-07-12): projects.yaml is the git-owned,
+    # read-only baseline; runtime priority changes land in a writable overlay
+    # next to the DB. See jobd.config.load_effective_projects.
+    overrides_path = (
+        Path(project_overrides_path)
+        if project_overrides_path is not None
+        else _state_dir_for(db_url, logs_dir) / "project-priorities.yaml"
+    )
+    _projects, _base_priorities = load_effective_projects(projects_path, overrides_path)
+
     state: BrokerState = {
-        "projects": load_projects(projects_path),
+        "projects": _projects,
+        "base_priorities": _base_priorities,
         "profiles": load_profiles(profiles_path),
         "classifier": load_classifier_rules(classifier_path),
         "paths": {
             "projects": Path(projects_path),
             "profiles": Path(profiles_path),
             "classifier": Path(classifier_path),
+            "project_overrides": overrides_path,
         },
         "logs_dir": logs_dir,
         # Per-(job_id) dedup map for dispatch_skip emission. Keyed by job_id,
@@ -581,24 +628,50 @@ def build_app(
 
     @app.get("/jobs", response_model=list[JobInfo])
     def list_jobs(
+        response: Response,
         state_filter: str | None = None,
         project: str | None = None,
         warnings_only: bool = False,
         array_id: int | None = None,
+        limit: int | None = Query(None, ge=1, le=LIST_LIMIT_MAX),
+        offset: int = Query(0, ge=0),
     ):
+        """List jobs, newest first.
+
+        Pagination (audit 2026-07-12): this used to return EVERY row ever — on a
+        broker with retention off that is the whole history, and `jobd_list` was
+        already working around it by fetching everything and truncating
+        client-side. `limit` is opt-in (None = all) rather than defaulted, because
+        `graph` and `--array` build over the *complete* set and a silent default
+        cap would quietly corrupt them. The full filtered count is always returned
+        in the `X-Total-Count` header so a caller can show "N of M".
+        """
         with SessionLocal() as session:
-            stmt = select(Job).order_by(Job.id.desc())
+            conds = []
             if state_filter:
-                stmt = stmt.where(Job.state == state_filter)
+                conds.append(Job.state == state_filter)
             if project:
-                stmt = stmt.where(Job.project == project)
+                conds.append(Job.project == project)
             if warnings_only:
-                stmt = stmt.where(Job.warning.is_not(None))
+                conds.append(Job.warning.is_not(None))
             if array_id is not None:
-                # array members are ordered by index for readable `--array` output
-                stmt = stmt.where(Job.array_id == array_id).order_by(None).order_by(Job.array_index)
+                conds.append(Job.array_id == array_id)
+
+            total = session.execute(
+                select(func.count()).select_from(Job).where(*conds)
+            ).scalar_one()
+
+            stmt = select(Job).where(*conds)
+            # array members are ordered by index for readable `--array` output
+            stmt = stmt.order_by(Job.array_index if array_id is not None else Job.id.desc())
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            if offset:
+                stmt = stmt.offset(offset)
+
             jobs = session.execute(stmt).scalars().all()
             eta_ctx = _build_eta_ctx(session)
+            response.headers["X-Total-Count"] = str(total)
             return [_to_info(j, eta_ctx) for j in jobs]
 
     @app.get("/jobs/{job_id}", response_model=JobInfo)
@@ -1686,7 +1759,14 @@ def build_app(
 
     @app.post("/reload")
     def reload_config():
-        state["projects"] = load_projects(state["paths"]["projects"])
+        # Re-read the git baseline AND re-apply the runtime overrides overlay, so
+        # a `git pull` of projects.yaml takes effect without discarding priorities
+        # set at runtime via `job projects set/nudge` (audit 2026-07-12).
+        projects, base_priorities = load_effective_projects(
+            state["paths"]["projects"], state["paths"]["project_overrides"]
+        )
+        state["projects"] = projects
+        state["base_priorities"] = base_priorities
         state["profiles"] = load_profiles(state["paths"]["profiles"])
         state["classifier"] = load_classifier_rules(state["paths"]["classifier"])
         return {"reloaded": True}

@@ -22,5 +22,20 @@ projects:
   # Tier 3 — background / best-effort
   project-d: { priority: 40 }
 
-  # Priority applied to any project not listed above.
-  _default: { priority: 40 }
+  # Priority applied to any project not listed above. The defaults below are the
+  # FLEET-WIDE hang-guard: any unlisted project inherits them. idle_timeout_s
+  # reaps a job that emits NO output for 1h and frees its worker slot — this
+  # prevents D-state/9p-stall zombies (a real incident: a silent job held a
+  # desktop GPU slot for 6 days). 1h is generous: a true hang is silent forever
+  # so it is caught regardless, while a healthy job printing periodic progress is
+  # never killed. A legitimately-silent long job should emit a heartbeat, or set
+  # a larger per-project idle_timeout_s.
+  #
+  # This lived only as an uncommitted edit on the gt76 broker until 2026-07-12 —
+  # i.e. one `git clone` away from being silently lost. It is config-as-code, so
+  # it belongs here.
+  _default:
+    priority: 40
+    defaults:
+      idle_timeout_s: 3600 # 1h with no stdout -> reap + free the slot
+      max_wall_s: 172800 # 48h hard runaway ceiling

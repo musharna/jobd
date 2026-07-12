@@ -71,3 +71,9 @@ _DEPENDS_TERMINAL_ANY = frozenset(s.value for s in TERMINAL_STATES)
 # Failed-side terminal states: a parent here can never produce the output a
 # default-policy (non-any-exit) child needs, so the child is cascade-cancelled.
 _FAILED_SIDE_TERMINAL = frozenset(s.value for s in TERMINAL_FAIL_STATES)
+
+# Server-side cap on GET /jobs `limit` (audit 2026-07-12). The endpoint used to
+# return every row ever; `limit` is opt-in (None = all, so `graph`/`--array`
+# still see the complete set) but a caller may not ask for an unbounded page
+# beyond this.
+LIST_LIMIT_MAX = 1000

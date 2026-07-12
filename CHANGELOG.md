@@ -4,6 +4,29 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.14] — 2026-07-12
+
+First batch from the 2026-07-12 improvement audit. Headline: `job projects set` / `nudge` were returning HTTP 500 in production — a documented feature was dead.
+
+### Fixed
+
+- **`job projects set` / `job projects nudge` returned HTTP 500 (config was mounted read-only).** `_persist_projects` rewrote `config/projects.yaml` in place, but that file is git-owned *and* bind-mounted `:ro` into the broker container, so every priority mutation raised `OSError: Read-only file system`. Verified against the live broker. Config ownership is now split: `config/projects.yaml` stays the **git-owned, read-only baseline** (projects, their baseline priority, and their `defaults:`), while runtime priority changes persist to a **writable overlay** at `$JOBD_STATE_DIR/project-priorities.yaml` (defaulting to the SQLite DB's directory, so it is covered by the DB backup and never conflicts with a `git merge` on redeploy). The overlay stores only *deltas* from the baseline, so a later config-as-code priority change still lands for any project nobody nudged. Because the endpoints only ever touch `priority`, `defaults:` blocks are now git-only — making the old "one nudge silently erases every `defaults:` block" round-trip hazard structurally impossible rather than merely tested against. See the new "Config vs state" section in `docs/runbook.md`.
+- **Fleet-wide hang-guard `_default` defaults are now committed.** `idle_timeout_s: 3600` / `max_wall_s: 172800` existed only as an uncommitted edit on the broker host — one `git clone` away from being silently lost.
+
+### Added
+
+- **`GET /jobs` pagination.** The endpoint used to return *every row ever* — on a broker with retention off, the entire history. It now accepts `limit` (1..1000) and `offset`, and always reports the full filtered count in the `X-Total-Count` header. `limit` is deliberately opt-in (absent = all), because `graph` and `--array` build over the complete set and a silent default cap at the API layer would quietly corrupt them.
+- **`job list --limit/-n` (default 50) and `--all`.** `job list` used to dump the broker's entire job history. It is now bounded by default and prints `… showing 50 of N` rather than truncating silently. `--array` still shows every member of an array (a truncated array misrepresents its shape). The MCP surface had already capped its own output; the human CLI had not.
+- **`job --version` / `-V`**, and a bare `job` now prints the full help (with the command list) instead of a terse usage error. `JOBD_URL` and `JOBD_API_TOKEN` are documented in `job --help`, and the six commands that rendered as blank rows (`cancel`, `wait`, `classify`, `projects list/set/nudge`) now have help text.
+
+### Changed
+
+- **SQLAlchemy connection pool sized above the threadpools that feed it.** The engine used QueuePool's defaults (`pool_size=5` + `max_overflow=10` = 15 connections) while *two* threadpools open sessions against it — anyio's (40 tokens; every sync endpoint) and `asyncio.to_thread`'s (the `/next-job` dispatch scan). Past 15 concurrent DB-touching requests, the surplus threads blocked on pool checkout for up to `pool_timeout` (30s) — a cliff reached exactly when the dispatch fan-out wakes every parked worker at once. Now 20/60, tunable via `JOBD_DB_POOL_SIZE` / `JOBD_DB_MAX_OVERFLOW`.
+
+### Removed
+
+- **`test_full_suite_green`**, a meta-test that shelled out to re-run the entire suite as a subprocess. It contributed zero coverage, ignored the outer `-m`/`-k`/`-x` filters, doubled the cost of every new test, and its own docstring scoped it to a migration that finished when `mcp-v1` was tagged. CI already runs the full suite. **Suite runtime: ~136s → ~66s.**
+
 ## [0.5.13] — 2026-07-12
 
 Fixes from the 2026-07-12 focused re-audit of the v0.5.12 delta. Headline: the v0.5.12 H-1 fix was a no-op in production and is now actually closed.

@@ -28,6 +28,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "set to a tailscale IP in production)\n"
             "  JOBD_PORT        port to bind (default: 8765)\n"
             "  JOBD_LOGS_DIR    per-job stdout/stderr log directory (default: ./logs)\n"
+            "  JOBD_STATE_DIR   mutable broker state, incl. the runtime project-priority\n"
+            "                   overlay written by `job projects set/nudge` (default: the\n"
+            "                   SQLite DB's directory). MUST be writable; the config dir is\n"
+            "                   git-owned and mounted read-only, so it is never used for this.\n"
+            "  JOBD_DB_POOL_SIZE / JOBD_DB_MAX_OVERFLOW\n"
+            "                   SQLAlchemy pool sizing (defaults: 20 / 60)\n"
             "\n"
             "For the CLI client see `job --help` (separate entry point)."
         ),

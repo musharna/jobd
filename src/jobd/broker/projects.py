@@ -50,13 +50,27 @@ def _projects_to_jsonable(projects: dict[str, ProjectEntry]) -> dict[str, dict]:
 
 
 def _persist_projects(state: BrokerState) -> None:
-    """Write the in-memory projects dict back to YAML in the canonical shape.
+    """Persist runtime priority changes to the mutable overrides overlay.
 
-    Round-trip safety: must preserve ``defaults:`` blocks exactly so that a
-    single ``job projects nudge`` does not silently erase per-project
-    overrides. See test_projects_yaml.test_persist_projects_round_trip.
+    audit 2026-07-12: this used to rewrite ``config/projects.yaml`` in place —
+    but that file is git-owned and bind-mounted ``:ro`` into the broker, so
+    every ``job projects set`` / ``nudge`` raised OSError → HTTP 500 (the
+    feature was dead in production). Config ownership is now split: the git
+    baseline stays read-only, and only the priority deltas are written here, to
+    a writable path next to the DB (see jobd.config for the full rationale).
+
+    Only priorities that DIFFER from the git baseline are written, so a later
+    config-as-code priority change still lands for any project nobody nudged.
+    Because the mutation endpoints only ever touch ``priority``, ``defaults:``
+    blocks are never rewritten — the old "one nudge erases defaults" round-trip
+    hazard is now structurally impossible rather than merely tested against.
     """
-    data = {
-        "projects": {name: _entry_to_yaml_dict(entry) for name, entry in state["projects"].items()}
+    baseline = state["base_priorities"]
+    overrides = {
+        name: entry.priority
+        for name, entry in state["projects"].items()
+        if baseline.get(name) != entry.priority
     }
-    state["paths"]["projects"].write_text(yaml.safe_dump(data, sort_keys=False))
+    path = state["paths"]["project_overrides"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"priorities": overrides}, sort_keys=False))

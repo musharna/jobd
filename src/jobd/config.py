@@ -111,6 +111,88 @@ def load_projects(path: Path | str) -> dict[str, ProjectEntry]:
     return out
 
 
+# --- runtime priority overrides -------------------------------------------
+#
+# audit 2026-07-12: `job projects set` / `job projects nudge` used to rewrite
+# config/projects.yaml in place. That file is git-owned AND bind-mounted `:ro`
+# into the broker container, so every mutation raised OSError → HTTP 500: a
+# documented feature was dead in production. Splitting ownership fixes the
+# cause rather than widening the mount:
+#
+#   config/projects.yaml  — STATIC, git-owned, read-only. Declares projects,
+#                           their baseline priority, and their `defaults:`.
+#   <state>/project-priorities.yaml — MUTABLE runtime state, written by the
+#                           broker, living next to the DB (writable, backed up
+#                           with it, and never in git's way on a redeploy).
+#
+# The overlay stores ONLY priorities that differ from the git baseline, so a
+# later config-as-code priority change still takes effect for any project that
+# was never nudged. And because the endpoints only ever mutate `priority`, the
+# `defaults:` blocks stay entirely git-owned — which makes the old
+# "one nudge silently erases defaults" round-trip bug structurally impossible.
+
+
+def load_project_overrides(path: Path | str) -> dict[str, int]:
+    """Load the runtime priority-override overlay: {project_name: priority}.
+
+    Missing/empty/malformed-shape file → {} (the overlay is optional state, and
+    a broker must always start from its git baseline alone).
+    """
+    import logging
+
+    log = logging.getLogger("jobd.config")
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        return {}
+
+    data = yaml.safe_load(text) or {}
+    raw = data.get("priorities", {})
+    if not isinstance(raw, dict):
+        log.warning("project-priorities overlay at %s has no `priorities:` map; ignoring", path)
+        return {}
+    out: dict[str, int] = {}
+    for name, priority in raw.items():
+        try:
+            out[str(name)] = max(0, min(100, int(priority)))
+        except (TypeError, ValueError):
+            log.warning("ignoring non-int priority override for %r in %s", name, path)
+    return out
+
+
+def apply_project_overrides(
+    projects: dict[str, ProjectEntry], overrides: dict[str, int]
+) -> dict[str, ProjectEntry]:
+    """Overlay runtime priority overrides onto the git-baseline projects.
+
+    A project present only in the overlay (created at runtime via
+    `job projects set <new-name>`) is materialized with that priority. Mutates
+    and returns `projects`.
+    """
+    for name, priority in overrides.items():
+        existing = projects.get(name)
+        if existing is None:
+            projects[name] = ProjectEntry(priority=priority)
+        else:
+            existing.priority = priority
+    return projects
+
+
+def load_effective_projects(
+    projects_path: Path | str, overrides_path: Path | str
+) -> tuple[dict[str, ProjectEntry], dict[str, int]]:
+    """Load the git baseline, overlay runtime priority overrides, and return
+    (effective_projects, baseline_priorities).
+
+    The caller keeps `baseline_priorities` so `_persist_projects` can write back
+    only the genuine deltas.
+    """
+    baseline = load_projects(projects_path)
+    baseline_priorities = {name: entry.priority for name, entry in baseline.items()}
+    overrides = load_project_overrides(overrides_path)
+    return apply_project_overrides(baseline, overrides), baseline_priorities
+
+
 def load_profiles(path: Path | str) -> dict[str, ProfileSpec]:
     """Load profiles.yaml into {name: ProfileSpec}."""
     data = yaml.safe_load(Path(path).read_text()) or {}
