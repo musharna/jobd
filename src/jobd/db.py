@@ -59,6 +59,13 @@ class Job(Base):
     last_enqueued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Set when log retention unlinks this job's .log (audit 2026-07-12). Two
+    # jobs: (1) an already-pruned job is never re-examined, so the sweeper's
+    # prune scan shrinks monotonically instead of stat'ing every historical log
+    # every 30s; (2) `job logs` can say "pruned by retention" instead of "no
+    # output captured" — reporting a pruned log as empty would make a job that
+    # produced megabytes look like it produced nothing.
+    log_pruned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     signal: Mapped[str | None] = mapped_column(String(30), nullable=True)
     requires_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -173,6 +180,7 @@ _JOB_ADDS = [
     ("excluded_workers_json", "TEXT DEFAULT '[]'"),
     ("scheduling_timeout_s", "INTEGER"),
     ("last_enqueued_at", "DATETIME"),
+    ("log_pruned_at", "DATETIME"),
     ("array_id", "INTEGER"),
     ("array_index", "INTEGER"),
     ("array_size", "INTEGER"),
