@@ -1361,6 +1361,12 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             file=sys.stderr,
         )
     finally:
+        # F2 (audit 2026-07-12): stop the signal-poll thread. The normal path
+        # sets this in the inner read-loop finally, but a raise BEFORE that loop
+        # (e.g. sig_thread.start() under thread exhaustion) would leave
+        # poll_signals spinning on GET /signal forever for an already-terminal
+        # job. Idempotent, so harmless on the success path.
+        stop_signal.set()
         if not _terminal_posted:
             with contextlib.suppress(Exception):
                 _cancel_kill_timers(kill_timers, kill_timers_lock)
@@ -1369,6 +1375,14 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     _sp = _cgroup_walk.resolve_user_scope_path(scope_unit)
                     if _sp is not None:
                         _cgroup_walk.kill_scope(_sp)
+            elif scope_unit is None:
+                # F1 (audit 2026-07-12): a fast_path (or no-systemd-run) job has
+                # no scope cgroup to reap, so the scope-reap above is skipped and
+                # the child is still alive after the raise. SIGKILL it directly
+                # so we never post a terminal state while leaking a live child.
+                with contextlib.suppress(Exception):
+                    if proc.poll() is None:
+                        proc.kill()
             _unregister_drain_hook(job_id)
             _unregister_in_flight_pid(job_id)
             _tracked_pids_discard(tracked_pids, proc.pid)

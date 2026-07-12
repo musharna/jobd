@@ -17,6 +17,11 @@ discipline is supposed to guarantee:
      cancel was acknowledged while non-terminal, when its worker dies and the
      sweeper reclaims it, must land in CANCELLED, never silently requeue and
      re-run.
+  4. A default-policy dependent of a failed-side-terminal parent is never
+     stranded on a runnable path — the cascade must cancel it (the H-1 strand
+     class). Added 2026-07-12 alongside depends_on generation; before that the
+     harness created no dependency edges, so it could not exercise the cascade
+     at all and invariant 2's cascade half was vacuous.
 
 Sequential-but-arbitrary ordering (hypothesis stateful) exposes the read-decide
 -write windows without needing OS threads: a cancel between claim and complete,
@@ -37,10 +42,11 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
-from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, rule
+from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, multiple, rule
 from sqlalchemy import select, update
 
 from jobd.app import build_app
+from jobd.broker.constants import _FAILED_SIDE_TERMINAL
 from jobd.db import Job, Worker
 from jobd.models import TERMINAL_STATES, JobState
 
@@ -92,6 +98,10 @@ class BrokerStateMachine(RuleBasedStateMachine):
         self.cancel_ack: set[int] = set()
         self.first_terminal: dict[int, str] = {}
         self.all_ids: set[int] = set()
+        # audit 2026-07-12: default-policy child -> its parent ids. Only these
+        # are subject to cascade-cancel (any-exit children are satisfied by any
+        # terminal parent), so only these are tracked for the strand invariant.
+        self.parents: dict[int, list[int]] = {}
 
     jobs = Bundle("jobs")
 
@@ -123,6 +133,29 @@ class BrokerStateMachine(RuleBasedStateMachine):
             body["scheduling_timeout_s"] = 3600  # long; tripped explicitly below
         jid = self.client.post("/submit", json=body).json()["id"]
         self.all_ids.add(jid)
+        return jid
+
+    @rule(target=jobs, parent=jobs, any_exit=st.booleans())
+    def submit_dependent(self, parent: int, any_exit: bool):
+        """Submit a job that depends_on an existing one — exercises the cascade
+        (H-1 strand class) and makes the cancel-at-most-once invariant
+        non-vacuous. A default-policy child of an already failed-side-terminal
+        parent is rejected at submit (400), so no child is added in that case."""
+        body: dict = {
+            "cmd": ["true"],
+            "cwd": "/tmp",
+            "project": "project-a",
+            "depends_on": [parent],
+        }
+        if any_exit:
+            body["depends_on_any_exit"] = True
+        r = self.client.post("/submit", json=body)
+        if r.status_code != 200:
+            return multiple()  # parent already failed-side terminal; reject is correct
+        jid = r.json()["id"]
+        self.all_ids.add(jid)
+        if not any_exit:
+            self.parents[jid] = [parent]
         return jid
 
     @rule(worker=st.sampled_from(_WORKERS))
@@ -245,6 +278,30 @@ class BrokerStateMachine(RuleBasedStateMachine):
                 assert s == self.first_terminal[jid], (jid, self.first_terminal[jid], s)
             elif s in _TERMINAL:
                 self.first_terminal[jid] = s
+
+    @invariant()
+    def dependent_of_failed_parent_not_stranded(self):
+        # audit 2026-07-12: a default-policy child whose parent reached a
+        # failed-side terminal must be cancelled by the cascade, never left on a
+        # runnable path — the H-1 strand class. It cannot be assigned/running:
+        # _deps_satisfied gates default-policy dispatch on ALL parents COMPLETED,
+        # which a failed parent precludes. The cascade runs synchronously inside
+        # the /complete, sweeper, and reconcile handlers, so by the time this
+        # invariant runs (after each step) a failed parent's child is resolved.
+        if not self.parents:
+            return
+        with self.engine.begin() as conn:
+            rows = dict(conn.execute(select(Job.id, Job.state)).all())
+        for child, parents in self.parents.items():
+            cstate = rows.get(child)
+            if cstate is None:
+                continue
+            if any(rows.get(p) in _FAILED_SIDE_TERMINAL for p in parents):
+                assert cstate not in ("queued", "assigned", "running"), (
+                    child,
+                    cstate,
+                    {p: rows.get(p) for p in parents},
+                )
 
     def teardown(self) -> None:
         # Terminally-cancelled-at-most-once: cumulative, so one final pass over

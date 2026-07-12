@@ -23,6 +23,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm.exc import ObjectDeletedError
 from sse_starlette.sse import EventSourceResponse
 
 from jobd import __version__
@@ -512,6 +513,23 @@ def build_app(
                 for dep_id in dict.fromkeys(req.depends_on):
                     parent = session.get(Job, dep_id)
                     if parent is None:
+                        continue
+                    # The failed-side reject loop above already loaded this
+                    # parent into the identity map with its pre-race state. With
+                    # expire_on_commit=False the intervening commit did NOT
+                    # refresh it, so session.get() returns the SAME cached object
+                    # and the cascade gate (state.py: `parent.state not in
+                    # _FAILED_SIDE_TERMINAL`) would read the stale non-terminal
+                    # state — making this whole sweep a no-op and reopening the
+                    # exact strand H-1 closes. Refresh from the DB so the
+                    # re-check sees a parent that reached a failed-side terminal
+                    # during the submit window (matches the session.refresh(job)
+                    # idiom every other _cascade_on_parent_terminal caller uses).
+                    try:
+                        session.refresh(parent)
+                    except ObjectDeletedError:
+                        # Parent pruned between commit and re-check; nothing to
+                        # cascade from.
                         continue
                     swept = _cascade_on_parent_terminal(session, parent)
                     if swept:
@@ -1124,6 +1142,9 @@ def build_app(
                     state=JobState.QUEUED,
                     worker=None,
                     started_at=None,
+                    # refuse-admission re-route: the job never ran here, so keep
+                    # its scheduling_timeout clock running (audit 2026-07-12 M-1).
+                    reset_queue_clock=False,
                 )
                 if outcome == "lost":
                     session.refresh(job)
@@ -1167,6 +1188,9 @@ def build_app(
                 state=JobState.QUEUED,
                 worker=None,
                 started_at=None,
+                # refuse-admission re-route: the job never ran here, so keep its
+                # scheduling_timeout clock running (audit 2026-07-12 M-1).
+                reset_queue_clock=False,
             )
             if outcome == "lost":
                 session.refresh(job)
