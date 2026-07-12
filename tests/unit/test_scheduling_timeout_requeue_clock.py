@@ -142,3 +142,40 @@ def test_requeue_helper_resets_last_enqueued_at(client):
         assert job is not None
         assert job.state == JobState.QUEUED.value
         assert job.last_enqueued_at == fresh  # reset, not left at `old`
+
+
+def test_refuse_admission_requeue_preserves_clock(client):
+    """audit 2026-07-12: a refuse-admission re-route (reset_queue_clock=False)
+    must NOT stamp a fresh clock — the job never ran, so its scheduling_timeout
+    must keep counting or a job oscillating on gpu_contention would evade the
+    timeout forever."""
+    job_id = _submit_unschedulable(client, timeout_s=30)
+    engine = client.app.state.engine
+    old = datetime(2020, 1, 1)
+    with engine.begin() as conn:
+        conn.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(state=JobState.ASSIGNED.value, last_enqueued_at=old, worker="w1")
+        )
+
+    fresh = datetime(2026, 7, 12, 12, 0, 0)
+    with Session(engine) as s:
+        outcome = _requeue_or_honor_cancel(
+            s,
+            job_id,
+            (JobState.ASSIGNED,),
+            now=fresh,
+            reset_queue_clock=False,
+            state=JobState.QUEUED.value,
+            worker=None,
+            started_at=None,
+        )
+        s.commit()
+    assert outcome == "requeued"
+
+    with Session(engine) as s:
+        job = s.get(Job, job_id)
+        assert job is not None
+        assert job.state == JobState.QUEUED.value
+        assert job.last_enqueued_at == old  # preserved, NOT reset to `fresh`

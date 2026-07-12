@@ -77,6 +77,7 @@ def _requeue_or_honor_cancel(
     expected: tuple[JobState, ...],
     *,
     now: datetime,
+    reset_queue_clock: bool = True,
     **requeue_values,
 ) -> str:
     """Tear down a claim: requeue the job — unless a user cancel is pending.
@@ -97,6 +98,19 @@ def _requeue_or_honor_cancel(
     `expected` under us — caller must not touch it)."""
     if _honor_pending_cancel(session, job_id, expected, now=now):
         return "cancelled"
+    # M-1 (audit 2026-07-10): reset the scheduling_timeout queue-clock on
+    # requeue, so a job that dispatched, ran for hours, then got reclaimed on a
+    # worker death is not immediately killed by a scheduling_timeout measured
+    # from its original submit. submitted_at is left untouched (it orders the
+    # queue). audit 2026-07-12: but NOT on a refuse-admission requeue — that
+    # job never ran and is being RE-ROUTED, which is exactly the "unscheduled"
+    # time scheduling_timeout is meant to bound. Resetting the clock there lets
+    # a job oscillating on gpu_contention (refusal doesn't grow the exclusion
+    # set) evade scheduling_timeout forever, so those callers pass
+    # reset_queue_clock=False.
+    values: dict = {"signal": None, **requeue_values}
+    if reset_queue_clock:
+        values["last_enqueued_at"] = now
     result = session.execute(
         Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
         .where(
@@ -104,12 +118,7 @@ def _requeue_or_honor_cancel(
             Job.state.in_([s.value for s in expected]),
             or_(Job.signal.is_(None), Job.signal != "cancel"),
         )
-        # M-1 (audit 2026-07-10): reset the scheduling_timeout queue-clock on
-        # every requeue. All requeue paths funnel through this helper, so a job
-        # that dispatched, ran for hours, then got reclaimed on a worker death
-        # is not immediately killed by a scheduling_timeout measured from its
-        # original submit. submitted_at is left untouched (it orders the queue).
-        .values(signal=None, last_enqueued_at=now, **requeue_values)
+        .values(**values)
     )
     return "requeued" if int(result.rowcount) else "lost"
 
