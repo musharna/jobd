@@ -134,9 +134,11 @@ doesn't within 90s, the previous pin is restored. It also writes
 textfile metrics, so a failed deploy is visible in Prometheus rather than only in a
 journal nobody reads.
 
-One-time GHCR note: the package must be **public** for the host to pull it without
-credentials (Packages → jobd → Package settings → Change visibility). The repo is
-already public; this just keeps the deploy path credential-free.
+The GHCR package is **public**, so the host pulls it with no credentials at all —
+verified: the broker host has no `~/.docker/config.json`, and ghcr.io issues an
+anonymous pull token for it. Nothing in the deploy path holds a secret. If you fork
+this and your package comes up private, make it public under Packages → jobd →
+Package settings → Change visibility, or the timer will fail to pull.
 
 **Broker crash-loops on `attempt to write a readonly database`?** The image runs as a
 non-root user (uid 10001); a bind-mounted `data/`/`logs/` owned by a different host uid
