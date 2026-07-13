@@ -25,6 +25,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _COMPOSE = _REPO_ROOT / "docker-compose.yml"
 _SERVER_JSON = _REPO_ROOT / "server.json"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
+_DOCKERFILE = _REPO_ROOT / "Dockerfile"
+_HEALTHCHECK = _REPO_ROOT / "scripts" / "healthcheck.py"
 
 # docker-compose env interpolation with a default: ${JOBD_HOST:-127.0.0.1}
 _INTERP_WITH_DEFAULT = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*:-(?P<default>.*)\}$")
@@ -138,6 +140,82 @@ def test_jobd_host_binds_to_safe_interface():
         f"JOBD_HOST={host!r} is unsafe. Use either 127.0.0.1 (loopback) or a "
         "100.x.y.z address inside 100.64.0.0/10 (Tailscale CGNAT). Public "
         "bind would expose the broker to the internet."
+    )
+
+
+def _healthcheck_instruction() -> str:
+    """Return the full HEALTHCHECK instruction, following backslash continuations.
+
+    The probe body lives on the line AFTER `HEALTHCHECK --interval=...`, so grepping
+    for lines containing the word HEALTHCHECK reads only the flags and none of the
+    command — a guard written that way passes no matter what the probe does. (Ask me
+    how I know: the first draft of this test did exactly that, and a mutation putting
+    the old hardcoded-loopback probe back did not fail it.)
+    """
+    lines = _DOCKERFILE.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if not line.lstrip().startswith("HEALTHCHECK"):
+            continue
+        instruction = [line]
+        while instruction[-1].rstrip().endswith("\\") and i + 1 < len(lines):
+            i += 1
+            instruction.append(lines[i])
+        return "\n".join(instruction)
+    raise AssertionError("Dockerfile has no HEALTHCHECK instruction")
+
+
+def test_healthcheck_instruction_parser_sees_the_command_body():
+    """Guard the guard: the parser must capture the probe command, not just the flags.
+
+    Without this, both healthcheck lint tests below can silently degrade into
+    inspecting an empty string.
+    """
+    body = _healthcheck_instruction()
+    assert "healthcheck.py" in body, (
+        "the parsed HEALTHCHECK instruction does not contain the probe command — "
+        "the continuation-line parser is broken, so the lint tests below are vacuous"
+    )
+
+
+def test_healthcheck_does_not_hardcode_loopback():
+    """The container HEALTHCHECK must probe the address uvicorn actually binds.
+
+    Regression guard. The original probe TCP-connected to a hardcoded 127.0.0.1,
+    but the broker binds JOBD_HOST (a tailscale IP under `network_mode: host`) and
+    never listens on loopback — so the probe could not reach it even in principle.
+    It nonetheless reported healthy for weeks, because an unrelated container on
+    gt76 happened to publish 127.0.0.1:8765 and a bare TCP connect cannot tell which
+    daemon accepted the socket. Green for a false reason is worse than red.
+    """
+    body = _healthcheck_instruction()
+    assert "127.0.0.1" not in body, (
+        "The HEALTHCHECK hardcodes 127.0.0.1, but the broker binds $JOBD_HOST and "
+        "does not listen on loopback in the deployed configuration. Probe "
+        "$JOBD_HOST instead — see scripts/healthcheck.py."
+    )
+
+
+def test_healthcheck_probes_jobd_host_over_http():
+    """The probe must be an HTTP request that validates jobd's own /health payload.
+
+    A bare socket connect is structurally incapable of noticing it is talking to the
+    WRONG service — which is exactly what happened. Requiring `status: ok` back from
+    /health means another daemon squatting the port fails the check instead of
+    satisfying it.
+    """
+    assert _HEALTHCHECK.exists(), f"missing {_HEALTHCHECK}"
+    src = _HEALTHCHECK.read_text()
+
+    assert "JOBD_HOST" in src, "healthcheck must probe $JOBD_HOST, not a fixed address"
+    assert "/health" in src, "healthcheck must call the broker's /health endpoint"
+    assert '"status"' in src or "'status'" in src, (
+        "healthcheck must assert jobd's own /health payload (status == ok). Without "
+        "a body check, any daemon listening on the port satisfies the probe — the "
+        "exact failure this replaced."
+    )
+    assert "socket.create_connection" not in src, (
+        "healthcheck reverted to a bare TCP connect, which cannot distinguish jobd "
+        "from any other process holding the port."
     )
 
 
