@@ -24,14 +24,15 @@ ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip -4 -o addr show | grep -q
 # container that compose up -d treats as already-present and refuses to
 # fix port bindings on. Leading dash makes this best-effort.
 ExecStartPre=-/usr/bin/docker compose down --remove-orphans
-# --build is load-bearing, not belt-and-braces. docker-compose.yml builds from
-# source (`build: .`) and tags the result `jobd:latest` with no registry behind
-# it, so `up -d` alone happily reuses whatever `jobd:latest` already exists —
-# i.e. it restarts the OLD code after a `git pull`. Without --build, a boot
-# following an upgrade silently serves the previous version, and `job ping`
-# reports a version that doesn't match the checkout. Rebuilding is a no-op
-# (layer cache) when nothing changed.
-ExecStart=/usr/bin/docker compose up -d --build --remove-orphans
+# `--build` used to be load-bearing here, because docker-compose.yml built from
+# source and tagged the result `jobd:latest` with no registry behind it — so a bare
+# `up -d` would silently reuse the stale image and restart the OLD code after a
+# `git pull`. That is gone: compose now pulls a version-pinned image from GHCR
+# (`JOBD_TAG` in .env), so `pull` actually means something and the image cannot go
+# stale behind your back. `--pull always` is NOT wanted either: the tag is exact, so
+# there is nothing to refresh, and re-pulling on every boot would just add a network
+# dependency to starting the broker.
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
 ExecStop=/usr/bin/docker compose down
 TimeoutStartSec=180
 TimeoutStopSec=60

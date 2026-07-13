@@ -1,7 +1,21 @@
 services:
   jobd:
-    build: .
-    image: jobd:latest
+    # Pulled from GHCR, NOT built here. There used to be `build: .` + `image:
+    # jobd:latest` with no registry behind that tag, which meant `docker compose pull`
+    # was a silent no-op and a bare `docker compose up -d` after a `git pull` happily
+    # reused the stale local image — you restarted the OLD code and nothing said so.
+    # The workaround was to remember `--build` forever. A registry-backed, version-
+    # pinned tag deletes that whole class of mistake instead of guarding against it.
+    #
+    # JOBD_TAG pins the EXACT version (e.g. 0.5.18). Production should never follow
+    # `latest`: scripts/deploy-broker.sh resolves the newest release, writes JOBD_TAG
+    # into .env, and can roll back to the previous pin if the new image fails its
+    # health gate — none of which is possible against a moving tag. The `latest`
+    # default here exists only so a fresh clone can start without ceremony.
+    #
+    # Building from source (a fork, or a local change):
+    #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+    image: ghcr.io/musharna/jobd:${JOBD_TAG:-latest}
     container_name: jobd
     restart: unless-stopped
     # PERMISSIONS: the image runs as a non-root user (uid 10001, see Dockerfile).
