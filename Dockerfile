@@ -33,6 +33,8 @@ RUN mkdir -p src/jobd src/job_cli \
 COPY src ./src
 RUN pip install --no-deps --force-reinstall .
 
+COPY scripts/healthcheck.py /app/healthcheck.py
+
 # Run as an unprivileged user; the broker never needs root. Data/logs must be
 # writable by that user (the SQLite DB lives under /app/data).
 RUN useradd --create-home --uid 10001 jobd \
@@ -42,10 +44,14 @@ USER jobd
 
 EXPOSE 8765
 
-# /health is behind the bearer-token auth dependency, and the slim image has no
-# curl, so the healthcheck is a plain TCP connect: a listening socket means the
-# broker is up.
+# The probe must reach the address uvicorn actually binds ($JOBD_HOST — a tailscale
+# IP under network_mode: host, NOT loopback) and must require jobd's own /health
+# payload back. The previous version did neither: it TCP-connected to a hardcoded
+# 127.0.0.1, which the broker never listens on, and a bare connect cannot tell WHICH
+# daemon accepted it. On gt76 an unrelated container held 127.0.0.1:8765 and this
+# healthcheck passed against that for weeks — green for a false reason. See
+# scripts/healthcheck.py.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import os,socket; socket.create_connection(('127.0.0.1', int(os.environ.get('JOBD_PORT','8765'))), timeout=3).close()"
+    CMD ["python", "/app/healthcheck.py"]
 
 CMD ["jobd"]
