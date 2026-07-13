@@ -13,7 +13,7 @@ visible, healing the strand. These tests exercise that post-commit sweep and
 guard against false-positive cancellation of live/successful parents.
 
 The race window is simulated deterministically by emptying
-``jobd.app._FAILED_SIDE_TERMINAL`` for the child submit (so the point-read
+``jobd.broker.submit._FAILED_SIDE_TERMINAL`` for the child submit (so the point-read
 reject is bypassed, exactly as it would be if the read observed the parent
 mid-run) while the cascade in ``jobd.broker.state`` keeps the real constant.
 """
@@ -91,7 +91,7 @@ def test_toctou_child_of_already_failed_parent_is_cancelled_not_stranded(
     # Simulate the race: the point-read reject observed the parent mid-run, so
     # it did not reject. (Empty set only for the app-level reject; the cascade
     # in jobd.broker.state keeps the real _FAILED_SIDE_TERMINAL.)
-    monkeypatch.setattr("jobd.app._FAILED_SIDE_TERMINAL", frozenset())
+    monkeypatch.setattr("jobd.broker.submit._FAILED_SIDE_TERMINAL", frozenset())
     child = _submit(client, depends_on=[parent["id"]]).json()
 
     # Without the post-commit sweep this child would be QUEUED forever.
@@ -138,6 +138,6 @@ def test_any_exit_child_of_failed_parent_not_cancelled(client, monkeypatch):
     parent = _submit(client).json()
     _claim_and_complete(client, parent["id"], "failed", 1)
 
-    monkeypatch.setattr("jobd.app._FAILED_SIDE_TERMINAL", frozenset())
+    monkeypatch.setattr("jobd.broker.submit._FAILED_SIDE_TERMINAL", frozenset())
     child = _submit(client, depends_on=[parent["id"]], any_exit=True).json()
     assert _state(client, child["id"]) == "queued"

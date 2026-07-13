@@ -32,6 +32,7 @@ from jobd.broker.constants import (
     WALL_CLOCK_BACKSTOP_GRACE_SECONDS,
 )
 from jobd.broker.events import _emit_event
+from jobd.broker.joblog import job_log_path
 from jobd.broker.scheduling import (
     _build_snapshots,
     _find_nonpreemptible_blocker,
@@ -93,7 +94,7 @@ def prune_old_jobs(session_local, logs_dir: Path, now: datetime | None = None) -
     # survived (had the delete failed) would 404 a live `job output`.
     for jid in pruned_ids:
         try:
-            (logs_dir / f"{jid}.log").unlink()
+            job_log_path(logs_dir, jid).unlink()
         except FileNotFoundError:
             pass
         except OSError as e:
@@ -154,7 +155,7 @@ def prune_old_logs(session_local, logs_dir: Path, now: datetime | None = None) -
         unlinked = 0
         for jid in candidates:
             try:
-                (logs_dir / f"{jid}.log").unlink()
+                job_log_path(logs_dir, jid).unlink()
                 unlinked += 1
                 settled.append(jid)
             except FileNotFoundError:
