@@ -8,7 +8,7 @@ _serialization_warning which runs after the validation read and before insert.
 
 from fastapi.testclient import TestClient
 
-import jobd.app as app_mod
+import jobd.broker.submit as submit_mod
 from jobd.app import build_app
 from jobd.broker.state import _cascade_on_parent_terminal
 from jobd.db import Job
@@ -54,7 +54,11 @@ def test_h1_real_race(tmp_path, sample_projects_yaml, sample_profiles_yaml, samp
 
     # Inject the concurrent terminalization mid-submit: after the validation
     # loop has read parent.state (non-terminal), before the child insert.
-    orig = app_mod._serialization_warning
+    # Patch in jobd.broker.submit, NOT jobd.app: that is the module whose globals
+    # submit_job resolves _serialization_warning from. Patching jobd.app here would
+    # be a SILENT NO-OP — the race would never be injected, this test would pass, and
+    # it would be proving nothing. See jobd/broker/submit.py's docstring.
+    orig = submit_mod._serialization_warning
     fired = {"done": False}
 
     def race_hook(*a, **kw):
@@ -71,14 +75,14 @@ def test_h1_real_race(tmp_path, sample_projects_yaml, sample_profiles_yaml, samp
                 s2.commit()
         return orig(*a, **kw)
 
-    app_mod._serialization_warning = race_hook
+    submit_mod._serialization_warning = race_hook
     try:
         child = client.post(
             "/submit",
             json={"cmd": ["true"], "cwd": "/tmp", "project": "project-a", "depends_on": [pid]},
         ).json()
     finally:
-        app_mod._serialization_warning = orig
+        submit_mod._serialization_warning = orig
 
     assert client.get(f"/jobs/{pid}").json()["state"] == "failed"
     child_state = client.get(f"/jobs/{child['id']}").json()["state"]
