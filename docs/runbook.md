@@ -65,21 +65,78 @@ preserved, and `running` jobs survive because their workers keep streaming and
 post `/complete` to the broker once it's back. Schema migrations are
 additive-only and run automatically at startup (`migrate()` in `src/jobd/db.py`).
 
+**You normally don't.** A `jobd-deploy.timer` on the broker host checks every 5
+minutes for a newly published release and deploys it — pinning the exact version,
+restarting, and verifying the broker comes back reporting that version, rolling back
+to the previous pin if it doesn't. See "Continuous deployment" below.
+
+To deploy right now, or to deploy a specific version (which is also how you roll
+back):
+
 ```bash
-# Docker — --build is REQUIRED, see below
-git pull && docker compose up -d --build
-# systemd
-systemctl --user restart jobd-broker
+sudo jobd-deploy            # newest published release
+sudo jobd-deploy 0.5.16     # an exact version — this is the rollback path
+DRY_RUN=1 sudo jobd-deploy  # say what it would do, change nothing
+job ping                    # confirm the version that is actually serving
+```
+
+By hand, without the script:
+
+```bash
+# Pin the version you want in .env, then pull and restart.
+sed -i 's/^JOBD_TAG=.*/JOBD_TAG=0.5.17/' .env
+docker compose pull && docker compose up -d
 job ping        # confirm the new version is serving — do not skip this
 ```
 
-**Why `--build`, and why not `pull`.** `docker-compose.yml` builds the broker from
-source (`build: .`) and tags it `jobd:latest` — there is no registry behind that
-tag. So `docker compose pull` is a **no-op**, and a bare `docker compose up -d`
-finds a `jobd:latest` image already present and reuses it: you restart the *old*
-code after a `git pull` and nothing tells you. `job ping` reports the broker's
-version — if it doesn't match the checkout you just deployed, this is why.
-(A rebuild when nothing changed is nearly free; the layer cache handles it.)
+**Why there is no `--build` any more.** There used to be, and it was load-bearing:
+compose built the broker from source (`build: .`) and tagged it `jobd:latest` with
+**no registry behind that tag**, so `docker compose pull` was a silent no-op and a
+bare `up -d` found a `jobd:latest` already present and reused it — restarting the
+*old* code after a `git pull`, with nothing to tell you. Remembering `--build`
+forever was a guard against the footgun rather than removal of it.
+
+Compose now pulls a **version-pinned image from GHCR** (`JOBD_TAG` in `.env`). That
+deletes the class: `pull` means something, the running version is knowable and
+pinned, and rollback is possible at all. `tests/test_deploy_lint.py` fails if a
+`build:` stanza reappears in `docker-compose.yml`.
+
+Building from source (a fork, or a local change) is still supported, deliberately:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+## Continuous deployment
+
+Tagging `vX.Y.Z` publishes to PyPI, cuts a GitHub release, and pushes
+`ghcr.io/musharna/jobd:X.Y.Z`. The broker host then picks it up on its own.
+
+It is **pull-based**: gt76 has no public ingress, so a push-based CD would mean
+storing a tailnet auth key and an SSH key in GitHub and letting CI reach into the
+homelab. Nothing in this path needs a secret, and nothing outside the network can
+trigger a deploy.
+
+```bash
+# One-time install on the broker host:
+sudo cp scripts/deploy-broker.sh /usr/local/bin/jobd-deploy && sudo chmod +x /usr/local/bin/jobd-deploy
+sudo cp scripts/jobd-deploy.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now jobd-deploy.timer
+
+systemctl list-timers jobd-deploy.timer     # when it next fires
+journalctl -u jobd-deploy.service -n 50     # what it did last time
+```
+
+The deploy **verifies itself**: after restarting, it asks the broker its version and
+only declares success if the broker reports the version that was deployed. If it
+doesn't within 90s, the previous pin is restored. It also writes
+`jobd_deploy_last_run_success` / `jobd_deploy_running_version_info` as node-exporter
+textfile metrics, so a failed deploy is visible in Prometheus rather than only in a
+journal nobody reads.
+
+One-time GHCR note: the package must be **public** for the host to pull it without
+credentials (Packages → jobd → Package settings → Change visibility). The repo is
+already public; this just keeps the deploy path credential-free.
 
 **Broker crash-loops on `attempt to write a readonly database`?** The image runs as a
 non-root user (uid 10001); a bind-mounted `data/`/`logs/` owned by a different host uid

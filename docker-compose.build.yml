@@ -1,0 +1,16 @@
+# Build the broker image from source instead of pulling it from GHCR.
+#
+# The base docker-compose.yml deliberately has no `build:` stanza — production pulls a
+# version-pinned image from a registry, which is what makes `docker compose pull` mean
+# something and makes rollback possible. This overlay is for the cases where you DO
+# want a local build: hacking on the broker, or running a fork that does not publish
+# to ghcr.io/musharna/jobd.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# `--build` is required here, and ONLY here: this tag is local, so nothing else would
+# ever refresh it. That is precisely the hazard the base file no longer has.
+services:
+  jobd:
+    build: .
+    image: jobd:local

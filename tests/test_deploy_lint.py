@@ -143,6 +143,48 @@ def test_jobd_host_binds_to_safe_interface():
     )
 
 
+def test_compose_pulls_a_registry_image_and_does_not_build():
+    """Production compose must pull a registry-backed image, never build in place.
+
+    `build: .` + `image: jobd:latest` with no registry behind the tag is what made
+    `docker compose pull` a silent no-op and let a bare `up -d` after a `git pull`
+    re-run the OLD image while reporting success. The mitigation was to remember
+    `--build` forever — a guard against a footgun rather than removal of it. A
+    registry-backed image deletes the class: `pull` now means something, the running
+    version is pinned and knowable, and rollback is possible at all.
+
+    Local builds still work, via docker-compose.build.yml — which is where `build:`
+    belongs, because that tag is local and nothing else would refresh it.
+    """
+    cfg = yaml.safe_load(_COMPOSE.read_text())
+    svc = cfg["services"]["jobd"]
+
+    assert "build" not in svc, (
+        "docker-compose.yml has a `build:` stanza again. That reintroduces the "
+        "stale-image footgun: nothing backs a locally-built tag, so `pull` is a no-op "
+        "and `up -d` silently reuses the old image. Put local builds in "
+        "docker-compose.build.yml instead."
+    )
+    image = svc.get("image", "")
+    assert image.startswith("ghcr.io/"), (
+        f"jobd image {image!r} is not a registry reference. Production must pull a "
+        "published, version-pinned image so the deploy is verifiable and reversible."
+    )
+    assert "JOBD_TAG" in image, (
+        f"jobd image {image!r} does not interpolate JOBD_TAG. Production must pin an "
+        "exact version — a moving tag cannot be rolled back to and cannot tell you "
+        "what is running."
+    )
+
+
+def test_build_overlay_exists_for_local_builds():
+    """The `build:` we removed from production must still be available deliberately."""
+    overlay = _REPO_ROOT / "docker-compose.build.yml"
+    assert overlay.exists(), "docker-compose.build.yml is missing; local builds broke"
+    cfg = yaml.safe_load(overlay.read_text())
+    assert "build" in cfg["services"]["jobd"]
+
+
 def _healthcheck_instruction() -> str:
     """Return the full HEALTHCHECK instruction, following backslash continuations.
 
