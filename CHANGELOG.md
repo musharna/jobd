@@ -20,7 +20,7 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ### Notes
 
-- The GHCR package must be **public** for the host to pull without credentials — a one-time visibility change in the GitHub UI. The repo is already public; this keeps the deploy path credential-free.
+- The GHCR package publishes **public**, so the broker host pulls it with no credentials at all — verified: the host has no `~/.docker/config.json` and ghcr.io issues an anonymous pull token for the image. Nothing in the deploy path holds a secret.
 
 ## [0.5.17] — 2026-07-13
 
