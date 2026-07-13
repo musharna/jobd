@@ -223,6 +223,47 @@ def test_dispatch_skip_emits_again_on_reason_change(client, logs_dir):
     assert all(r["job_id"] == info["id"] for r in rows)
 
 
+def test_dispatch_skip_does_not_restorm_when_workers_alternate(client, logs_dir):
+    """THE regression guard for the dispatch_skip event storm.
+
+    `explain_skip` computes the reason against a specific worker, so one queued job
+    legitimately has DIFFERENT reasons on different hosts. The dedup state used to be
+    keyed by job_id alone, so each worker's answer overwrote the previous one and the
+    "has the reason changed?" test was true on every single poll — the event fired
+    every time any worker polled. In production two permanently-unplaceable jobs
+    emitted 3,908 of 5,340 dispatch_skip events in one sample (~54k over 7 days), each
+    an append to events.jsonl.
+
+    Alternating polls from two workers must emit exactly TWO events — one per (job,
+    worker) — no matter how many times they poll. Against the old job-id-only key this
+    test sees six.
+    """
+    info = _submit_gpu_job(client)
+    laptop = _heartbeat_payload(host="laptop", gpu=False)  # -> no_gpu
+    desktop = _heartbeat_payload(  # -> vram (has a GPU, but not enough free)
+        host="desktop", gpu=True, free_vram_gb=2, unregistered_vram_gb=0
+    )
+    client.post("/heartbeat", json=laptop)
+    client.post("/heartbeat", json=desktop)
+
+    for _ in range(3):
+        for payload in (laptop, desktop):
+            r = client.post("/next-job", json=payload)
+            assert r.status_code == 200 and r.json() is None
+
+    rows = _all_events(logs_dir, "dispatch_skip")
+    assert len(rows) == 2, (
+        f"expected exactly 2 dispatch_skip events (one per worker), got {len(rows)}. "
+        "More than that means the dedup key is not worker-scoped and every poll "
+        "re-emits — the event storm."
+    )
+    assert {(r["payload"]["worker"], r["payload"]["reason"]) for r in rows} == {
+        ("laptop", "no_gpu"),
+        ("desktop", "vram"),
+    }
+    assert all(r["job_id"] == info["id"] for r in rows)
+
+
 def test_dispatch_skip_state_gc_drops_jobs_no_longer_queued(client):
     """skip_state GC: when a skipped job leaves the queue (cancel/complete),
     its dedup entry is removed so the dict can't grow without bound."""
@@ -232,7 +273,8 @@ def test_dispatch_skip_state_gc_drops_jobs_no_longer_queued(client):
     assert r1.status_code == 200 and r1.json() is None
 
     skip_state = client.app.state.shared["dispatch_skip_state"]
-    assert skip_state.get(info["id"]) == "no_gpu"
+    # Keyed by (job_id, worker_host) — the reason is per-worker, so the key must be.
+    assert skip_state.get((info["id"], "laptop")) == "no_gpu"
 
     cancel = client.post(f"/jobs/{info['id']}/cancel")
     assert cancel.status_code == 200, cancel.text
@@ -241,6 +283,31 @@ def test_dispatch_skip_state_gc_drops_jobs_no_longer_queued(client):
     # longer in the queued set.
     r2 = client.post("/next-job", json=_heartbeat_payload(gpu=False))
     assert r2.status_code == 200 and r2.json() is None
-    assert info["id"] not in skip_state, (
+    assert (info["id"], "laptop") not in skip_state, (
         f"GC should drop dedup entry for cancelled job; got {skip_state}"
     )
+
+
+def test_dispatch_skip_gc_does_not_evict_other_workers_entries(client, logs_dir):
+    """GC must be scoped to the polling worker's own keys.
+
+    The queued list is filtered per-worker (mount_roots, exclusion set) before the GC
+    runs, so a job merely invisible to THIS worker is still queued for others. Evicting
+    their entries would make them re-emit on their next poll — a second, subtler source
+    of the same storm.
+    """
+    info = _submit_gpu_job(client)
+    laptop = _heartbeat_payload(host="laptop", gpu=False)
+    desktop = _heartbeat_payload(host="desktop", gpu=True, free_vram_gb=2, unregistered_vram_gb=0)
+    client.post("/heartbeat", json=laptop)
+    client.post("/heartbeat", json=desktop)
+
+    client.post("/next-job", json=laptop)
+    client.post("/next-job", json=desktop)
+
+    skip_state = client.app.state.shared["dispatch_skip_state"]
+    assert (info["id"], "laptop") in skip_state
+    assert (info["id"], "desktop") in skip_state, (
+        "desktop's dedup entry was evicted by laptop's GC pass — it will re-emit"
+    )
+    assert len(_all_events(logs_dir, "dispatch_skip")) == 2
