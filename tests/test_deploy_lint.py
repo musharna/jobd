@@ -166,9 +166,16 @@ def test_compose_pulls_a_registry_image_and_does_not_build():
         "docker-compose.build.yml instead."
     )
     image = svc.get("image", "")
-    assert image.startswith("ghcr.io/"), (
-        f"jobd image {image!r} is not a registry reference. Production must pull a "
-        "published, version-pinned image so the deploy is verifiable and reversible."
+    # Compare the repository component exactly rather than prefix-matching the string.
+    # A `startswith("ghcr.io/")` check is both weaker (it would accept any registry
+    # whose name merely begins that way) and flagged by CodeQL as incomplete URL
+    # sanitization. Split off the tag first: the tag is `${JOBD_TAG:-latest}`, which
+    # itself contains a colon, so only the FIRST colon separates repo from tag.
+    repository = image.split(":", 1)[0]
+    assert repository == "ghcr.io/musharna/jobd", (
+        f"jobd image {image!r} does not come from the published registry. Production "
+        "must pull a published, version-pinned image so the deploy is verifiable and "
+        "reversible."
     )
     assert "JOBD_TAG" in image, (
         f"jobd image {image!r} does not interpolate JOBD_TAG. Production must pin an "
