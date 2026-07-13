@@ -4,6 +4,24 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.18] — 2026-07-13
+
+### Added
+
+- **The broker image is now published to GHCR** (`ghcr.io/musharna/jobd:X.Y.Z`) on every `vX.Y.Z` tag, and `docker-compose.yml` pulls a **version-pinned** image instead of building in place.
+
+  This removes the `--build` footgun rather than guarding against it. Compose used to have `build: .` + `image: jobd:latest` with **no registry behind that tag**, which meant `docker compose pull` was a silent no-op and a bare `docker compose up -d` after a `git pull` found a `jobd:latest` already present and reused it — restarting the *old* code, with nothing to say so. The mitigation was to remember `--build` forever. Now `pull` means something, the running version is knowable and pinned, and **rollback is possible at all** (you cannot roll back to a moving tag). Building from source is still supported, deliberately, via `docker-compose.build.yml`.
+
+- **Pull-based continuous deployment** (`scripts/deploy-broker.sh` + `jobd-deploy.timer`). A timer on the broker host checks every 5 minutes for a newly published release and deploys it. Pull-based on purpose: the broker host has no public ingress, so push-based CD would mean storing a tailnet auth key and an SSH key in GitHub and letting CI reach into the network. **No secrets in GitHub, no inbound access**, and the check is nearly free when there is nothing to do.
+
+  The deploy **verifies itself**, and each property is a bug this project has actually shipped: it pins an exact version rather than following `latest`; it confirms success by asking the *broker* its version rather than treating a clean `docker compose up` as proof the new code is serving; and it health-gates on `/health` rather than a socket connect. If the broker does not report the deployed version within 90s, **the previous pin is restored automatically**. Deploy success and the running version are exported as node-exporter textfile metrics, so a failed deploy is visible in Prometheus instead of only in a journal nobody reads. `DRY_RUN=1` reports what it would do and changes nothing.
+
+  Rollback is now `sudo jobd-deploy 0.5.17`.
+
+### Notes
+
+- The GHCR package must be **public** for the host to pull without credentials — a one-time visibility change in the GitHub UI. The repo is already public; this keeps the deploy path credential-free.
+
 ## [0.5.17] — 2026-07-13
 
 ### Fixed
