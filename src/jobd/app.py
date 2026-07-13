@@ -23,13 +23,12 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm.exc import ObjectDeletedError
 from sse_starlette.sse import EventSourceResponse
 
 from jobd import __version__
 from jobd import events as _events
-from jobd.arrays import index_subs, render_cmd, render_env, sweep_member_subs
 from jobd.auth import install_tailnet_acl, require_token
+from jobd.broker.admission import refuse_admission as refuse_admission_service
 
 # Broker internals split into jobd.broker.* (see that package's docstring). They
 # are re-imported here so the endpoint closures in build_app() — and the tests
@@ -37,7 +36,6 @@ from jobd.auth import install_tailnet_acl, require_token
 # namespace exactly as when they were defined inline.
 from jobd.broker.constants import (
     _AUTO_PREEMPT_WARNING_PREFIX,
-    _FAILED_SIDE_TERMINAL,
     _LONGPOLL_RECHECK_S,
     AUTO_PREEMPT_MIN_RUNTIME_SECONDS,  # noqa: F401  # re-exported: tests read jobd.app.AUTO_PREEMPT_MIN_RUNTIME_SECONDS
     LIST_LIMIT_MAX,
@@ -49,13 +47,13 @@ from jobd.broker.constants import (
 from jobd.broker.context import BrokerState
 from jobd.broker.events import _emit_event, _parse_since
 from jobd.broker.jobinfo import _build_eta_ctx, _to_info
+from jobd.broker.joblog import job_log_path
 from jobd.broker.projects import (
     _persist_projects,
     _projects_to_jsonable,
 )
 from jobd.broker.scheduling import (
     _build_snapshots,
-    _serialization_warning,
 )
 from jobd.broker.state import (
     _cas_state,
@@ -63,11 +61,10 @@ from jobd.broker.state import (
     _deps_satisfied_bulk,
     _emit_cascade_cancellations,
     _excluded_workers,
-    _honor_pending_cancel,
     _reconcile_worker_in_flight,
     _reject_stale_worker,
-    _requeue_or_honor_cancel,
 )
+from jobd.broker.submit import submit_job
 from jobd.broker.sweeper import prune_old_jobs, sweep_once
 from jobd.config import (
     ProjectEntry,
@@ -80,10 +77,7 @@ from jobd.config import (
 from jobd.db import Job, Worker, init_db, migrate
 from jobd.matcher import (
     WorkerSnapshot,
-    cwd_routability,
     eligible_workers,
-    gpu_contention_warning,
-    submit_preflight,
 )
 from jobd.metrics import build_metrics_app
 from jobd.models import (
@@ -332,299 +326,21 @@ def build_app(
     # Both paths are JSON-serializable; FastAPI dispatches per-response.
     @app.post("/submit", response_model=None)
     def submit(req: JobSubmit):
-        profile_spec = None
-        if req.profile:
-            profile_spec = resolve_profile(state["profiles"], req.profile)
-            if profile_spec is None:
-                raise HTTPException(status_code=404, detail=f"unknown profile: {req.profile}")
-
-        # Shared precedence cascade (CLI > project_default > profile > global,
-        # docs/projects-yaml.md §3) resolved once in jobd.config so /submit and
-        # /resolve can't drift. /submit reads only `.value`; /resolve surfaces
-        # the (value, source) verbatim.
-        eff = resolve_effective_config(req, state["projects"], profile_spec)
-        priority = eff.priority.value
-        host_pin = eff.host_pin.value
-        preemptible = eff.preemptible.value
-        max_wall_s = eff.max_wall_s.value
-        idle_timeout_s = eff.idle_timeout_s.value
-        checkpoint_grace_s = eff.checkpoint_grace_s.value
-        unknown_project_warning = eff.unknown_project_warning
-        requires = eff.requires.value
-        requires_json = requires.model_dump_json() if requires is not None else "{}"
-
-        # vram_gb/ram_gb/cpus/fast_path are submit-only (no source label, single
-        # consumer, absent from ResolvedConfig): explicit CLI `vram_gb > 0` wins,
-        # else the profile spec, else the matcher-friendly floor. See
-        # JobSubmit.vram_gb docstring + matcher's `effective_vram_request_gb`.
-        vram_gb = req.vram_gb if req.vram_gb > 0 else (profile_spec.vram_gb if profile_spec else 0)
-        ram_gb = profile_spec.ram_gb if profile_spec else 0
-        cpus = profile_spec.cpus if profile_spec else 1
-        if req.fast_path is not None:
-            fast_path = req.fast_path
-        else:
-            fast_path = profile_spec.fast_path if profile_spec else False
-
-        # cwd sanity: Windows-mount paths only exist on the laptop (WSL). If
-        # someone submits --cwd /mnt/c/... without pinning the laptop, the
-        # worker will fail cd and every process will rc=127. Root cause of the
-        # 2026-04-22 project-b storm.
-        if req.cwd.startswith("/mnt/c/") and host_pin not in ("laptop", "MSI", "any-laptop"):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"cwd {req.cwd!r} is under /mnt/c/ (Windows mount, laptop-only) "
-                    f"but host_pin={host_pin!r}. Pass --host laptop, or stage data "
-                    f"under a cross-host path like /tmp or a project-scoped dir."
-                ),
-            )
-
-        with SessionLocal() as session:
-            for dep_id in req.depends_on:
-                parent = session.get(Job, dep_id)
-                if parent is None:
-                    raise HTTPException(
-                        status_code=400, detail=f"depends_on refers to missing job: {dep_id}"
-                    )
-                # A default-policy (non-any-exit) child needs the parent to
-                # reach COMPLETED. If the parent is ALREADY in a failed-side
-                # terminal, it never will — and no future transition fires the
-                # cascade to cancel this child, so it would strand in QUEUED
-                # forever. Reject at submit instead. (any-exit children are fine:
-                # any terminal parent satisfies their dep.)
-                if not req.depends_on_any_exit and parent.state in _FAILED_SIDE_TERMINAL:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"depends_on parent {dep_id} is already {parent.state} "
-                            "(a failed-side terminal); a default-policy dependent would "
-                            "never dispatch. Resubmit the parent, or pass "
-                            "depends_on_any_exit to proceed on any terminal state."
-                        ),
-                    )
-            now = datetime.now(UTC)
-            # Warnings are routing-derived (requires / host_pin / live capacity),
-            # so a job array's members share one warning string — the per-member
-            # `{i}` substitution only changes the command, not where it routes.
-            online = list(
-                session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
-            )
-            snapshots = _build_snapshots(online)
-            all_workers = list(session.execute(select(Worker)).scalars().all())
-            all_snapshots = _build_snapshots(all_workers)
-            ser_warn = _serialization_warning(requires, host_pin, snapshots, session)
-            gpu_warn = gpu_contention_warning(requires, host_pin, snapshots)
-            preflight_warn = submit_preflight(requires, host_pin, all_snapshots)
-            cwd_route = cwd_routability(req.cwd, host_pin, all_snapshots)
-            cwd_route_warn: str | None = None
-            if cwd_route is not None:
-                is_hard, cwd_msg = cwd_route
-                if is_hard:
-                    raise HTTPException(status_code=400, detail=cwd_msg)
-                cwd_route_warn = cwd_msg
-            warnings = [
-                w
-                for w in (
-                    unknown_project_warning,
-                    preflight_warn,
-                    cwd_route_warn,
-                    ser_warn,
-                    gpu_warn,
-                )
-                if w is not None
-            ]
-            warning_text = "; ".join(warnings) if warnings else None
-
-            # Resolve the per-member substitutions up front so dry-run reports
-            # the same member count the live submit would create. Three forms,
-            # mutually exclusive (sweep+count rejected at the model):
-            #   sweep   → cartesian product of named axes, each carrying {i}
-            #   count>1 → bare {i} = 0..count-1
-            #   neither → a single ordinary job (NULL array columns)
-            if req.sweep:
-                member_subs = sweep_member_subs([(ax.key, ax.values) for ax in req.sweep])
-            elif req.count > 1:
-                member_subs = [index_subs(i) for i in range(req.count)]
-            else:
-                member_subs = None
-            is_array = member_subs is not None
-            subs_list = member_subs if member_subs is not None else [{}]
-            member_count = len(subs_list)
-
-            # Dry-run bail-out:
-            # full validation + routing-decision has run above (profile lookup,
-            # project defaults, cwd sanity, depends_on existence, preflight,
-            # gpu_contention). Return the would-be plan WITHOUT inserting any
-            # Job row or emitting `job_submitted`. One plan covers every array
-            # member (routing ignores the per-member substitution); array_count
-            # tells the caller how many members the live submit would create.
-            if req.dry_run:
-                eligible = eligible_workers(requires, host_pin, snapshots)
-                # would_route_to: hostnames the matcher would currently
-                # consider (capability + host_pin match, ignores load). Empty
-                # list = unmatcheable right now (preflight_warn explains why).
-                would_route_to = [w.host for w in eligible]
-                # would_use_worker: pre-load tie-break is matcher-internal; at
-                # preview time we surface "any of these candidates" rather
-                # than promising a specific host. None when no candidates.
-                would_use_worker = eligible[0].host if len(eligible) == 1 else None
-                return {
-                    "state": "dry-run",
-                    "would_route_to": would_route_to,
-                    "would_use_worker": would_use_worker,
-                    "array_count": member_count,
-                    "validation": {
-                        "effective_priority": priority,
-                        "effective_host_pin": host_pin,
-                        "effective_preemptible": preemptible,
-                        "effective_vram_gb": vram_gb,
-                        "effective_ram_gb": ram_gb,
-                        "effective_cpus": cpus,
-                        "effective_max_wall_s": max_wall_s,
-                        "effective_idle_timeout_s": idle_timeout_s,
-                        "effective_checkpoint_grace_s": checkpoint_grace_s,
-                        "effective_scheduling_timeout_s": req.scheduling_timeout_s,
-                        "effective_fast_path": fast_path,
-                        "effective_requires": (
-                            requires.model_dump() if requires is not None else None
-                        ),
-                        "warnings": warnings,
-                    },
-                }
-
-            # Fan out into members using the substitutions resolved above. A
-            # non-array submit (member_subs is None) is one ordinary job with
-            # NULL array columns and an unchanged single-JobInfo response.
-            members: list[Job] = []
-            for i, subs in enumerate(subs_list):
-                member_cmd = render_cmd(req.cmd, subs) if is_array else req.cmd
-                member_env = render_env(req.env, subs) if is_array else req.env
-                job = Job(
-                    project=req.project,
-                    profile=req.profile,
-                    host_pin=host_pin,
-                    priority=priority,
-                    state=JobState.QUEUED,
-                    cmd_json=json.dumps(member_cmd),
-                    cwd=req.cwd,
-                    env_json=json.dumps(member_env),
-                    preemptible=preemptible,
-                    vram_gb=vram_gb,
-                    ram_gb=ram_gb,
-                    cpus=cpus,
-                    session_id=req.session_id,
-                    submitted_at=now,
-                    requires_json=requires_json,
-                    depends_on_json=json.dumps(req.depends_on),
-                    depends_on_any_exit=req.depends_on_any_exit,
-                    fast_path=fast_path,
-                    max_wall_s=max_wall_s,
-                    idle_timeout_s=idle_timeout_s,
-                    checkpoint_grace_s=checkpoint_grace_s,
-                    scheduling_timeout_s=req.scheduling_timeout_s,
-                    submitted_via=req.submitted_via,
-                    array_index=i if is_array else None,
-                    array_size=member_count if is_array else None,
-                )
-                if warning_text:
-                    job.warning = warning_text
-                    job.warning_at = now
-                session.add(job)
-                members.append(job)
-
-            # Flush to assign ids; the array shares the first member's id so
-            # `job status A<id>` resolves without a separate id sequence.
-            session.flush()
-            member_ids = [j.id for j in members]
-            array_id = member_ids[0] if is_array else None
-            if is_array:
-                for j in members:
-                    j.array_id = array_id
-            session.commit()
-
-            # H-1 (audit 2026-07-10): close the submit depends_on TOCTOU. The
-            # failed-side reject above is a point read of parent.state; between
-            # it and this insert a parent can reach a failed-side terminal and
-            # run its cascade over the then-current QUEUED set — which did NOT
-            # yet include these just-committed children. `_deps_satisfied` needs
-            # the parent COMPLETED (never happens) and the parent is terminal so
-            # no transition re-fires the cascade → a default-policy child would
-            # strand QUEUED forever, silently. Re-run the cascade for each
-            # distinct parent now that the children are committed and visible: a
-            # no-op unless the parent is already failed-side terminal, in which
-            # case the fresh child is cancelled exactly as it would have been had
-            # it existed when the parent failed. (any-exit children are unaffected
-            # — any terminal parent satisfies their dep.)
-            toctou_sweeps: list[tuple[int, str, list[tuple[int, str]]]] = []
-            if req.depends_on and not req.depends_on_any_exit:
-                for dep_id in dict.fromkeys(req.depends_on):
-                    parent = session.get(Job, dep_id)
-                    if parent is None:
-                        continue
-                    # The failed-side reject loop above already loaded this
-                    # parent into the identity map with its pre-race state. With
-                    # expire_on_commit=False the intervening commit did NOT
-                    # refresh it, so session.get() returns the SAME cached object
-                    # and the cascade gate (state.py: `parent.state not in
-                    # _FAILED_SIDE_TERMINAL`) would read the stale non-terminal
-                    # state — making this whole sweep a no-op and reopening the
-                    # exact strand H-1 closes. Refresh from the DB so the
-                    # re-check sees a parent that reached a failed-side terminal
-                    # during the submit window (matches the session.refresh(job)
-                    # idiom every other _cascade_on_parent_terminal caller uses).
-                    try:
-                        session.refresh(parent)
-                    except ObjectDeletedError:
-                        # Parent pruned between commit and re-check; nothing to
-                        # cascade from.
-                        continue
-                    swept = _cascade_on_parent_terminal(session, parent)
-                    if swept:
-                        toctou_sweeps.append((parent.id, parent.state, swept))
-                if toctou_sweeps:
-                    session.commit()
-
-            # Emit events from captured scalars (no post-commit ORM reload per
-            # member — every member shares project/priority/host_pin/warning).
-            for jid in member_ids:
-                _emit_event(
-                    logs_dir,
-                    "job_submitted",
-                    source="broker",
-                    job_id=jid,
-                    project=req.project,
-                    priority=priority,
-                    host_pin=host_pin,
-                    preemptible=preemptible,
-                    warning=warning_text,
-                )
-                if warning_text:
-                    _emit_event(
-                        logs_dir,
-                        "submit_warning",
-                        source="broker",
-                        job_id=jid,
-                        project=req.project,
-                        warning_text=warning_text,
-                    )
-
-            # H-1: emit job_cancelled (by='cascade') for any child the TOCTOU
-            # sweep cancelled, AFTER the commit above (so a failed commit can't
-            # leave events.jsonl claiming a cancel the DB never recorded).
-            for _parent_id, _parent_state, _swept in toctou_sweeps:
-                _emit_cascade_cancellations(logs_dir, _swept, _parent_id, _parent_state)
-
-            # New queued job(s) — wake any worker long-polling /next-job.
-            _wake_dispatchers()
-            if is_array:
-                return {
-                    "array_id": array_id,
-                    "count": member_count,
-                    "job_ids": member_ids,
-                    "warnings": warnings,
-                }
-            eta_ctx = _build_eta_ctx(session)
-            return _to_info(members[0], eta_ctx)
+        # Thin adapter. The submission logic — validation, effective-config cascade,
+        # array fan-out, persistence, the H-1 TOCTOU cascade sweep, event emission —
+        # lives in jobd.broker.submit.submit_job, callable without HTTP.
+        #
+        # NOTE: the tests that guard H-1 and the depends_on TOCTOU monkeypatch
+        # `_serialization_warning` and `_FAILED_SIDE_TERMINAL` in the module where
+        # submit_job resolves them — jobd.broker.submit, NOT here. Patching them on
+        # jobd.app would now be a silent no-op. See that module's docstring.
+        return submit_job(
+            req,
+            session_factory=SessionLocal,
+            state=state,
+            logs_dir=logs_dir,
+            wake_dispatchers=_wake_dispatchers,
+        )
 
     @app.get("/jobs", response_model=list[JobInfo])
     def list_jobs(
@@ -713,7 +429,7 @@ def build_app(
             if len(received) > MAX_LOG_CHUNK_BYTES:
                 raise HTTPException(status_code=413, detail="log chunk too large")
         body = bytes(received)
-        log_file = logs_dir / f"{job_id}.log"
+        log_file = job_log_path(logs_dir, job_id)
         with log_file.open("ab") as f:
             f.write(body)
         return {"bytes": len(body)}
@@ -1056,254 +772,18 @@ def build_app(
     def refuse_admission(
         job_id: int, payload: AdmissionRefusal, x_jobd_worker: str | None = Header(default=None)
     ):
-        """Worker observed live GPU contention (free_vram < required) at the
-        moment of dispatch and refuses an already-assigned job. Broker
-        reverts state to QUEUED, clears `worker` and `started_at`, and emits
-        an `admission_blocked` event. The next /next-job poll re-routes via
-        the normal matcher — typically to a different host (the heartbeat
-        will catch up within ~5s) or back here once contention clears.
-
-        409 if the job isn't in ASSIGNED state (race with /complete or a
-        cancel signal), or if the reporting worker isn't the current owner
-        (M2: a stale worker whose reclaimed job was re-dispatched must not be
-        able to requeue/exclude the job now running on a different worker).
-        Every state write below is a compare-and-swap on `state=ASSIGNED` so a
-        refusal can't clobber a concurrent /complete that lands in the window.
-        """
-        with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            if job is None:
-                raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
-            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "admission refusal")
-            if job.state != JobState.ASSIGNED:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"job {job_id} is in state {job.state}; "
-                        "can't refuse-admission (must be 'assigned')"
-                    ),
-                )
-            prior_worker = job.worker
-
-            # A pending user cancel makes the refusal disposition moot: the
-            # user already asked to stop this job (and was told "cancelling"),
-            # and the workload never started here. Honor it now — falling
-            # through would either erase it on the requeue and re-run the job
-            # elsewhere (audit 2026-07-05 A2), or mislabel a cancelled job as
-            # failed/cwd_unreachable on the terminal branch. Signal-qualified
-            # CAS; the per-branch teardowns below re-check for a cancel that
-            # lands after this point.
-            if _honor_pending_cancel(session, job_id, (JobState.ASSIGNED,), now=datetime.now(UTC)):
-                session.refresh(job)  # sync ORM state so the cascade fires
-                cascaded = _cascade_on_parent_terminal(session, job)
-                session.commit()
-                _emit_event(
-                    logs_dir,
-                    "job_cancelled",
-                    source="broker",
-                    job_id=job_id,
-                    project=job.project,
-                    prior_state=JobState.ASSIGNED.value,
-                    by="user",
-                    via="refuse_admission",
-                )
-                _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.CANCELLED.value)
-                if cascaded:
-                    _wake_dispatchers()
-                session.refresh(job)
-                return _to_info(job)
-
-            if payload.reason == "cwd_missing":
-                # The worker found the job's cwd absent on its host (e.g. a git
-                # worktree that lives only on another machine). Record this host in
-                # the job's exclusion set so the matcher won't re-offer it here,
-                # then re-route — or fail cwd_unreachable if no eligible worker is
-                # left that could have the path (instead of looping forever).
-                excluded = _excluded_workers(job)
-                if prior_worker and prior_worker not in excluded:
-                    excluded.append(prior_worker)
-                job.excluded_workers_json = json.dumps(excluded)
-                req: JobRequires | None = None
-                if job.requires_json and job.requires_json != "{}":
-                    try:
-                        req = JobRequires.model_validate_json(job.requires_json)
-                    except Exception:
-                        req = None
-                # Eligibility for the re-route/terminal decision uses ONLINE
-                # workers only: if the host that has the cwd is offline right now,
-                # we fail fast (cwd_unreachable) rather than park the job QUEUED
-                # waiting on a host that may never return — the user resubmits once
-                # the host is back. (A momentarily-flapping host is the cost; the
-                # alternative is the silent-queue this whole feature exists to kill.)
-                online = (
-                    session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
-                )
-                snapshots = _build_snapshots(list(online))
-                elig = [
-                    w
-                    for w in eligible_workers(req, job.host_pin, snapshots)
-                    if w.host not in excluded
-                ]
-
-                # cwd_refused is emitted AFTER the commit in each branch below,
-                # never before — a failed commit must not leave events.jsonl
-                # claiming a refusal the DB never recorded (M3: this was the only
-                # violator of the emit-after-commit invariant).
-                def _emit_cwd_refused() -> None:
-                    _emit_event(
-                        logs_dir,
-                        "cwd_refused",
-                        source="broker",
-                        job_id=job_id,
-                        project=job.project,
-                        worker=prior_worker,
-                        cwd=payload.cwd,
-                    )
-
-                if not elig:
-                    # Guarded terminal transition: if the job left ASSIGNED under
-                    # us (a concurrent /complete), don't clobber it. finished_at
-                    # is stamped like every other terminalizing write — without
-                    # it the row never ages out of retention pruning, which
-                    # filters on finished_at (audit 2026-07-05 F-3). A pending
-                    # signal is cleared for the same reason /complete clears it.
-                    if not _cas_state(
-                        session,
-                        job_id,
-                        (JobState.ASSIGNED,),
-                        state=JobState.FAILED,
-                        worker=None,
-                        finished_at=datetime.now(UTC),
-                        signal=None,
-                        termination_reason="cwd_unreachable",
-                    ):
-                        session.refresh(job)
-                        return _to_info(job)
-                    session.refresh(job)  # sync ORM state so the cascade sees FAILED
-                    # cwd_unreachable is a failed-side terminal: the job never
-                    # ran, so its default-policy dependents can't proceed and
-                    # must cascade-cancel (audit 2026-07-01 H2 — this path used
-                    # to strand them in QUEUED forever).
-                    cascaded = _cascade_on_parent_terminal(session, job)
-                    session.commit()
-                    try:
-                        with (logs_dir / f"{job_id}.log").open("a") as lf:
-                            lf.write(
-                                f"[broker] cwd {payload.cwd!r} exists on no eligible "
-                                f"worker (excluded: {excluded}); failing "
-                                f"cwd_unreachable\n"
-                            )
-                    except OSError:
-                        pass
-                    _emit_cwd_refused()
-                    _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.FAILED.value)
-                    if cascaded:
-                        _wake_dispatchers()
-                    session.refresh(job)
-                    return _to_info(job)
-                # Guarded requeue (clears a stale preempt signal, M1). If the
-                # job left ASSIGNED under us (concurrent /complete), don't
-                # clobber it. A pending user CANCEL is honored, not erased: the
-                # user was already told "cancelling", and the workload never
-                # started here — requeuing would run it elsewhere anyway
-                # (audit 2026-07-05 A2).
-                outcome = _requeue_or_honor_cancel(
-                    session,
-                    job_id,
-                    (JobState.ASSIGNED,),
-                    now=datetime.now(UTC),
-                    state=JobState.QUEUED,
-                    worker=None,
-                    started_at=None,
-                    # refuse-admission re-route: the job never ran here, so keep
-                    # its scheduling_timeout clock running (audit 2026-07-12 M-1).
-                    reset_queue_clock=False,
-                )
-                if outcome == "lost":
-                    session.refresh(job)
-                    return _to_info(job)
-                if outcome == "cancelled":
-                    session.refresh(job)  # sync ORM state so the cascade fires
-                    cascaded = _cascade_on_parent_terminal(session, job)
-                    session.commit()
-                    _emit_cwd_refused()
-                    _emit_event(
-                        logs_dir,
-                        "job_cancelled",
-                        source="broker",
-                        job_id=job_id,
-                        project=job.project,
-                        prior_state=JobState.ASSIGNED.value,
-                        by="user",
-                        via="refuse_admission",
-                    )
-                    _emit_cascade_cancellations(
-                        logs_dir, cascaded, job_id, JobState.CANCELLED.value
-                    )
-                    if cascaded:
-                        _wake_dispatchers()
-                    session.refresh(job)
-                    return _to_info(job)
-                session.commit()
-                _emit_cwd_refused()
-                # Job is back in QUEUED, excluding the refusing host — re-route it.
-                _wake_dispatchers()
-                session.refresh(job)
-                return _to_info(job)
-
-            # --- default: gpu_contention (unchanged) ---
-            # Guarded requeue — same cancel-honoring teardown as the cwd branch.
-            outcome = _requeue_or_honor_cancel(
-                session,
-                job_id,
-                (JobState.ASSIGNED,),
-                now=datetime.now(UTC),
-                state=JobState.QUEUED,
-                worker=None,
-                started_at=None,
-                # refuse-admission re-route: the job never ran here, so keep its
-                # scheduling_timeout clock running (audit 2026-07-12 M-1).
-                reset_queue_clock=False,
-            )
-            if outcome == "lost":
-                session.refresh(job)
-                return _to_info(job)
-            if outcome == "cancelled":
-                session.refresh(job)  # sync ORM state so the cascade fires
-                cascaded = _cascade_on_parent_terminal(session, job)
-                session.commit()
-                _emit_event(
-                    logs_dir,
-                    "job_cancelled",
-                    source="broker",
-                    job_id=job_id,
-                    project=job.project,
-                    prior_state=JobState.ASSIGNED.value,
-                    by="user",
-                    via="refuse_admission",
-                )
-                _emit_cascade_cancellations(logs_dir, cascaded, job_id, JobState.CANCELLED.value)
-                if cascaded:
-                    _wake_dispatchers()
-                session.refresh(job)
-                return _to_info(job)
-            session.commit()
-            _emit_event(
-                logs_dir,
-                "admission_blocked",
-                source="broker",
-                job_id=job_id,
-                project=job.project,
-                worker=prior_worker,
-                required_gb=payload.required_gb,
-                free_gb=payload.free_gb,
-                foreign_pids=list(payload.foreign_pids),
-                foreign_vram_gb=payload.foreign_vram_gb,
-            )
-            # Job is back in QUEUED — wake another worker to re-route it.
-            _wake_dispatchers()
-            session.refresh(job)
-            return _to_info(job)
+        # Thin adapter. The admission decision tree — stale-worker rejection, the
+        # ASSIGNED guard, pending-cancel honouring, and the requeue / terminal-fail /
+        # cwd-exclusion / auto-preempt branches, each with its own CAS + refresh +
+        # cascade + event teardown — lives in jobd.broker.admission.refuse_admission.
+        return refuse_admission_service(
+            job_id,
+            payload,
+            x_jobd_worker,
+            session_factory=SessionLocal,
+            logs_dir=logs_dir,
+            wake_dispatchers=_wake_dispatchers,
+        )
 
     @app.get("/jobs/{job_id}/output")
     def get_output(job_id: int, tail: int = 8192):
@@ -1325,7 +805,7 @@ def build_app(
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
             log_pruned_at = job.log_pruned_at
-        log_file = logs_dir / f"{job_id}.log"
+        log_file = job_log_path(logs_dir, job_id)
         if not log_file.exists():
             return {
                 "tail": "",
@@ -1357,7 +837,7 @@ def build_app(
         # a traversal sequence to reach the filename and clears CodeQL's
         # py/path-injection sink on the reads below (a bare int-typed param is
         # still modeled as a tainted string by that query).
-        log_file = logs_dir / f"{int(job_id)}.log"
+        log_file = job_log_path(logs_dir, job_id)
 
         async def event_generator():
             position = 0
