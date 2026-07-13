@@ -4,6 +4,30 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.16] — 2026-07-13
+
+### Fixed
+
+- **The MCP surface silently dropped `scheduling_timeout_s`.** It shipped on the broker and the CLI; jobs submitted through MCP could not be given a scheduling deadline, and nothing said so. The guard built to catch exactly this — a test named "round trips every JobSubmit field" — *could not fire*: it compared a hand-written passthrough tuple in `translate.py` against a hand-written expected set in the test, so both halves had to be remembered when `JobSubmit` grew a field, and neither was. The test only ever checked the fields someone had already remembered.
+
+  The fix inverts the direction. The MCP submit surface is now **deny-listed, not allow-listed**: `_SUBMIT_PASSTHROUGH` is *derived* from `JobSubmit.model_fields` minus a documented `_SUBMIT_SYNTHESIZED` list, each entry carrying the reason it is synthesized rather than forwarded. A new broker field is now either forwarded automatically or it must be named with a justification — **forgetting is what fails**. Forwarding `scheduling_timeout_s` and collapsing `arch`/`os` into `requires` both fall out of that change rather than needing their own patches.
+- **The systemd unit deployed stale code on boot.** `docker-compose.yml` pairs `build: .` with `image: jobd:latest` and there is no registry behind that tag, so `docker compose pull` is a no-op and `up -d` after a `git pull` re-runs the *old* image. `ExecStart` now passes `--build`; the runbook says why, and names the tell (a `job ping` version that disagrees with the checked-out tag).
+
+### Added
+
+- **Workers report their version in the heartbeat.** The fleet is upgraded host-by-host over SSH, so it routinely runs mixed versions — and the broker had no way to know: a worker three releases stale was indistinguishable from a current one. `Worker.version` (additive migration) now surfaces on `/workers` and as `jobd_worker_version_info{host,version}`. Paired with the existing `jobd_build_info`, drift becomes *alertable*, not merely visible:
+
+  ```promql
+  count(jobd_worker_version_info unless on(version) jobd_build_info) > 0   # a worker is adrift
+  count(count by (version)(jobd_worker_version_info)) > 1                  # fleet is not uniform
+  ```
+
+  A worker too old to report reads as `null` / `version="unknown"` rather than inheriting the broker's version or vanishing from the series — the absence is itself the answer, and a missing series would shrink the drift count instead of raising it. The version is also **not** pinned to its last-known value on downgrade: a registry that makes the fleet look newer than it is would be worse than not knowing.
+
+### Removed
+
+- **`jobd_job_get` (MCP tool) and `client.job_get()`.** `jobd_job_get` was byte-identical to `jobd_status`'s no-wait path — both `GET /jobs/{id}` — while its description advertised fields it implied `jobd_status` lacked. It spent 1/9 of the MCP tool budget actively misdirecting tool selection. `jobd_status`'s description now states the scheduling internals it has always returned. Use `jobd_status` / `status()`.
+
 ## [0.5.15] — 2026-07-12
 
 ### Added
