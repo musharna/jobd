@@ -9,6 +9,7 @@ so this module isn't fully web-framework-free.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -37,19 +38,70 @@ def _deps_satisfied(job: Job, session) -> bool:
         the child will be cascade-cancelled elsewhere — return False here so the
         matcher doesn't dispatch it while the cascade is still pending.
       - depends_on_any_exit=True: any terminal state unblocks.
+
+    Single-job convenience wrapper over `_deps_satisfied_bulk`, which is the one
+    implementation of this policy. Keeping two copies of the terminal-state rules in
+    sync by hand is exactly the drift the 2026-07-12 audit kept finding, so there is
+    only one.
     """
-    deps = json.loads(job.depends_on_json or "[]")
-    if not deps:
-        return True
-    terminal = _DEPENDS_TERMINAL_ANY if job.depends_on_any_exit else _DEPENDS_TERMINAL
-    for dep_id in deps:
-        parent = session.get(Job, dep_id)
-        if parent is None:
-            # Pruned parent — treat as satisfied (generous default).
+    return job.id in _deps_satisfied_bulk([job], session)
+
+
+def _deps_satisfied_bulk(jobs: Sequence[Job], session) -> set[int]:
+    """Batched `_deps_satisfied`: return the ids of `jobs` whose deps are satisfied.
+
+    Same policy as `_deps_satisfied` — this exists purely to collapse its N+1 read
+    pattern. The dispatch path calls it once per queued job, per claim attempt, per
+    parked worker, and every parked worker re-attempts on each wake and again every
+    _LONGPOLL_RECHECK_S seconds, so a per-parent point-read multiplies fast.
+
+    Reads every distinct parent's state in ONE query, then decides in memory.
+
+    Freshness note (this is load-bearing — see the H-1 regression, v0.5.13): the
+    parent states come from a direct `SELECT id, state`, which returns row tuples
+    and therefore bypasses the identity map entirely. `session.get()` does not: with
+    `expire_on_commit=False` it can hand back a cached ORM object carrying a
+    pre-commit state, which is precisely how the original H-1 cascade fix became a
+    silent no-op. So this is not merely as fresh as the loop it replaces, it is
+    strictly fresher. Do NOT "optimize" it by caching the result across attempts —
+    the freshness is the point, not the query count.
+    """
+    if not jobs:
+        return set()
+
+    deps_by_job: dict[int, list[int]] = {}
+    parent_ids: set[int] = set()
+    for job in jobs:
+        deps = json.loads(job.depends_on_json or "[]")
+        deps_by_job[job.id] = deps
+        parent_ids.update(deps)
+
+    parent_state: dict[int, str] = {}
+    if parent_ids:
+        parent_state = {
+            pid: pstate
+            for pid, pstate in session.execute(
+                select(Job.id, Job.state).where(Job.id.in_(parent_ids))
+            ).all()
+        }
+
+    satisfied: set[int] = set()
+    for job in jobs:
+        deps = deps_by_job[job.id]
+        if not deps:
+            satisfied.add(job.id)
             continue
-        if parent.state not in terminal:
-            return False
-    return True
+        terminal = _DEPENDS_TERMINAL_ANY if job.depends_on_any_exit else _DEPENDS_TERMINAL
+        for dep_id in deps:
+            if dep_id not in parent_state:
+                # Pruned parent — treat as satisfied (generous default), matching
+                # `_deps_satisfied`'s `parent is None` branch.
+                continue
+            if parent_state[dep_id] not in terminal:
+                break
+        else:
+            satisfied.add(job.id)
+    return satisfied
 
 
 def _cas_state(session, job_id: int, expected: tuple[JobState, ...], **values) -> int:

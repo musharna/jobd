@@ -200,6 +200,11 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
     # once after the single commit below.
     orphan_records: list[tuple[int, str, str | None, datetime | None, str]] = []
     cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
+    # Requeues (RUNNING/ASSIGNED -> QUEUED) are the one state change that makes a job
+    # newly dispatchable, and they were the only outcome the sweep did NOT record.
+    # Tracked so the dispatcher wake below can fire only on a sweep that changed
+    # something, instead of broadcasting on every pass.
+    requeued_ids: list[int] = []
     # (job_id, project, prior_state) — reclaim found a pending user cancel and
     # honored it instead of requeuing (A2).
     cancelled_records: list[tuple[int, str, str]] = []
@@ -374,6 +379,8 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                     if cascaded:
                         cascade_records.append((j.id, j.state, cascaded))
                     cancelled_records.append((j.id, j.project, JobState.ASSIGNED.value))
+                elif outcome == "requeued":
+                    requeued_ids.append(j.id)
 
         # Pre-launch CRIT-2: reclaim RUNNING jobs whose worker has died.
         # A worker crash mid-run otherwise strands the job in RUNNING
@@ -462,6 +469,8 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                     if cascaded:
                         cascade_records.append((j.id, j.state, cascaded))
                     cancelled_records.append((j.id, j.project, JobState.RUNNING.value))
+                elif outcome == "requeued":
+                    requeued_ids.append(j.id)
             else:
                 if not _cas_state(
                     session,
@@ -481,7 +490,21 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
         session.commit()
         # Reclaims/requeues and orphan cascades above may have made jobs
         # dispatchable — wake any long-polling workers.
-        wake_dispatchers()
+        #
+        # Only when something ACTUALLY changed, though. This used to fire on every
+        # pass, i.e. unconditionally every SWEEP_INTERVAL_SECONDS, which broadcast a
+        # wake to every parked /next-job long-poll; each then ran a full claim attempt
+        # (queue scan + dependency reads + fit walk) and all but at most one returned
+        # None. The overwhelmingly common sweep is a no-op, and a sweep that changed
+        # no state cannot have made anything newly dispatchable, so there is nothing
+        # to wake for.
+        #
+        # Safe by construction: a missed wake is not a stall. Parked workers re-attempt
+        # every _LONGPOLL_RECHECK_S (10s) regardless of wakes, precisely as a backstop
+        # for any wake site that doesn't fire — so the worst case if this predicate is
+        # ever too narrow is up to 10s of extra queue latency, never a stuck job.
+        if requeued_ids or cancelled_records or orphan_records or cascade_records:
+            wake_dispatchers()
         for jid, proj, wkr, last_hb, reason in orphan_records:
             _emit_event(
                 logs_dir,

@@ -25,4 +25,14 @@ class BrokerState(TypedDict):
     classifier: list[ClassifierRule]
     paths: dict[str, Path]
     logs_dir: Path
-    dispatch_skip_state: dict[int, str]
+    # Dedup key for dispatch_skip events: (job_id, worker_host) -> last reason.
+    #
+    # It MUST be keyed by worker as well as job. `explain_skip` returns a reason
+    # computed against a specific worker, so the same queued job legitimately
+    # yields different reasons on different hosts (job 2902: "host_pin" on gt76,
+    # "tags" on desktop). Keying by job_id alone made those two answers overwrite
+    # each other on every poll, so the "has the reason changed?" guard was true
+    # every time and the event fired on every poll from every worker: two
+    # permanently-unplaceable jobs emitted 3,908 of 5,340 dispatch_skip events in
+    # one sample, ~54k over 7 days, each one a line appended to events.jsonl.
+    dispatch_skip_state: dict[tuple[int, str], str]

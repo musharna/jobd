@@ -60,7 +60,7 @@ from jobd.broker.scheduling import (
 from jobd.broker.state import (
     _cas_state,
     _cascade_on_parent_terminal,
-    _deps_satisfied,
+    _deps_satisfied_bulk,
     _emit_cascade_cancellations,
     _excluded_workers,
     _honor_pending_cancel,
@@ -1563,10 +1563,25 @@ def build_app(
             """One claim attempt against the live queue. Returns the claimed job
             or None (no match OR lost race — both mean 'nothing for you now')."""
             with SessionLocal() as session:
+                # Order in SQL rather than sorting in Python. `pick_next_job` applies
+                # the same (priority desc, submitted_at asc) order itself, so this is
+                # not a behavior change — it just lets the index do the work, and it
+                # makes the scan order deterministic for the fits-on-worker walk.
                 all_queued = (
-                    session.execute(select(Job).where(Job.state == JobState.QUEUED)).scalars().all()
+                    session.execute(
+                        select(Job)
+                        .where(Job.state == JobState.QUEUED)
+                        .order_by(Job.priority.desc(), Job.submitted_at.asc())
+                    )
+                    .scalars()
+                    .all()
                 )
-                queued: list[Job] = [j for j in all_queued if _deps_satisfied(j, session)]
+                # One SELECT for every parent of every queued job, instead of a
+                # point-read per parent per job (N+1) on every attempt by every
+                # parked worker. See _deps_satisfied_bulk on why this is *fresher*
+                # than the loop it replaces, not just cheaper.
+                satisfied_ids = _deps_satisfied_bulk(all_queued, session)
+                queued: list[Job] = [j for j in all_queued if j.id in satisfied_ids]
                 worker_row = session.execute(
                     select(Worker).where(Worker.host == q.host)
                 ).scalar_one_or_none()
@@ -1610,11 +1625,18 @@ def build_app(
                     from jobd.matcher import explain_skip
 
                     skips = explain_skip(queued, w)
-                    skip_state: dict[int, str] = state["dispatch_skip_state"]
+                    skip_state: dict[tuple[int, str], str] = state["dispatch_skip_state"]
                     queued_by_id = {j.id: j for j in queued}
                     for job_id, reason in skips:
-                        if skip_state.get(job_id) != reason:
-                            skip_state[job_id] = reason
+                        # Key on (job, worker), not job alone. The reason is
+                        # computed against THIS worker, so the same job yields
+                        # different reasons on different hosts — keyed by job_id
+                        # only, each worker's answer overwrote the last, the
+                        # "changed?" guard was true on every poll, and the event
+                        # fired every time (see BrokerState.dispatch_skip_state).
+                        key = (job_id, q.host)
+                        if skip_state.get(key) != reason:
+                            skip_state[key] = reason
                             _emit_event(
                                 logs_dir,
                                 "dispatch_skip",
@@ -1624,12 +1646,18 @@ def build_app(
                                 worker=q.host,
                                 reason=reason,
                             )
-                    # Drop dedup entries for jobs no longer in the queue (so a
-                    # job that ran or was cancelled doesn't leak memory, and a
-                    # resubmit gets a fresh slot). pop, not del: concurrent
-                    # /next-job attempts share this dict, and another thread can
-                    # remove the same key between our list-build and here.
-                    for stale in [k for k in skip_state if k not in queued_by_id]:
+                    # Drop dedup entries for jobs this worker can no longer see,
+                    # so a job that ran or was cancelled doesn't leak memory and a
+                    # resubmit gets a fresh slot. Scoped to THIS worker's keys:
+                    # `queued` has already been filtered by mount_roots and this
+                    # host's exclusion set, so a job that is merely invisible *here*
+                    # is still queued elsewhere, and evicting other hosts' entries
+                    # for it would make them re-emit on their next poll.
+                    # pop, not del: concurrent /next-job attempts share this dict
+                    # and another thread can remove the same key underneath us.
+                    for stale in [
+                        k for k in skip_state if k[1] == q.host and k[0] not in queued_by_id
+                    ]:
                         skip_state.pop(stale, None)
                     return None
                 # Atomic claim: only one worker can transition queued -> assigned
