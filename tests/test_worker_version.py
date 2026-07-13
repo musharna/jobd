@@ -30,6 +30,10 @@ def client(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifi
     return TestClient(app)
 
 
+# Deliberately synthetic version strings: these are heartbeat *payload* values,
+# not the package version. A real release number here would be picked up by the
+# "grep the repo for the old version" sweep every release cut runs, and read as
+# something that needs bumping.
 def _heartbeat(client, host: str, **overrides):
     body = {
         "host": host,
@@ -50,8 +54,8 @@ def _worker(client, host: str) -> dict:
 
 
 def test_heartbeat_version_surfaces_on_workers(client):
-    _heartbeat(client, "gt76", version="0.5.15")
-    assert _worker(client, "gt76")["version"] == "0.5.15"
+    _heartbeat(client, "gt76", version="1.2.3")
+    assert _worker(client, "gt76")["version"] == "1.2.3"
 
 
 def test_worker_without_version_reads_as_none_not_a_lie(client):
@@ -65,8 +69,8 @@ def test_version_is_not_pinned_to_last_known_value(client):
     """A downgrade (or a worker reverting to a build that doesn't report) must
     not leave the last-known version stuck in the registry — that would make the
     fleet look newer than it is, which is worse than not knowing."""
-    _heartbeat(client, "gt76", version="0.5.15")
-    assert _worker(client, "gt76")["version"] == "0.5.15"
+    _heartbeat(client, "gt76", version="1.2.3")
+    assert _worker(client, "gt76")["version"] == "1.2.3"
     _heartbeat(client, "gt76")  # older build, reports nothing
     assert _worker(client, "gt76")["version"] is None
 
@@ -83,13 +87,13 @@ def test_metrics_expose_worker_version_series(client):
     """Drift has to be ALERTABLE, not merely visible: pair
     jobd_worker_version_info with jobd_build_info and Prometheus can answer both
     "is any worker adrift from the broker?" and "is the fleet uniform?"."""
-    _heartbeat(client, "gt76", version="0.5.15")
-    _heartbeat(client, "msi-4080", version="0.5.14")
+    _heartbeat(client, "gt76", version="1.2.3")
+    _heartbeat(client, "msi-4080", version="1.2.2")
     _heartbeat(client, "ancient")
 
     body = client.get("/metrics").text
-    assert 'jobd_worker_version_info{host="gt76",version="0.5.15"} 1.0' in body
-    assert 'jobd_worker_version_info{host="msi-4080",version="0.5.14"} 1.0' in body
+    assert 'jobd_worker_version_info{host="gt76",version="1.2.3"} 1.0' in body
+    assert 'jobd_worker_version_info{host="msi-4080",version="1.2.2"} 1.0' in body
     # a non-reporting worker is labelled, not omitted — a missing series would
     # silently shrink the drift count instead of flagging it
     assert 'jobd_worker_version_info{host="ancient",version="unknown"} 1.0' in body

@@ -77,7 +77,7 @@ def test_collector_caches_db_query_within_ttl():
     class _Collector(_JobdCollector):
         def _query_counts(self):
             calls["n"] += 1
-            return {"queued": 1}, {"online": 1}, [("gt76", "0.5.16")]
+            return {"queued": 1}, {"online": 1}, [("gt76", "1.2.3")]
 
     c = _Collector(session_local=None, cache_ttl_s=60.0)
     list(c.collect())
