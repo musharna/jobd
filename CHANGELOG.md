@@ -4,6 +4,18 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.19] — 2026-07-13
+
+### Changed
+
+- **Services, not routes.** The two fat route closures are now callable services: `jobd.broker.submit.submit_job` (~295 lines — validation, the effective-config cascade, array fan-out, persistence, the H-1 TOCTOU cascade sweep, event emission) and `jobd.broker.admission.refuse_admission` (~250 lines — the admission decision tree: stale-worker rejection, the ASSIGNED guard, pending-cancel honouring, and the requeue / terminal-fail / cwd-exclusion / auto-preempt branches). The routes are thin adapters. **`app.py`: 1,873 → 1,351 lines (−28%).** No behavior change.
+
+  Worth recording *how* this was verified, because a passing suite could not have shown it. The tests guarding the two worst bugs this project has shipped work by monkeypatching module-level names **through the module that reads them** (`_serialization_warning`, `_FAILED_SIDE_TERMINAL`). Moving `submit` out of `jobd.app` breaks those patches — and the failure mode is not a red suite, it is **both tests continuing to pass while testing nothing**. That is exactly what the 2026-07-12 audit found: an H-1 fix that was a silent no-op in production while its test stayed green (0.5.13). So the refactor was gated on mutation instead: re-inject each historical bug and require the named test to *fail*, both before the move (proving the guards were alive) and after (proving they still are). `tests/unit/test_submit_service_guards.py` makes that permanent — the patch targets must demonstrably intercept, and `jobd.app` must not re-expose the stale names, since a direct assignment there would silently create an attribute nothing reads.
+
+### Fixed
+
+- **One safe way to build a job log path** (`py/path-injection`, high). Four places were composing `logs_dir / f"{job_id}.log"` by hand and had already drifted — two raw interpolations, one ad-hoc `int()` cast added to quiet this very warning, and a differently-named variable in the sweeper. The traversal was not reachable (FastAPI types `job_id` as `int`, so `../` is rejected with a 422 several frames earlier), but that made the safety a property of an annotation in another module and invisible at the filesystem call. `job_log_path()` is now the only way to name a job's log file, and coercion inside it makes the guarantee local and total.
+
 ## [0.5.18] — 2026-07-13
 
 ### Added
