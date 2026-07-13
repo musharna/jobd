@@ -1,0 +1,80 @@
+name: Publish image for an existing tag
+
+# Build and push ghcr.io/musharna/jobd:<version> for a tag that ALREADY exists.
+#
+# release.yml publishes the image as part of cutting a new release, which covers the
+# normal path. This exists for the case it cannot cover: a version that was released
+# BEFORE the image publishing existed, and therefore has no image in the registry.
+#
+# That gap is not academic. Container image publishing landed in v0.5.18, so at that
+# moment the registry held exactly one image — and a deploy you cannot roll back off is
+# not much of a deploy. Backfilling the preceding releases gives `jobd-deploy <older>`
+# something to actually roll back TO.
+#
+# Also useful if an image ever needs rebuilding (a base-image CVE, say) without cutting
+# a new version.
+#
+#   gh workflow run publish-image.yml -f tag=v0.5.17
+#
+# It refuses to run against a tag that does not exist, so a typo cannot publish an
+# image built from whatever HEAD happens to be.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to build from (e.g. v0.5.17)"
+        required: true
+        type: string
+
+jobs:
+  publish:
+    name: Build and push image for ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify the tag exists and we are actually on it
+        run: |
+          # checkout would happily resolve a branch or a SHA; this job must only ever
+          # build from a real release tag, or the image contents would not match the
+          # version string baked into its name.
+          if ! git rev-parse -q --verify "refs/tags/${{ inputs.tag }}" >/dev/null; then
+            echo "::error::${{ inputs.tag }} is not a tag in this repository"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "$VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::tag ${TAG} does not match pyproject version ${PYPROJECT_VERSION}"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_ENV"
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          # Only the exact version. Never `latest` — a backfill of an OLD release must
+          # not move the tag that newer things may follow.
+          tags: ghcr.io/${{ github.repository }}:${{ env.version }}
+          provenance: false
