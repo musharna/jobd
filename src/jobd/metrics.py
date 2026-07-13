@@ -72,10 +72,10 @@ class _JobdCollector:
             cache_ttl_s = float(os.environ.get("JOBD_METRICS_CACHE_TTL_S", _DEFAULT_CACHE_TTL_S))
         self._cache_ttl_s = cache_ttl_s
         self._lock = threading.Lock()
-        self._cache: tuple[dict[str, int], dict[str, int]] | None = None
+        self._cache: tuple[dict[str, int], dict[str, int], list[tuple[str, str]]] | None = None
         self._cached_at = 0.0
 
-    def _query_counts(self) -> tuple[dict[str, int], dict[str, int]]:
+    def _query_counts(self) -> tuple[dict[str, int], dict[str, int], list[tuple[str, str]]]:
         with self._session_local() as session:
             job_counts: dict[str, int] = dict(
                 session.execute(select(Job.state, func.count()).group_by(Job.state)).all()
@@ -83,9 +83,15 @@ class _JobdCollector:
             worker_counts: dict[str, int] = dict(
                 session.execute(select(Worker.state, func.count()).group_by(Worker.state)).all()
             )
-        return job_counts, worker_counts
+            worker_versions: list[tuple[str, str]] = [
+                (host, version or "unknown")
+                for host, version in session.execute(
+                    select(Worker.host, Worker.version).order_by(Worker.host)
+                ).all()
+            ]
+        return job_counts, worker_counts, worker_versions
 
-    def _counts(self) -> tuple[dict[str, int], dict[str, int]]:
+    def _counts(self) -> tuple[dict[str, int], dict[str, int], list[tuple[str, str]]]:
         """Return (job_counts, worker_counts), served from a TTL cache. The query
         runs under the lock so a scrape burst that all misses the cache issues a
         single DB round-trip (dogpile-proof), not one per concurrent request. A
@@ -100,7 +106,7 @@ class _JobdCollector:
             return self._cache
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
-        job_counts, worker_counts = self._counts()
+        job_counts, worker_counts, worker_versions = self._counts()
 
         jobs = GaugeMetricFamily(
             "jobd_jobs",
@@ -127,6 +133,26 @@ class _JobdCollector:
         )
         info.add_metric([__version__], 1.0)
         yield info
+
+        # Improvement audit 2026-07-12: workers are upgraded host-by-host over
+        # SSH, so the fleet routinely runs mixed versions and nothing could see
+        # it. Paired with jobd_build_info above, this makes both questions
+        # alertable:
+        #   any worker adrift from the broker —
+        #     count(jobd_worker_version_info
+        #           unless on(version) jobd_build_info) > 0
+        #   fleet not internally uniform —
+        #     count(count by (version) (jobd_worker_version_info)) > 1
+        # A worker too old to report its version lands under version="unknown",
+        # which is the honest answer rather than a missing series.
+        worker_info = GaugeMetricFamily(
+            "jobd_worker_version_info",
+            "Registered worker build info; the series value is always 1.",
+            labels=["host", "version"],
+        )
+        for host, version in worker_versions:
+            worker_info.add_metric([host, version], 1.0)
+        yield worker_info
 
 
 def build_metrics_app(session_local: sessionmaker):

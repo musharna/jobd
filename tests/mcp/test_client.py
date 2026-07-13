@@ -162,7 +162,9 @@ def test_workers_returns_worker_list():
 
 
 @respx.mock
-def test_job_get_returns_full_job_info():
+def test_status_returns_full_job_info():
+    """status() is the ONLY spelling of GET /jobs/{id}. The former `job_get()`
+    alias returned the identical payload and is gone (audit 2026-07-12)."""
     respx.get("http://broker.test/jobs/42").mock(
         return_value=httpx.Response(
             200,
@@ -170,9 +172,10 @@ def test_job_get_returns_full_job_info():
         )
     )
     c = JobdClient(base_url="http://broker.test")
-    info = c.job_get(42)
+    info = c.status(42)
     assert info["job_id"] == 42
     assert "fast_path" in info
+    assert not hasattr(c, "job_get")
 
 
 def test_client_context_manager_closes_underlying_httpx():

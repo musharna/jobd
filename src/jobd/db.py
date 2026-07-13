@@ -145,6 +145,9 @@ class Worker(Base):
     # Issue #7: latest reported {job_id: [pids]} inventory for this worker.
     # Refreshed every heartbeat; consumed by /gpu-holders attribution.
     in_flight_pids_json: Mapped[str] = mapped_column(Text, default="{}")
+    # The worker's self-reported jobd version (improvement audit 2026-07-12).
+    # NULL for a worker old enough not to send it — which is itself the signal.
+    version: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
 
 class BypassLog(Base):
@@ -196,6 +199,7 @@ _WORKER_ADDS = [
     ("max_concurrent", "INTEGER DEFAULT 1"),
     ("running", "INTEGER DEFAULT 0"),
     ("in_flight_pids_json", "TEXT DEFAULT '{}'"),
+    ("version", "VARCHAR(30)"),
 ]
 
 

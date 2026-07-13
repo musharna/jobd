@@ -8,7 +8,7 @@ green from masking schema drift again.
 
 The test does NOT require the broker to actually run the job to terminal —
 the desktop worker is shared and may be bottlenecked. It asserts schema
-shape on submit/status/list/workers/job_get plus a successful cancel.
+shape on submit/status/list/workers plus a successful cancel.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import pytest
 from jobd.client import JobdClient
 from jobd.mcp.tools import (
     jobd_cancel,
-    jobd_job_get,
     jobd_list,
     jobd_status,
     jobd_submit,
@@ -115,8 +114,10 @@ def test_live_submit_status_list_jobget_cancel_full_round_trip():
             "started_at",
         }
 
-        # Job get — exercises xlate_job_info on /jobs/<id> (broker's full info).
-        jg = jobd_job_get(client, {"job_id": job_id})
+        # Full record — exercises xlate_job_info on /jobs/<id> (the broker's
+        # full info, incl. scheduling internals). jobd_status is the only tool
+        # that reads it; the duplicate jobd_job_get was removed 2026-07-12.
+        jg = jobd_status(client, {"job_id": job_id})
         assert jg["job_id"] == job_id
         assert jg["cmd"] == ["bash", "-c", "true"]
         assert jg["cwd"] == "/tmp"
