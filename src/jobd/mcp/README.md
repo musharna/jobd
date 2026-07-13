@@ -19,7 +19,7 @@ In `~/.claude.json` `mcpServers`:
 }
 ```
 
-## Tools (9)
+## Tools (8)
 
 | Tool                 | Purpose                                                                               |
 | -------------------- | ------------------------------------------------------------------------------------- |
@@ -29,8 +29,7 @@ In `~/.claude.json` `mcpServers`:
 | `jobd_cancel`        | Queued → cancelled; running → SIGTERM via worker signal poll (~2 s).                  |
 | `jobd_preempt`       | Preempt a running/assigned job: SIGTERM with checkpoint grace, terminal `preempted`.  |
 | `jobd_list`          | Queue + recent jobs with counts.                                                      |
-| `jobd_workers`       | Fleet snapshot + health rollup.                                                       |
-| `jobd_job_get`       | Full JobInfo for one job (deps, profile, fast_path).                                  |
+| `jobd_workers`       | Fleet snapshot + health rollup (incl. each worker's jobd `version`).                  |
 | `jobd_worker_delete` | Purge a stale worker registration by host.                                            |
 
 ## Errors
@@ -41,7 +40,7 @@ In `~/.claude.json` `mcpServers`:
 ## Tests
 
 - Unit: `pytest tests/mcp/`
-- Live walkthrough: see `tests/walkthrough.md`. Run before tagging a release.
+- Live walkthrough: see `tests/mcp/walkthrough.md`. Run before tagging a release.
 
 ## Observability
 

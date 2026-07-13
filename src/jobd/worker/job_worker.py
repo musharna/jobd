@@ -27,6 +27,7 @@ from pathlib import Path
 import httpx
 import psutil
 
+from jobd import __version__ as _jobd_version
 from jobd import cgroup_walk as _cgroup_walk
 from jobd import subreaper as _subreaper
 
@@ -682,6 +683,7 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
         "running": _running_count(),
         "in_flight_job_ids": _in_flight_ids(),
         "in_flight_pids": _in_flight_pid_map(),
+        "version": _jobd_version,
     }
 
 
@@ -701,6 +703,7 @@ def pick_resource_snapshot_mock():
         "mount_roots": [],
         "max_concurrent": 1,
         "running": 0,
+        "version": _jobd_version,
     }
 
 

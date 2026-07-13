@@ -189,60 +189,138 @@ def test_xlate_submit_passes_through_submitted_via():
     assert body["submitted_via"] == "mcp"
 
 
-def test_xlate_submit_round_trips_every_jobsubmit_field():
-    """#51 round-trip: every first-class JobSubmit field that has an MCP-side
-    representation must survive xlate_submit_payload. Guards against the
-    silent-drop class that kept session_id (and now submitted_via) invisible.
+# A valid MCP-flat value for every JobSubmit field the MCP surface forwards.
+# Keyed by the BROKER field name (which is also the MCP name for passthrough
+# fields). Kept beside the tests, not inline, so the "did you cover the new
+# field?" assertion below has something concrete to check against.
+_MCP_SAMPLE: dict[str, object] = {
+    "profile": "default",
+    "env": {"K": "v"},
+    "preemptible": True,
+    "session_id": "sess-1",
+    "submitted_via": "mcp",
+    "depends_on": [1, 2],
+    "depends_on_any_exit": True,
+    "vram_gb": 4.0,
+    "max_wall_s": 60,
+    "idle_timeout_s": 30,
+    "scheduling_timeout_s": 900,
+    "checkpoint_grace_s": 10,
+    "count": 1,
+    "sweep": [],
+    "dry_run": False,
+}
 
-    Fields excluded from the MCP shape by design:
-      cmd       — synthesized from `command` (bash -c)
-      host_pin  — renamed from MCP `host`
-      priority_delta — renamed from MCP `priority`
-      requires  — collapsed from gpu/needs/idempotent
-      fast_path — internal scheduler hint, not MCP-exposed
+
+def test_submit_field_taxonomy_is_exhaustive():
+    """Every JobSubmit field is EITHER deny-listed with a reason OR forwarded.
+
+    This is the guard the old hand-written `expected_subset` could never be.
+    Adding a field to JobSubmit without deciding what the MCP surface does with
+    it now fails here — where the previous test passed happily, because it only
+    checked the fields someone had already remembered to list. That is exactly
+    how `scheduling_timeout_s` stayed un-forwarded for releases while a test
+    named "round trips every JobSubmit field" stayed green (audit 2026-07-12).
     """
+    from jobd.mcp.translate import _SUBMIT_PASSTHROUGH, _SUBMIT_SYNTHESIZED
     from jobd.models import JobSubmit
 
-    mcp_input = {
+    classified = set(_SUBMIT_SYNTHESIZED) | set(_SUBMIT_PASSTHROUGH)
+    unclassified = set(JobSubmit.model_fields) - classified
+    assert not unclassified, (
+        f"new JobSubmit field(s) {sorted(unclassified)} are neither forwarded nor "
+        f"deny-listed in translate._SUBMIT_SYNTHESIZED — decide which, with a reason"
+    )
+    # The deny-list may not name fields that no longer exist: a rename would
+    # otherwise silently resurrect the very drop it was written to prevent.
+    stale = set(_SUBMIT_SYNTHESIZED) - set(JobSubmit.model_fields)
+    assert not stale, f"deny-list names non-existent JobSubmit field(s): {sorted(stale)}"
+
+
+def test_xlate_submit_round_trips_every_forwarded_jobsubmit_field():
+    """#51 round-trip, now derived from the model: every forwarded JobSubmit
+    field must survive xlate_submit_payload with its value intact, and the
+    result must validate as a real JobSubmit."""
+    from jobd.mcp.translate import _SUBMIT_PASSTHROUGH
+    from jobd.models import JobSubmit
+
+    uncovered = set(_SUBMIT_PASSTHROUGH) - set(_MCP_SAMPLE)
+    assert not uncovered, (
+        f"forwarded field(s) {sorted(uncovered)} have no sample value — add one to "
+        f"_MCP_SAMPLE so this test actually exercises the round-trip"
+    )
+
+    mcp_input: dict[str, object] = {
         "command": "echo hi",
         "project": "p",
         "cwd": "/x",
+        # inputs for the deny-listed (synthesized/renamed/collapsed) fields
         "host": "desktop",
         "gpu": True,
         "needs": ["cuda-8gb"],
+        "idempotent": True,
+        "arch": "x86_64",
+        "os": "linux",
         "priority": 5,
-        "profile": "default",
-        "env": {"K": "v"},
-        "preemptible": True,
-        "session_id": "sess-1",
-        "submitted_via": "mcp",
-        "depends_on": [1, 2],
-        "depends_on_any_exit": True,
-        "max_wall_s": 60,
-        "idle_timeout_s": 30,
-        "checkpoint_grace_s": 10,
-        "vram_gb": 4.0,
+        **_MCP_SAMPLE,
     }
     body = xlate_submit_payload(mcp_input)
     JobSubmit.model_validate(body)  # broker must accept it as-is
-    expected_subset = {
-        "cmd",
-        "cwd",
-        "project",
-        "host_pin",
-        "priority_delta",
-        "profile",
-        "env",
-        "preemptible",
-        "session_id",
-        "submitted_via",
-        "depends_on",
-        "depends_on_any_exit",
-        "max_wall_s",
-        "idle_timeout_s",
-        "checkpoint_grace_s",
-        "vram_gb",
-        "requires",
+
+    missing = set(_SUBMIT_PASSTHROUGH) - set(body)
+    assert not missing, f"translate dropped: {sorted(missing)}"
+    for field in _SUBMIT_PASSTHROUGH:
+        assert body[field] == _MCP_SAMPLE[field], f"{field} mangled in transit"
+
+    assert body["cmd"] == ["bash", "-c", "echo hi"]
+    assert body["host_pin"] == "desktop"
+    assert body["priority_delta"] == 5
+    assert body["requires"] == {
+        "gpu": True,
+        "needs": ["cuda-8gb"],
+        "idempotent": True,
+        "arch": "x86_64",
+        "os": "linux",
     }
-    missing = expected_subset - set(body)
-    assert not missing, f"translate dropped: {missing}"
+
+
+def test_xlate_submit_forwards_scheduling_timeout_s():
+    """The specific field the old allow-list dropped. The broker has had
+    scheduling_timeout_s since the 2026-05-18 runtime-zombies audit and the CLI
+    exposes it; the MCP surface silently discarded it, so an agent could not put
+    a stuck-queue guard on a job it submitted."""
+    body = xlate_submit_payload(
+        {"command": "x", "project": "p", "cwd": "/x", "scheduling_timeout_s": 300}
+    )
+    assert body["scheduling_timeout_s"] == 300
+
+
+def test_xlate_submit_collapses_arch_and_os_into_requires():
+    """requires.arch / requires.os are real matcher inputs (worker capability
+    tags) that the MCP surface previously stranded."""
+    body = xlate_submit_payload(
+        {"command": "x", "project": "p", "cwd": "/x", "arch": "aarch64", "os": "darwin"}
+    )
+    assert body["requires"] == {"arch": "aarch64", "os": "darwin"}
+
+
+def test_every_forwarded_field_is_documented_to_the_model():
+    """A field the MCP schema never mentions is, to an LLM, a field that does
+    not exist — forwarding it in code is necessary but not sufficient. Assert
+    every forwarded field is named somewhere in SUBMIT_INPUT (as a first-class
+    property or in the `extra` escape-hatch description)."""
+    import json
+
+    from jobd.mcp.schemas import SUBMIT_INPUT
+    from jobd.mcp.translate import _SUBMIT_PASSTHROUGH
+
+    # Set by tools._build_submit_payload, not by the caller — deliberately not
+    # advertised, so the model can't spoof the submission-origin marker.
+    auto_set = {"submitted_via"}
+
+    schema_text = json.dumps(SUBMIT_INPUT)
+    undocumented = [f for f in _SUBMIT_PASSTHROUGH if f not in auto_set and f not in schema_text]
+    assert not undocumented, (
+        f"forwarded but undocumented in SUBMIT_INPUT: {sorted(undocumented)} — the model "
+        f"cannot use a field it is never told about"
+    )

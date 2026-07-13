@@ -19,7 +19,6 @@ from jobd.mcp import tools as t
 from jobd.mcp.errors import map_broker_refusal
 from jobd.mcp.schemas import (
     CANCEL_INPUT,
-    JOB_ID_ONLY,
     LIST_INPUT,
     LOGS_INPUT,
     PREEMPT_INPUT,
@@ -38,7 +37,7 @@ _TOOLS = [
     ),
     (
         "jobd_status",
-        "Get JobInfo for a job_id. Pass wait=true to block until terminal or wait_timeout_s.",
+        "The full JobInfo record for one job_id: state, exit_code, timings, host, and the scheduling internals — depends_on + cascade policy (depends_on_any_exit), pending cancel/preempt signal, resolved profile, requires (gpu/tags/idempotent), host pin, fast_path, timeouts, termination_reason. Use for a quick state check AND for debugging why a job routed/failed/stalled. Pass wait=true to block until terminal or wait_timeout_s.",
         STATUS_INPUT,
         t.jobd_status,
     ),
@@ -62,7 +61,7 @@ _TOOLS = [
     ),
     (
         "jobd_list",
-        "List jobs on the broker with per-state counts. Defaults to the active set (queued/assigned/running); filter by state (e.g. ['failed']) or project to find past runs. Each row is a compact summary: job_id, project, state, host, exit_code, queued_at, started_at — call jobd_job_get for a job's full record. Use to answer 'what is running / queued right now?' or to locate a job id you've lost.",
+        "List jobs on the broker with per-state counts. Defaults to the active set (queued/assigned/running); filter by state (e.g. ['failed']) or project to find past runs. Each row is a compact summary: job_id, project, state, host, exit_code, queued_at, started_at — call jobd_status for a job's full record. Use to answer 'what is running / queued right now?' or to locate a job id you've lost.",
         LIST_INPUT,
         t.jobd_list,
     ),
@@ -72,12 +71,14 @@ _TOOLS = [
         WORKERS_INPUT,
         t.jobd_workers,
     ),
-    (
-        "jobd_job_get",
-        "Full JobInfo record for one job_id — everything jobd_status returns plus scheduling internals: depends_on + cascade policy (depends_on_any_exit), pending cancel/preempt signal, resolved profile, requires (gpu/tags/idempotent), host pin, fast_path, timeouts, and termination_reason. Use when debugging WHY a job routed/failed/stalled; prefer jobd_status for a quick state check.",
-        JOB_ID_ONLY,
-        t.jobd_job_get,
-    ),
+    # NOTE: there is deliberately no `jobd_job_get`. It existed until 2026-07-12
+    # and was a byte-identical duplicate of jobd_status — both called
+    # GET /jobs/{id} and returned the same translated dict — while its
+    # description told the model it returned "everything jobd_status returns
+    # PLUS scheduling internals". That was false: jobd_status already returns
+    # the full JobInfo. Two names for one operation, one of them lying about the
+    # difference, cost a ninth of the tool budget and actively misdirected tool
+    # selection. jobd_status's description now carries the accurate half.
     (
         "jobd_worker_delete",
         "Remove a worker from the broker registry. The broker refuses (409) if the worker is still online — caller stops the worker process or waits for the heartbeat sweeper first.",
@@ -124,7 +125,7 @@ Status / monitoring (use when user asks about prior jobs):
 
 Job control (use when user wants to cancel, preempt, or inspect a specific job):
 - "cancel job N", "preempt job M", "show full info for job N"
-- Tools: jobd_cancel, jobd_preempt, jobd_job_get
+- Tools: jobd_cancel, jobd_preempt, jobd_status
 
 NOT FOR:
 - Quick (<30s) commands that block the session naturally — just use Bash
