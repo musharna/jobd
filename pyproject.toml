@@ -1,6 +1,6 @@
 [project]
 name = "jobd"
-version = "0.5.16"
+version = "0.5.17"
 description = "Self-hostable GPU-aware job broker for your own machines, with native MCP/agent integration"
 readme = "README.md"
 license = { text = "MIT" }
