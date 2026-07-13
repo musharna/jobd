@@ -47,6 +47,7 @@ from jobd.broker.constants import (
 from jobd.broker.context import BrokerState
 from jobd.broker.events import _emit_event, _parse_since
 from jobd.broker.jobinfo import _build_eta_ctx, _to_info
+from jobd.broker.joblog import job_log_path
 from jobd.broker.projects import (
     _persist_projects,
     _projects_to_jsonable,
@@ -428,7 +429,7 @@ def build_app(
             if len(received) > MAX_LOG_CHUNK_BYTES:
                 raise HTTPException(status_code=413, detail="log chunk too large")
         body = bytes(received)
-        log_file = logs_dir / f"{job_id}.log"
+        log_file = job_log_path(logs_dir, job_id)
         with log_file.open("ab") as f:
             f.write(body)
         return {"bytes": len(body)}
@@ -804,7 +805,7 @@ def build_app(
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
             log_pruned_at = job.log_pruned_at
-        log_file = logs_dir / f"{job_id}.log"
+        log_file = job_log_path(logs_dir, job_id)
         if not log_file.exists():
             return {
                 "tail": "",
@@ -836,7 +837,7 @@ def build_app(
         # a traversal sequence to reach the filename and clears CodeQL's
         # py/path-injection sink on the reads below (a bare int-typed param is
         # still modeled as a tainted string by that query).
-        log_file = logs_dir / f"{int(job_id)}.log"
+        log_file = job_log_path(logs_dir, job_id)
 
         async def event_generator():
             position = 0

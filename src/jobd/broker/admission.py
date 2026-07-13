@@ -33,6 +33,7 @@ from sqlalchemy import select
 
 from jobd.broker.events import _emit_event
 from jobd.broker.jobinfo import _to_info
+from jobd.broker.joblog import job_log_path
 from jobd.broker.scheduling import _build_snapshots
 from jobd.broker.state import (
     _cas_state,
@@ -184,7 +185,7 @@ def refuse_admission(
                 cascaded = _cascade_on_parent_terminal(session, job)
                 session.commit()
                 try:
-                    with (logs_dir / f"{job_id}.log").open("a") as lf:
+                    with job_log_path(logs_dir, job_id).open("a") as lf:
                         lf.write(
                             f"[broker] cwd {payload.cwd!r} exists on no eligible "
                             f"worker (excluded: {excluded}); failing "
