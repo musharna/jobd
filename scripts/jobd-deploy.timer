@@ -1,0 +1,23 @@
+# Fires the pull-based broker deploy. See jobd-deploy.service for install steps.
+#
+# Every 5 minutes, with jitter. The check is nearly free when there is nothing to do
+# (one GitHub API call and one /health call — it does not pull unless the running
+# broker is actually behind), so the interval is about how quickly a cut release
+# reaches production, not about load.
+#
+# RandomizedDelaySec staggers it off the minute boundary; without it every host with
+# this timer would hit the GitHub API in the same second.
+
+[Unit]
+Description=Check for a new jobd broker release every 5 minutes
+Documentation=https://github.com/musharna/jobd/blob/main/docs/runbook.md
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=60
+Persistent=true
+Unit=jobd-deploy.service
+
+[Install]
+WantedBy=timers.target

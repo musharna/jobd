@@ -1,0 +1,33 @@
+# Pull-based CD for the jobd broker. Paired with jobd-deploy.timer.
+#
+# Install (on the broker host):
+#   sudo cp scripts/deploy-broker.sh /usr/local/bin/jobd-deploy
+#   sudo chmod +x /usr/local/bin/jobd-deploy
+#   sudo cp scripts/jobd-deploy.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now jobd-deploy.timer
+#
+# Check on it:
+#   systemctl list-timers jobd-deploy.timer
+#   journalctl -u jobd-deploy.service -n 50
+#
+# It is idempotent and cheap: if the broker already reports the newest release, it
+# exits immediately without pulling or touching the container.
+
+[Unit]
+Description=Deploy the newest published jobd broker release (pull-based)
+Documentation=https://github.com/musharna/jobd/blob/main/docs/runbook.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/jobd-deploy
+# The deploy edits .env, runs docker compose, and writes a node-exporter textfile
+# metric, so it needs root. It never accepts input from outside the host.
+User=root
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
