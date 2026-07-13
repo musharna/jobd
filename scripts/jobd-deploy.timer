@@ -16,7 +16,9 @@ Documentation=https://github.com/musharna/jobd/blob/main/docs/runbook.md
 OnBootSec=3min
 OnUnitActiveSec=5min
 RandomizedDelaySec=60
-Persistent=true
+# No Persistent= here: it only has meaning for OnCalendar= timers (it replays a run
+# missed while the machine was off). This timer is monotonic, and OnBootSec already
+# covers the boot case, so setting it would be inert and misleading.
 Unit=jobd-deploy.service
 
 [Install]
