@@ -115,8 +115,9 @@ class JobdClient:
     def delete_worker(self, host: str) -> dict:
         return self._request("DELETE", f"/workers/{host}").json()
 
-    def job_get(self, job_id: int) -> dict:
-        return self._request("GET", f"/jobs/{job_id}").json()
+    # NOTE: no `job_get`. It was a second name for `status()` — same GET
+    # /jobs/{id}, same response — and having two spellings of one call is what
+    # let the MCP layer grow a duplicate `jobd_job_get` tool. Use status().
 
     # Low-level passthrough helpers so callers using c.get()/c.post() patterns
     # still route through _request() for error translation.

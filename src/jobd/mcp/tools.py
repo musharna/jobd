@@ -341,10 +341,6 @@ def jobd_workers(client: JobdClient, args: dict) -> dict:
     return {"workers": workers, "fleet_health": health, "warnings": warnings}
 
 
-def jobd_job_get(client: JobdClient, args: dict) -> dict:
-    return xlate_job_info(client.job_get(args["job_id"]))
-
-
 def jobd_worker_delete(client: JobdClient, args: dict) -> dict:
     """Remove a worker from the broker registry. Worker must be offline;
     the broker returns 409 if it is still online (caller stops the process

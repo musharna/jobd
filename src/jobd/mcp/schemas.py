@@ -39,20 +39,9 @@ SUBMIT_INPUT = {
         },
         "extra": {
             "type": "object",
-            "description": "Escape hatch: idempotent (bool), depends_on (int[]), depends_on_any_exit (bool), priority (int delta), max_wall_s (int), idle_timeout_s (int), checkpoint_grace_s (int 1..300), vram_gb (float — explicit GPU VRAM the job needs at dispatch; falls back to cuda-Ngb tier-tag max, then to 2 GB floor for --gpu jobs), count (int 1..1000 — submit a job array of N members, with `{i}` in the command replaced by the 0-based index; response is {array_id, count, job_ids, warnings} instead of a single job), sweep (list of {key, values[]} — parameter-sweep axes; broker fans out the cartesian product, substituting `{key}` per member plus `{i}`; mutually exclusive with count; product capped at 1000), profile (str), env (dict), preemptible (bool).",
+            "description": "Escape hatch: idempotent (bool), depends_on (int[]), depends_on_any_exit (bool), priority (int delta), max_wall_s (int), idle_timeout_s (int), scheduling_timeout_s (int 1..604800 — give up and terminate the job as 'scheduling_timeout' if it is still QUEUED after N seconds; omit to wait indefinitely for a capable worker), checkpoint_grace_s (int 1..300), vram_gb (float — explicit GPU VRAM the job needs at dispatch; falls back to cuda-Ngb tier-tag max, then to 2 GB floor for --gpu jobs), count (int 1..1000 — submit a job array of N members, with `{i}` in the command replaced by the 0-based index; response is {array_id, count, job_ids, warnings} instead of a single job), sweep (list of {key, values[]} — parameter-sweep axes; broker fans out the cartesian product, substituting `{key}` per member plus `{i}`; mutually exclusive with count; product capped at 1000), profile (str), env (dict), preemptible (bool), session_id (str), arch (str — pin to a worker CPU arch), os (str — pin to a worker OS).",
             "additionalProperties": True,
         },
-    },
-}
-
-JOB_ID_ONLY = {
-    "type": "object",
-    "required": ["job_id"],
-    "properties": {
-        "job_id": {
-            "type": "integer",
-            "description": "Numeric job id as returned by jobd_submit or shown in jobd_list.",
-        }
     },
 }
 

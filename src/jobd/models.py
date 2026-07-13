@@ -270,6 +270,10 @@ class WorkerInfo(BaseModel):
     # Slot usage for multislotting: `running` jobs out of `max_concurrent`.
     max_concurrent: int = 1
     running: int = 0
+    # The jobd version the worker process is running. None = a worker old enough
+    # not to report it (the field is additive), which is itself the answer to
+    # "is this worker stale?" — see WorkerHeartbeat.version.
+    version: str | None = None
 
     @field_serializer("last_heartbeat", when_used="always")
     def _ser_dt(self, v: datetime) -> str | None:
@@ -302,6 +306,14 @@ class WorkerHeartbeat(BaseModel):
     # top-level pid plus its live scope-cgroup pids. Feeds /gpu-holders'
     # known/job_id/worker attribution. None = old worker that doesn't report.
     in_flight_pids: dict[str, list[int]] | None = None
+    # Improvement audit 2026-07-12: the worker's own `jobd.__version__`. Workers
+    # are upgraded host-by-host over SSH, so the fleet routinely runs mixed
+    # versions — and until now the broker had no way to know: a worker running
+    # code from three releases ago was indistinguishable from a current one.
+    # None = a worker predating this field (which answers the question anyway).
+    # Surfaced on GET /workers and as jobd_worker_version_info{host,version}, so
+    # `count(count by (version) (jobd_worker_version_info)) > 1` alerts on drift.
+    version: str | None = None
 
 
 class NextJobQuery(BaseModel):

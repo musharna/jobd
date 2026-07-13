@@ -26,7 +26,7 @@ Confirm `jobd-mcp ready (JOBD_URL=...)` on stderr.
    - Then **`jobd_status(job_id)`** within ~2-3s → `state: cancelled`.
    - **Important:** the cancel target must still be running when the cancel call lands. A trivial command (`true`, `echo hi`) finishes in tens of milliseconds — by the time `jobd_cancel` arrives, prior_state is already `completed` and `signal_sent: null`. That's correct behavior (cancel-of-terminal is a no-op contract), but it doesn't exercise the cancel-while-running path. Use `sleep 30` or longer for this step.
 7. **`jobd_list`** → previous jobs visible.
-8. **`jobd_submit`** with `extra.depends_on=[<recent_completed_id>]` → child queued; **`jobd_job_get(child_id)`** shows the dep.
+8. **`jobd_submit`** with `extra.depends_on=[<recent_completed_id>]` → child queued; **`jobd_status(child_id)`** shows the dep.
 
 ## Refusal cases
 
