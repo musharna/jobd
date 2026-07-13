@@ -66,12 +66,20 @@ post `/complete` to the broker once it's back. Schema migrations are
 additive-only and run automatically at startup (`migrate()` in `src/jobd/db.py`).
 
 ```bash
-# Docker
-docker compose pull && docker compose up -d
+# Docker — --build is REQUIRED, see below
+git pull && docker compose up -d --build
 # systemd
 systemctl --user restart jobd-broker
-job ping        # confirm the new version is serving
+job ping        # confirm the new version is serving — do not skip this
 ```
+
+**Why `--build`, and why not `pull`.** `docker-compose.yml` builds the broker from
+source (`build: .`) and tags it `jobd:latest` — there is no registry behind that
+tag. So `docker compose pull` is a **no-op**, and a bare `docker compose up -d`
+finds a `jobd:latest` image already present and reuses it: you restart the *old*
+code after a `git pull` and nothing tells you. `job ping` reports the broker's
+version — if it doesn't match the checkout you just deployed, this is why.
+(A rebuild when nothing changed is nearly free; the layer cache handles it.)
 
 **Broker crash-loops on `attempt to write a readonly database`?** The image runs as a
 non-root user (uid 10001); a bind-mounted `data/`/`logs/` owned by a different host uid

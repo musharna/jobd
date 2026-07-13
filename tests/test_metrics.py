@@ -77,7 +77,7 @@ def test_collector_caches_db_query_within_ttl():
     class _Collector(_JobdCollector):
         def _query_counts(self):
             calls["n"] += 1
-            return {"queued": 1}, {"online": 1}
+            return {"queued": 1}, {"online": 1}, [("gt76", "1.2.3")]
 
     c = _Collector(session_local=None, cache_ttl_s=60.0)
     list(c.collect())
@@ -106,7 +106,7 @@ def test_collector_requeries_after_ttl_expiry(monkeypatch):
     class _Collector(_JobdCollector):
         def _query_counts(self):
             calls["n"] += 1
-            return {"queued": calls["n"]}, {}
+            return {"queued": calls["n"]}, {}, []
 
     clock = {"t": 1000.0}
     monkeypatch.setattr(metrics_mod, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
@@ -132,7 +132,7 @@ def test_collector_ttl_zero_disables_cache():
     class _Collector(_JobdCollector):
         def _query_counts(self):
             calls["n"] += 1
-            return {}, {}
+            return {}, {}, []
 
     c = _Collector(session_local=None, cache_ttl_s=0.0)
     list(c.collect())

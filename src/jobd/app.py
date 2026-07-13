@@ -1445,6 +1445,10 @@ def build_app(
             worker.mount_roots_json = json.dumps(hb.mount_roots)
             worker.max_concurrent = hb.max_concurrent
             worker.running = hb.running
+            # Assigned unconditionally, including None: a worker that stops
+            # reporting a version IS an older worker, and pinning the last-known
+            # value would make the fleet look newer than it is.
+            worker.version = hb.version
             worker.state = "online"
             if hb.in_flight_pids is not None:
                 worker.in_flight_pids_json = json.dumps(hb.in_flight_pids)
@@ -1469,6 +1473,7 @@ def build_app(
                 arch=hb.arch,
                 os=hb.os,
                 mount_roots=list(hb.mount_roots),
+                version=hb.version,
             )
         for jid, proj in orphan_records:
             _emit_event(
@@ -1522,6 +1527,7 @@ def build_app(
                     mount_roots=json.loads(w.mount_roots_json or "[]"),
                     max_concurrent=w.max_concurrent if w.max_concurrent is not None else 1,
                     running=w.running if w.running is not None else 0,
+                    version=w.version,
                 )
                 for w in workers
             ]

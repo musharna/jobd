@@ -565,16 +565,20 @@ def test_jobd_workers_empty_fleet():
 
 
 @respx.mock
-def test_jobd_job_get_returns_full_info():
+def test_jobd_status_returns_scheduling_internals():
+    """jobd_status returns the FULL JobInfo, including the scheduling internals
+    (depends_on, fast_path, …) that the deleted jobd_job_get tool claimed to be
+    unique in providing. It never was — both called GET /jobs/{id}. This test is
+    the reason that duplicate could be removed without losing coverage."""
     respx.get("http://broker.test/jobs/7").mock(
         return_value=httpx.Response(
             200, json={"job_id": 7, "command": "x", "depends_on": [3], "fast_path": True}
         )
     )
-    from jobd.mcp.tools import jobd_job_get
+    from jobd.mcp.tools import jobd_status
 
     client = JobdClient(base_url="http://broker.test")
-    out = jobd_job_get(client, {"job_id": 7})
+    out = jobd_status(client, {"job_id": 7})
     assert out["job_id"] == 7
     assert out["fast_path"] is True
     assert out["depends_on"] == [3]
