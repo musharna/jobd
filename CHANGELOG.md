@@ -4,6 +4,24 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.17] — 2026-07-13
+
+### Fixed
+
+- **The `dispatch_skip` event storm: 54,118 events to serve 139 dispatches.** Framed in the backlog as a thundering-herd problem, it was really a dedup-key defect. `explain_skip(jobs, w)` computes its reason against a *specific worker*, so one queued job legitimately has different reasons on different hosts — but the dedup state was keyed by `job_id` **alone** and shared across all workers. Each worker's answer overwrote the previous one, so the "has the reason changed?" guard was true on *every* poll and the event fired every time any worker polled. Two permanently-unplaceable jobs produced 3,908 of 5,340 skip events in one sample, each an append to `events.jsonl`. Now keyed on `(job_id, worker_host)`. The GC had the same shape of bug — `queued` is already filtered per-worker, so evicting entries for jobs merely invisible to *this* worker discarded other hosts' state and made them re-emit — and is now scoped to the polling worker.
+
+- **The container healthcheck never probed the broker, and passed anyway.** It TCP-connected to a hardcoded `127.0.0.1`, but the broker runs `network_mode: host` and binds `$JOBD_HOST`; it has never listened on loopback. It reported green because an unrelated container held `127.0.0.1:8765` and **a bare TCP connect cannot tell which daemon accepted the socket**. Moving that container off the port exposed it: the probe began failing against a broker that was serving perfectly. It now makes an authenticated HTTP request to `$JOBD_HOST` and requires jobd's own `/health` payload back, so a squatting daemon fails the check rather than satisfying it.
+
+- **N+1 dependency reads on every claim attempt** — one point-read per parent, per queued job, per attempt, per parked worker. Now a single batched `SELECT id, state ... WHERE id IN (...)`. `_deps_satisfied_bulk` is *fresher* than the loop it replaces, not merely cheaper: it bypasses the identity map, whereas `session.get()` under `expire_on_commit=False` can return a cached pre-commit state — precisely how the original H-1 cascade fix became a silent no-op (see 0.5.13). `_deps_satisfied` now delegates to it, so there is one copy of the terminal-state policy rather than two that can drift apart.
+
+### Changed
+
+- **The sweeper no longer wakes every parked worker every 30 seconds regardless of whether anything happened.** It broadcast a wake on every pass; each parked `/next-job` then ran a full claim attempt against an unchanged queue, and all but at most one returned nothing. It now wakes only when the sweep actually changed state. Safe by construction: parked workers re-attempt every `_LONGPOLL_RECHECK_S` (10s) as a backstop, so an over-narrow predicate costs bounded latency, never a stuck job.
+
+### Notes
+
+- Deliberately **not** done: a composite `(state, priority, submitted_at)` index, and a rewrite of the wake mechanism to wake exactly *K* workers. At a queue depth of 1–2 with four workers, the index would add write cost to every job transition to speed up a scan that is not slow, and coalescing would risk dispatch stalls to solve a fan-out that does not hurt at this scale. The storm was the pathology, and it is fixed at the cause.
+
 ## [0.5.16] — 2026-07-13
 
 ### Fixed
