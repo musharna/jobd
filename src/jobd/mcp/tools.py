@@ -346,3 +346,19 @@ def jobd_worker_delete(client: JobdClient, args: dict) -> dict:
     the broker returns 409 if it is still online (caller stops the process
     or waits for the heartbeat sweeper to mark it offline first)."""
     return client.delete_worker(args["host"])
+
+
+def jobd_events(client: JobdClient, args: dict) -> dict:
+    """The broker's event stream — the only surface that explains WHY, not just what.
+
+    /jobs tells you a job is queued. Only the event stream tells you it has been
+    skipped 400 times because no worker advertises `cuda-32gb`.
+    """
+    return client.events(
+        since=args.get("since"),
+        project=args.get("project"),
+        event=args.get("event"),
+        job_id=args.get("job_id"),
+        source=args.get("source"),
+        limit=int(args.get("limit", 200)),
+    )
