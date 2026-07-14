@@ -4,6 +4,23 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.21] — 2026-07-14
+
+### Added
+
+- **`jobd_events` MCP tool.** The broker's event stream is the only surface that explains *why* rather than *what*: `/jobs` says a job is queued; only the events say it has been skipped 400 times because no worker advertises `cuda-32gb`. It was reachable from the CLI and the HTTP API but not from MCP. Nine tools now.
+
+### Fixed
+
+- **The MCP error model had a hole an agent falls into.** `JobdClient` raises `BrokerRefusal` for *any* 4xx, but the rule table covered only 400/404/409 — so **401** (bad token), **403** (tailnet ACL) and **422** (malformed body) fell through to `kind: "unknown"` with the hint *"Unmapped broker 401: …"*. An LLM handed that has nothing to act on and, worse, no way to know the failure is *permanent*, leaving it free to retry a bad token forever. All three now map to a real kind whose hint says so explicitly. A 400 with an unrecognised message maps to `bad_request` for the same reason: the message may be novel, but "re-sending these arguments will not work" is known. Verified against a live broker — a genuinely bad token now returns `kind: auth_failed`.
+
+- **The worker logged 41 diagnostics with `print(..., file=sys.stderr)`, and systemd filed every one of them as INFO.** A stderr stream gets a single journald priority (`SyslogLevel=info` by default), so `PRIORITY=6 (info) [worker] heartbeat error: [Errno 111] Connection refused` is what was actually in the journal. **`journalctl -p err` returned nothing while the worker was failing to reach the broker at all**, and no severity-based alert could ever have seen it. Now `log.info`/`warning`/`error` with levels chosen per message (8/10/23), and a formatter emitting systemd's `<N>` priority prefix — real journald priorities with no new dependency, and only when systemd is consuming the stream. Verified on a live worker: a genuine "cwd missing here; refusing admission" is now `PRIORITY=4 (warning)` and `journalctl -p warning` surfaces it.
+
+### Changed
+
+- **MCP↔broker surface parity is now DERIVED rather than remembered.** `tests/mcp/test_surface_parity.py` reads the route table off the live FastAPI app and asserts every route is either mapped to a tool or named in `_NOT_ON_MCP` **with the reason it should not be an agent action**. A route added tomorrow that nobody exposes now *fails a test* instead of quietly living on one surface — the recurring drift the 2026-07-12 audit kept finding. The converse is enforced too: a registered tool covering no route fails, because every tool costs model attention (a duplicate `jobd_job_get` was deleted in 0.5.16 for exactly that). Same shape as the `_SUBMIT_SYNTHESIZED` deny-list: coverage derived, exclusions named, **forgetting is what fails**.
+
+
 ## [0.5.20] — 2026-07-13
 
 ### Fixed
