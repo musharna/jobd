@@ -1,0 +1,20 @@
+[Unit]
+Description=jobd worker self-update — match the broker's version, but never mid-job
+Documentation=file://%h/jobd/scripts/update-worker.sh
+
+[Service]
+Type=oneshot
+# ONE env file, shared with job-worker.service (chmod 600). Not a second copy of
+# the token: a second copy is a second thing to rotate, and the one you forget is
+# the one that breaks. It carries JOBD_URL, JOBD_API_TOKEN, and JOBD_WORKER_HOST.
+#
+# JOBD_WORKER_HOST must come from here, NOT from a systemd specifier: %l is the
+# machine's hostname (e.g. "SCAR18"), while the worker's identity to the broker is
+# a stable name ("laptop"). They are not the same string, and the idle gate looks
+# the worker up by the latter — get it wrong and the gate matches no worker, reads
+# running=0, and cheerfully restarts a busy host.
+EnvironmentFile=%h/.config/jobd/worker.env
+ExecStart=%h/jobd/scripts/update-worker.sh
+
+# A failed update must never take the worker down with it: it logs, exits nonzero,
+# and the next tick retries.

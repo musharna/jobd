@@ -4,6 +4,13 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- **Worker CD (`scripts/update-worker.sh` + a 15-minute user timer) — the workers had no deployment story at all.** The broker self-deploys; the workers were upgraded only when a human remembered to restart them, so they drifted. That is not cosmetic: the `cwd_missing` pre-dispatch check shipped in **v0.5.10 on 2026-06-30 and did nothing for twelve days**, because the workers were still on 0.5.3/0.5.7. Nine jobs died of the exact fault it had been written to prevent, and CI was green the whole time. **A fix that never reaches a worker is not a fix.**
+
+  The one dangerous power the updater has is `systemctl restart`, which SIGTERMs any in-flight job (60s drain, then `worker_shutdown`) — that is how 13 jobs died on 07-13/14, every one of them killed by a human upgrading a worker. So **it never restarts a busy worker**: it asks the broker (the only thing that knows) for its own `running` count and defers to the next tick, and re-checks *after* the pip install, because the worker long-polls and can claim a job during it. It targets the **broker's** version rather than PyPI latest — a worker must never run ahead of its broker, which is the schema authority. Guarded by mutation-verified lint (removing the gate, dropping the post-install re-check, and unpinning the version all fail CI), plus `bash -n` over every script in `scripts/` — because the text-matching lints would happily pass a file that is not a valid shell script at all, and did.
+
+
 ## [0.5.25] — 2026-07-14
 
 ### Fixed
