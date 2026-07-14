@@ -969,10 +969,17 @@ def build_app(
             cascade_records: list[tuple[int, str, list[tuple[int, str]]]] = []
             requeued: list[int] = []
             cancelled_records: list[tuple[int, str, str]] = []
+            resurrected: list[tuple[int, str]] = []
+            restored: list[tuple[int, str]] = []
             if hb.in_flight_job_ids is not None:
-                orphan_records, cascade_records, requeued, cancelled_records = (
-                    _reconcile_worker_in_flight(session, hb.host, set(hb.in_flight_job_ids))
-                )
+                (
+                    orphan_records,
+                    cascade_records,
+                    requeued,
+                    cancelled_records,
+                    resurrected,
+                    restored,
+                ) = _reconcile_worker_in_flight(session, hb.host, set(hb.in_flight_job_ids))
             session.commit()
         if is_first_heartbeat:
             _emit_event(
@@ -1011,11 +1018,33 @@ def build_app(
                 by="user",
                 via="reconcile",
             )
+        for jid, proj in resurrected:
+            _emit_event(
+                logs_dir,
+                "job_resurrected",
+                source="broker",
+                job_id=jid,
+                project=proj,
+                worker=hb.host,
+                prior_state="orphaned",
+                note="worker reported it still in flight; the worker-is-gone premise was false",
+            )
+        for jid, proj in restored:
+            _emit_event(
+                logs_dir,
+                "job_uncancelled",
+                source="broker",
+                job_id=jid,
+                project=proj,
+                by="resurrect",
+                note="parent was resurrected; this child had been cascade-cancelled",
+            )
         # Requeues make jobs dispatchable again; orphans and cancels are
         # failed-side terminals that can unblock any-exit dependents (and their
         # cascades). All three change what the matcher would pick — wake
-        # long-pollers rather than waiting out the recheck backstop.
-        if requeued or orphan_records or cancelled_records:
+        # long-pollers rather than waiting out the recheck backstop. So do
+        # `restored` children, which go back to QUEUED and are dispatchable now.
+        if requeued or orphan_records or cancelled_records or restored:
             _wake_dispatchers()
         return {"ok": True}
 
