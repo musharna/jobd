@@ -42,8 +42,28 @@ def _acl_disabled() -> bool:
 # jobd.metrics.build_metrics_app.
 _ACL_EXEMPT_ROOT = "/metrics"
 
+# Paths reachable by an EXTERNAL MONITOR: exempt from the bearer token AND from the
+# tailnet source-IP ACL. ONE list, consulted by both walls, because there are two walls
+# and opening only one leaves the endpoint just as unreachable — which is exactly what
+# happened on 2026-07-14: /livez and /readyz shipped exempt from the token but NOT from
+# the ACL, so the blackbox exporter (a bridge container, source 172.20.0.4) got a 403 and
+# the probes were useless for the monitoring they exist to enable. Prometheus could scrape
+# /metrics only because /metrics had been exempted from both.
+#
+# EXACT match, never a prefix: a prefix would make any future route beginning with
+# "/livez" public by accident.
+#
+# Safe by precedent and by content: /metrics is already ACL-exempt and exposes far MORE
+# (job counts, worker versions, per-state gauges) than these two, which are mute —
+# alive-or-not, ready-or-not, no version, no counts, no job data. The listener is still
+# bound to the tailscale IP, so reachability is unchanged; this only stops the ACL from
+# rejecting the monitors that can already reach the port.
+_PUBLIC_PROBE_PATHS = frozenset({"/livez", "/readyz"})
+
 
 def _acl_exempt(path: str) -> bool:
+    if path in _PUBLIC_PROBE_PATHS:
+        return True
     return path == _ACL_EXEMPT_ROOT or path.startswith(_ACL_EXEMPT_ROOT + "/")
 
 
@@ -121,9 +141,8 @@ def _check_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="bad token")
 
 
-# Paths served WITHOUT a bearer token. EXACT match, never a prefix — a prefix would let
-# "/livez-and-also-your-secrets" through, and a wildcard here is how an auth wall becomes
-# decoration.
+# Alias kept for readability at the call site. The list lives above, next to the ACL,
+# because BOTH walls must open for a probe to be reachable — see _PUBLIC_PROBE_PATHS.
 #
 # Why any exemption at all: a generic HTTP monitor cannot send a bearer token, so every
 # jobd route was unmonitorable. Uptime Kuma watches twelve homelab services and jobd — the
@@ -135,7 +154,7 @@ def _check_token(authorization: str | None) -> None:
 #
 # tests/test_auth_exemptions.py enumerates the live route table and asserts every OTHER
 # route still demands a token, so this list cannot quietly widen.
-_UNAUTHENTICATED_PATHS = frozenset({"/livez", "/readyz"})
+_UNAUTHENTICATED_PATHS = _PUBLIC_PROBE_PATHS
 
 
 async def require_token(request: Request, authorization: str | None = Header(default=None)) -> None:
