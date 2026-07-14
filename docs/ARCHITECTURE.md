@@ -82,7 +82,7 @@ two attempts; see *H-1* below.
 
 ---
 
-## Four bugs that shaped the code
+## Five bugs that shaped the code
 
 These are here because each one is a *class* of mistake that the design now prevents, and
 because each was invisible until it wasn't.
@@ -157,6 +157,38 @@ source IP is allow-listed and the ACL never engages in the suite.
 and forgetting the other is no longer expressible.
 
 ---
+
+### The job that ran four hours past its own obituary
+
+The laptop worker's heartbeat lapsed — a WSL freeze, which on this fleet is a routine
+event, not an exotic one. The sweeper did exactly what it should and orphaned the
+in-flight job as `worker_died`.
+
+The worker had not died. It came back, and it had never stopped running the job. It
+then reported that job in `in_flight_job_ids` on **every heartbeat for three hours**,
+and the broker ignored it every single time.
+
+`_reconcile_worker_in_flight` only ever queried rows it already believed were
+`ASSIGNED`/`RUNNING`. Terminal rows were outside its `WHERE` clause, so a reported id
+matching no such row was dropped on the floor. The reconcile answered *"the broker
+claims this job is running — is it?"* and never once asked the mirror question:
+***"the WORKER claims this job is running — is it?"***
+
+So four hours of GPU folds ran to completion at 99% utilization, and the `/complete`
+was discarded by the terminal-is-terminal CAS — which is correct for the race *it*
+guards (a re-dispatched job must not be clobbered by the old worker), but here told
+the one true worker running the one true job to get lost. The ledger recorded a death
+at 17:56. It was found by noticing a worker reporting `running=1` while the broker
+showed zero running jobs.
+
+Reconciliation is now bidirectional, and resurrection is narrow by construction: only
+from `ORPHANED`, only for `worker_died`/`worker_restarted` (the two dispositions whose
+whole premise is "the worker is gone" — a premise the heartbeat itself falsifies), and
+only while the job is still owned by that worker. A user's cancel is never undone.
+Resurrecting a parent also inverts the cascade its orphaning caused, or the parent
+would complete into a DAG whose children are permanently cancelled.
+
+**A reconciler that only checks one direction is not a reconciler.**
 
 ## Invariants worth not breaking
 

@@ -308,9 +308,17 @@ def _reconcile_worker_in_flight(
     list[tuple[int, str, list[tuple[int, str]]]],
     list[int],
     list[tuple[int, str, str]],
+    list[tuple[int, str]],
+    list[tuple[int, str]],
 ]:
     """SIGTERM-drain Phase 2: reconcile a worker's reported in-flight set
     against broker-side claims (docs/plans/sigterm-drain.md).
+
+    Reconciles BOTH directions. Forward: a job the broker claims is running that
+    the worker does not report (the worker died and restarted) is requeued or
+    orphaned. Reverse: a job the worker DOES report that the broker wrote off as
+    worker_died/worker_restarted is resurrected — see `_resurrect_reported_orphans`,
+    added after a live worker's job ran four hours past its own obituary.
 
     A worker that died without draining (SIGKILL, crash, power loss) restarts
     within seconds under Restart=on-failure and heartbeats again — refreshing
@@ -401,7 +409,150 @@ def _reconcile_worker_in_flight(
                 cascaded = _cascade_on_parent_terminal(session, j)
                 cascade_records.append((j.id, j.state, cascaded))
                 orphan_records.append((j.id, j.project))
-    return orphan_records, cascade_records, requeued, cancelled_records
+
+    # The REVERSE direction. Everything above answers "the broker claims this job
+    # is running — is it?". Nothing answered the mirror question: "the WORKER says
+    # it is running a job we wrote off — is it?"
+    resurrected, restored = _resurrect_reported_orphans(
+        session, host, reported, {j.id for j in claimed}
+    )
+    return orphan_records, cascade_records, requeued, cancelled_records, resurrected, restored
+
+
+# The two dispositions whose entire premise is "this worker is gone": the
+# sweeper's heartbeat reaper (worker_died) and the reconcile's restart detector
+# (worker_restarted). A heartbeat FROM that worker, naming the job as in flight,
+# falsifies that premise — and is the only thing that may undo them. Every other
+# terminal is somebody's deliberate decision (a user cancel, a real failure, a
+# drained worker_shutdown) and must stick.
+_WORKER_GONE_REASONS = ("worker_died", "worker_restarted")
+
+
+def _resurrect_reported_orphans(
+    session,
+    host: str,
+    reported: set[int],
+    claimed_ids: set[int],
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """Resurrect a job this worker is demonstrably still running.
+
+    2026-07-14, production: the laptop worker's heartbeat lapsed (a WSL freeze).
+    The sweeper did its job and orphaned its in-flight job as `worker_died`. But
+    the worker had not died — it came back, and it never stopped running the job.
+    It then reported that job in `in_flight_job_ids` on EVERY heartbeat for three
+    hours, and the broker ignored it every time, because the reconcile only ever
+    looked at rows it already believed were ASSIGNED/RUNNING. Terminal rows were
+    outside its query. The job (four hours of GPU folds, 55 compounds) ran to
+    completion and its `/complete` was discarded by the terminal-is-terminal CAS.
+
+    The scope of the guard excluded exactly the case it needed to catch.
+
+    So: a job is resurrected only when every one of these holds.
+      - the worker REPORTS it in flight right now (this heartbeat),
+      - the broker has it as ORPHANED — not completed, failed, or cancelled,
+      - for a reason that means "we assumed the worker was gone" (_WORKER_GONE_REASONS),
+      - and it is still OURS (`Job.worker == host`) — never a job re-dispatched
+        elsewhere, or we would have two live copies racing to /complete.
+
+    A user CANCEL is deliberately NOT undoable here: the worker learns about it
+    through `GET /jobs/{id}/signal` and kills the workload. Resurrecting it would
+    override a human.
+    """
+    unclaimed = reported - claimed_ids
+    if not unclaimed:
+        return [], []
+
+    stale = (
+        session.execute(
+            select(Job).where(
+                Job.id.in_(unclaimed),
+                Job.worker == host,
+                Job.state == JobState.ORPHANED.value,
+                Job.termination_reason.in_(_WORKER_GONE_REASONS),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    resurrected: list[tuple[int, str]] = []
+    restored: list[tuple[int, str]] = []
+    for j in stale:
+        if not _cas_state(
+            session,
+            j.id,
+            (JobState.ORPHANED,),
+            state=JobState.RUNNING.value,
+            finished_at=None,
+            termination_reason=None,
+            reconcile_misses=0,
+        ):
+            continue  # lost a race with something else — leave it alone
+        session.refresh(j)
+        resurrected.append((j.id, j.project))
+        restored.extend(_uncascade_on_parent_resurrect(session, j))
+    return resurrected, restored
+
+
+def _uncascade_on_parent_resurrect(session, parent: Job) -> list[tuple[int, str]]:
+    """Undo the cancellations that THIS parent's orphaning cascaded.
+
+    Resurrecting a parent without this leaves a broken DAG: the parent runs and
+    completes, while the children cancelled solely because it "died" stay dead
+    forever. `_cascade_on_parent_terminal` stamps each child it cancels with
+    `warning = "parent_failed: {pid} → {state}"`, so its work is identifiable and
+    invertible — a child cancelled by a USER has no such warning and is untouched.
+
+    Transitive, mirroring the cascade: a restored child may itself have cascaded
+    to ITS children. A child is restored to QUEUED only if no OTHER parent of it
+    is still in a failed-side terminal — otherwise it remains genuinely
+    un-runnable and must stay cancelled.
+    """
+    restored: list[tuple[int, str]] = []
+    processed: set[int] = set()
+    frontier: list[int] = [parent.id]
+    while frontier:
+        pid = frontier.pop()
+        children = (
+            session.execute(
+                select(Job).where(
+                    Job.state == JobState.CANCELLED.value,
+                    Job.warning.like(f"parent_failed: {int(pid)} → %"),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for c in children:
+            if c.id in processed:
+                continue
+            processed.add(c.id)
+            others = [d for d in json.loads(c.depends_on_json or "[]") if d != pid]
+            if others:
+                still_failed = (
+                    session.execute(
+                        select(Job.id).where(
+                            Job.id.in_(others),
+                            Job.state.in_(tuple(_FAILED_SIDE_TERMINAL)),
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if still_failed:
+                    continue  # another parent really did fail — it stays cancelled
+            if _cas_state(
+                session,
+                c.id,
+                (JobState.CANCELLED,),
+                state=JobState.QUEUED.value,
+                finished_at=None,
+                warning=None,
+                warning_at=None,
+            ):
+                restored.append((c.id, c.project))
+                frontier.append(c.id)
+    return restored
 
 
 def _excluded_workers(job: Job) -> list[str]:
