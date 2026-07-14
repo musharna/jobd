@@ -4,6 +4,19 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.20] — 2026-07-13
+
+### Fixed
+
+- **The blocked-warning was its own dedup key, and it carried a clock.** The sweeper re-emits a warning only when it differs from the one stored on the job (`if j.warning != new_w`) — but the blocked-warning rendered as `queue-age 47m: blocked by non-preemptible job N on ...`, and that `47m` ticks by itself. So the comparison was true on *every* sweep, forever: a job blocked behind a non-preemptible neighbour re-emitted a `sweep_warning` event **and rewrote its DB row every minute it stayed blocked**. In production that was 974 events over 7 days, one job accounting for 498 of them.
+
+  The diagnosis is self-proving: the *unmatcheable* warning runs through the same dedup code three lines away, carries no clock, and deduped perfectly — one event, not 561. Identical mechanism, opposite outcome, and the only difference is the ticking value in the key.
+
+  The queue age is not lost: it is derivable from `submitted_at`, and rendering it at read time is strictly *more* accurate than a number frozen at whenever the last sweep ran. What the warning is *for* is the blocker's identity and the remedy, and neither changes minute to minute. The prefix moves `"queue-age "` → `"blocked: "` accordingly.
+
+  This is the third instance of one class — a guard whose key cannot capture what it must distinguish (see also the `dispatch_skip` dedup in 0.5.17, and the healthcheck in 0.5.17 that could not tell *which* daemon answered). A sweep of the whole event surface by repeat-count per (event, job) confirms there is no fourth: every other event fires at most twice for a given job, i.e. once per state transition.
+
+
 ## [0.5.19] — 2026-07-13
 
 ### Changed
