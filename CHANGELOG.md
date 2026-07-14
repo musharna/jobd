@@ -4,6 +4,17 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.23] — 2026-07-14
+
+### Fixed
+
+- **The `/livez` and `/readyz` probes added in 0.5.22 cleared the bearer-token wall but not the tailnet ACL — and there are two walls.** They were exempt from the token and declared usable by external monitors; they were not. The blackbox exporter, a bridge container with source `172.20.0.4`, got `403 Forbidden`, so the probes were useless for the monitoring that was their entire justification. A probe that clears one of two walls is exactly as unreachable as one that clears neither.
+
+  Every unit test passed, because the TestClient's source IP is allow-listed and the ACL never engages in the suite; only a real container revealed it. The tell was a contrast: Prometheus, on the *same* docker network, scrapes `/metrics` happily — because `/metrics` had been exempted from **both** walls.
+
+  The fix is **one list consulted by both walls** (`_PUBLIC_PROBE_PATHS`), not a second parallel exemption — which would have re-created the same defect one refactor later. Safe by precedent and by content: `/metrics` is already ACL-exempt and exposes far more (job counts, worker versions, per-state gauges) than these two, which are mute. The listener is still bound to the tailscale IP, so reachability is unchanged; this only stops the ACL rejecting monitors that can already reach the port. Guarded by a test asserting a probe is reachable from a source that is neither tailnet nor loopback — because a monitor is, definitionally, not on the tailnet.
+
+
 ## [0.5.22] — 2026-07-14
 
 ### Added

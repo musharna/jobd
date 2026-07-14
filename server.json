@@ -8,13 +8,13 @@
     "url": "https://github.com/musharna/jobd",
     "source": "github"
   },
-  "version": "0.5.22",
+  "version": "0.5.23",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "jobd",
-      "version": "0.5.22",
+      "version": "0.5.23",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         { "type": "positional", "value": "--from", "valueHint": "from-flag" },
@@ -42,7 +42,7 @@
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
       "tool": "manual",
-      "version": "0.5.22"
+      "version": "0.5.23"
     }
   }
 }
