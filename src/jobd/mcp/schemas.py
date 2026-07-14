@@ -124,3 +124,34 @@ WORKER_DELETE_INPUT = {
     },
     "required": ["host"],
 }
+
+EVENTS_INPUT = {
+    "type": "object",
+    "properties": {
+        "since": {
+            "type": "string",
+            "description": "Relative window (2h, 3d, 1w) or an ISO-8601 timestamp. Default: all retained.",
+        },
+        "event": {
+            "type": "string",
+            "description": (
+                "Filter to one event type: job_submitted, job_dispatched, job_started, "
+                "job_completed, job_cancelled, job_orphaned, dispatch_skip, submit_warning, "
+                "sweep_warning, cwd_refused, worker_offline, worker_stale, auto_preempt, "
+                "watchdog_fired, logs_pruned."
+            ),
+        },
+        "job_id": {"type": "integer", "description": "Only events for this job."},
+        "project": {"type": "string", "description": "Only events for this project."},
+        "source": {
+            "type": "string",
+            "enum": ["broker", "worker"],
+            "description": "Which side emitted the event.",
+        },
+        "limit": {
+            "type": "integer",
+            "default": 200,
+            "description": "Max rows, newest-last. Broker clamps to 10000.",
+        },
+    },
+}
