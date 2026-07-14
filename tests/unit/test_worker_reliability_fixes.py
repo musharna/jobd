@@ -13,7 +13,7 @@ import jobd.worker.job_worker as job_worker
 # --- Fix 1: /complete POST bounded retry -----------------------------------
 
 
-def test_post_complete_retries_then_succeeds(capsys):
+def test_post_complete_retries_then_succeeds(caplog):
     """post() raises twice, then succeeds → payload delivered exactly once
     (on the successful call) and the function returns."""
     client = MagicMock()
@@ -35,11 +35,11 @@ def test_post_complete_retries_then_succeeds(capsys):
         assert call.kwargs["json"] == payload
     # Backoff slept twice (between the three attempts).
     assert sleeps == [1, 2]
-    captured = capsys.readouterr()
-    assert captured.err.count("[worker]") == 2
+    # One log record per failed attempt (the worker retries, so these are WARNINGs).
+    assert len([r for r in caplog.records if "complete POST error" in r.getMessage()]) == 2
 
 
-def test_post_complete_gives_up_after_five_attempts(capsys):
+def test_post_complete_gives_up_after_five_attempts(caplog):
     client = MagicMock()
     client.post.side_effect = httpx.ConnectError("down")
     sleeps: list[float] = []
@@ -50,8 +50,7 @@ def test_post_complete_gives_up_after_five_attempts(capsys):
 
     assert client.post.call_count == 5
     assert sleeps == [1, 2, 4, 8]
-    captured = capsys.readouterr()
-    assert "[worker]" in captured.err
+    assert caplog.records, "giving up must be logged"
 
 
 def test_post_complete_first_try_no_sleep():
@@ -75,16 +74,15 @@ def test_wait_after_kill_returns_rc():
     proc.wait.assert_called_once_with(timeout=30)
 
 
-def test_wait_after_kill_timeout_sets_minus_nine(capsys):
+def test_wait_after_kill_timeout_sets_minus_nine(caplog):
     import subprocess
 
     proc = MagicMock()
     proc.wait.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=30)
     rc = job_worker._wait_after_kill(proc, 13)
     assert rc == -9
-    captured = capsys.readouterr()
-    assert "[worker]" in captured.err
-    assert "13" in captured.err
+    assert caplog.records, "abandoning the wait must be logged"
+    assert "13" in caplog.text
 
 
 # --- Fix 4: tracked_pids locked add/discard/snapshot ------------------------

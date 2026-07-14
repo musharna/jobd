@@ -41,15 +41,18 @@ def test_post_event_includes_job_id_and_project_when_set():
     assert body["payload"] == {"host": "desktop", "reason": "idle_timeout", "threshold_s": 600}
 
 
-def test_post_event_swallows_network_error_logs_to_stderr(capsys):
+def test_post_event_swallows_network_error_and_logs_it(caplog):
     client = MagicMock()
     client.post.side_effect = httpx.ConnectError("broker unreachable")
 
     _post_event(client, "worker_shutdown", host="laptop")
 
-    captured = capsys.readouterr()
-    assert "/events POST failed" in captured.err
-    assert "worker_shutdown" in captured.err
+    # Asserted on the LOG RECORD, not raw stderr: the worker moved off print() so that
+    # systemd can record these at a real priority (see _JournalPriorityFormatter).
+    text = caplog.text
+    assert "/events POST failed" in text
+    assert "worker_shutdown" in text
+    assert any(r.levelname == "ERROR" for r in caplog.records), caplog.records
     # No exception propagated.
 
 
