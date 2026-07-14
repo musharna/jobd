@@ -2610,7 +2610,7 @@ def test_sweep_blocked_warning_after_5min_with_nonpreemptible_blocker(client):
     client.app.state.sweep_once()
     got = client.get(f"/jobs/{queued['id']}").json()
     assert got["warning"] is not None
-    assert got["warning"].startswith("queue-age ")
+    assert got["warning"].startswith("blocked: ")
     assert f"job {blocker['id']}" in got["warning"]
     assert "preempt" in got["warning"]
 
@@ -2679,7 +2679,7 @@ def test_sweep_auto_preempts_when_blocker_is_preemptible(client):
 
     queued_after = client.get(f"/jobs/{queued['id']}").json()
     if queued_after["warning"] is not None:
-        assert not queued_after["warning"].startswith("queue-age ")
+        assert not queued_after["warning"].startswith("blocked: ")
 
 
 def test_sweep_no_auto_preempt_when_blocker_runtime_below_floor(client):
@@ -3127,13 +3127,13 @@ def test_sweep_clears_blocked_warning_when_blocker_finishes(client):
             .values(submitted_at=datetime.now(UTC) - timedelta(seconds=400))
         )
     client.app.state.sweep_once()
-    assert client.get(f"/jobs/{queued['id']}").json()["warning"].startswith("queue-age ")
+    assert client.get(f"/jobs/{queued['id']}").json()["warning"].startswith("blocked: ")
 
     # Blocker finishes
     client.post(f"/jobs/{blocker['id']}/complete", json={"exit_code": 0})
     client.app.state.sweep_once()
     got = client.get(f"/jobs/{queued['id']}").json()
-    assert got["warning"] is None or not got["warning"].startswith("queue-age ")
+    assert got["warning"] is None or not got["warning"].startswith("blocked: ")
 
 
 def test_sweep_preserves_will_queue_behind_warning(client):
