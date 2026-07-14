@@ -82,7 +82,7 @@ two attempts; see *H-1* below.
 
 ---
 
-## Three bugs that shaped the code
+## Four bugs that shaped the code
 
 These are here because each one is a *class* of mistake that the design now prevents, and
 because each was invisible until it wasn't.
@@ -121,6 +121,30 @@ contains every dimension the value depends on.** Both are guarded by tests that 
 the key regresses. A third instance — a container healthcheck that TCP-connected to a port
 and therefore could not tell *which daemon* answered — is why `scripts/healthcheck.py`
 makes a real authenticated request and validates the response body.
+
+### The default that a project could silently un-inherit
+
+`config/projects.yaml` has a `_default` block carrying `idle_timeout_s` and
+`max_wall_s` — the zombie reaper, written after a silent job held a desktop GPU for
+six days. The file called it "the FLEET-WIDE hang-guard". It was not.
+
+`resolve_project_defaults` did `projects.get(name) or projects.get("_default")` — an
+**either/or**. A project *with* an entry never saw `_default.defaults` at all. So the
+guard reached exactly the projects nobody had configured, and fell off the moment
+anyone cared enough about a project to give it a priority. `job projects set NAME 70`
+writes a bare `{priority: 70}` entry, and that was enough to disarm the reaper.
+
+On 2026-07-14, registering 32 real projects to set their priorities disarmed the
+hang-guard on all 32 — including the project whose zombie had created it. Nothing
+failed; no test went red. The guard was simply absent from everything that mattered.
+
+`_default.defaults` is now a **floor**: merged under every project, overridden one key
+at a time. The merge is derived from `dataclasses.fields`, so a field added later is
+inherited without anyone remembering to add it, and every field of `ProjectDefaults`
+uses `None` as its unset sentinel — including the bools, because a merge cannot
+otherwise tell "the project said nothing" from "the project said false".
+
+**A default that a project can silently un-inherit is not a default.**
 
 ### Two walls, and only one of them opened
 
@@ -161,6 +185,15 @@ forgot too.
   route must still 401.
 
 In each case the point is the same. **Forgetting is what fails.**
+
+**A guard must not be able to repair the thing it is inspecting.** `uv run` syncs
+before it runs: handed a stale `uv.lock`, it rewrites the file and *then* starts
+pytest. So `test_uv_lock_in_sync_with_pyproject` — which shells out to
+`uv lock --check` — was reading a lockfile its own runner had just fixed, and could
+only ever pass. The committed lock sat stale at `jobd 0.5.16` through seven releases
+while CI stayed green. `UV_NO_SYNC: "1"` is set once at the top of `ci.yml`, not on
+individual `uv run` lines, because the next `uv run` someone adds would not have it.
+Remove it and the gate becomes decoration again.
 
 ---
 

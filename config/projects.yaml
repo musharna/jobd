@@ -23,8 +23,19 @@ projects:
   project-d: { priority: 40 }
 
   # Priority applied to any project not listed above. The defaults below are the
-  # FLEET-WIDE hang-guard: any unlisted project inherits them. idle_timeout_s
-  # reaps a job that emits NO output for 1h and frees its worker slot — this
+  # FLEET-WIDE hang-guard: EVERY project inherits them — listed or not — and a
+  # project overrides them one key at a time (set idle_timeout_s and you keep
+  # max_wall_s). This is a floor, not a fallback.
+  #
+  # It was a fallback until 2026-07-14, and the difference cost real GPU time:
+  # `resolve_project_defaults` did `projects.get(name) or projects.get("_default")`,
+  # so the guard reached only projects that were NOT in this file. Registering 32
+  # real projects to give them priorities therefore disarmed the hang-guard on all
+  # 32 — including orchid-sdxl, whose zombie is the incident described below. The
+  # guard covered exactly the projects nobody had configured. See
+  # tests/test_project_defaults_floor.py.
+  #
+  # idle_timeout_s reaps a job that emits NO output for 1h and frees its slot — this
   # prevents D-state/9p-stall zombies (a real incident: a silent job held a
   # desktop GPU slot for 6 days). 1h is generous: a true hang is silent forever
   # so it is caught regardless, while a healthy job printing periodic progress is
