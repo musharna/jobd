@@ -637,10 +637,17 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                         else:
                             blocker = _find_nonpreemptible_blocker(elig, session)
                             if blocker is not None:
+                                # Deliberately carries no queue age. This string is the
+                                # dedup key (`if j.warning != blocker_warning` below), so
+                                # embedding a value that ticks on its own makes the guard
+                                # always fire: the old "queue-age {N}m: ..." re-emitted an
+                                # event and rewrote the row every minute a job stayed
+                                # blocked. Identity of the blocker is what changed or
+                                # didn't; the age is derivable from submitted_at.
                                 blocker_warning = (
-                                    f"{_BLOCKED_WARNING_PREFIX}{int(age_s // 60)}m: "
-                                    f"blocked by non-preemptible job {blocker.id} on "
-                                    f"{blocker.worker}; preempt with `job preempt {blocker.id}`"
+                                    f"{_BLOCKED_WARNING_PREFIX}non-preemptible job "
+                                    f"{blocker.id} on {blocker.worker} is holding the only "
+                                    f"eligible worker; preempt with `job preempt {blocker.id}`"
                                 )
 
             if not matcheable:

@@ -71,7 +71,17 @@ MAX_LOG_CHUNK_BYTES = 10 * 1024 * 1024  # 10 MiB cap per /log append
 WAIT_STREAM_CHUNK_BYTES = 64 * 1024  # /wait reads the log in 64 KiB slices to bound memory
 
 _UNMATCHEABLE_WARNING_PREFIX = "no matching worker —"
-_BLOCKED_WARNING_PREFIX = "queue-age "
+# NO CLOCK IN THIS STRING. The warning is compared against the job's stored warning to
+# decide whether anything changed ("if j.warning != new_w"), so any value that ticks on
+# its own makes the comparison always-true and the guard useless. It used to read
+# "queue-age {N}m: blocked by ...", and that {N}m re-armed the check every single minute:
+# one blocked job re-emitted a sweep_warning event AND rewrote its DB row on every sweep,
+# forever (job 2846 alone: 246 events). The other warning that shares this code path
+# carries no clock and deduped correctly — one event, not 561.
+#
+# The queue age has not been lost: it is derivable from submitted_at, and rendering it at
+# read time is strictly MORE accurate than a number frozen at the last sweep.
+_BLOCKED_WARNING_PREFIX = "blocked: "
 _AUTO_PREEMPT_WARNING_PREFIX = "auto-preempted in favor of job "
 
 _SINCE_RELATIVE_RE = re.compile(r"^(\d+)([hdw])$")
