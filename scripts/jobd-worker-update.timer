@@ -1,0 +1,16 @@
+[Unit]
+Description=Check for a jobd worker update every 15 minutes
+Documentation=file://%h/jobd/scripts/update-worker.sh
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+# Monotonic timers: a laptop that was asleep at the scheduled tick still gets one
+# shortly after it wakes, rather than waiting for the next wall-clock slot. This
+# fleet is laptops and desktops that sleep — that is the normal case, not the edge.
+# (`Persistent=` is inert on a monotonic timer; do not add it and think it helps.)
+AccuracySec=1min
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target
