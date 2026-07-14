@@ -50,7 +50,7 @@ their worker keeps streaming output and posts `/complete` when the broker return
 | `client.py` | The HTTP client both the CLI and MCP wrap. One place that talks to the broker. |
 | `mcp/` | The MCP tool surface for agents. |
 
-`app.py` was 1,873 lines and is now 1,351: `submit` and `refuse_admission` were the two
+`app.py` was 1,873 lines and is now 1,385: `submit` and `refuse_admission` were the two
 handlers holding real business logic, and they moved out. The remaining routes are thin.
 
 ---
