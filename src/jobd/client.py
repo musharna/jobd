@@ -109,6 +109,28 @@ class JobdClient:
             params["project"] = project
         return self._request("GET", "/jobs", params=params).json()
 
+    def events(
+        self,
+        *,
+        since: str | None = None,
+        project: str | None = None,
+        event: str | None = None,
+        job_id: int | None = None,
+        source: str | None = None,
+        limit: int = 200,
+    ) -> dict:
+        params: dict[str, object] = {"limit": limit}
+        for k, v in (
+            ("since", since),
+            ("project", project),
+            ("event", event),
+            ("job_id", job_id),
+            ("source", source),
+        ):
+            if v is not None:
+                params[k] = v
+        return {"events": self._request("GET", "/events", params=params).json()}
+
     def workers(self) -> dict:
         return self._request("GET", "/workers").json()
 

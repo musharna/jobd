@@ -45,7 +45,11 @@ from jobd.mcp.errors import map_broker_refusal
             "parent_failed",
         ),
         (400, "command field is required", "invalid_submit"),
-        (400, "totally novel rejection text", "unknown"),
+        # A 400 whose message we have not seen before is still a BAD REQUEST — the one
+        # thing we know for certain is that re-sending the same arguments will not help.
+        # It used to map to "unknown", which told an agent nothing and left it free to
+        # retry forever. (Changed 2026-07-13 alongside the 401/403/422 mappings.)
+        (400, "totally novel rejection text", "bad_request"),
         (404, "no such job", "not_found"),
         (409, "cannot cancel terminal job", "conflict"),
     ],

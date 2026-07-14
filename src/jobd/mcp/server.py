@@ -19,6 +19,7 @@ from jobd.mcp import tools as t
 from jobd.mcp.errors import map_broker_refusal
 from jobd.mcp.schemas import (
     CANCEL_INPUT,
+    EVENTS_INPUT,
     LIST_INPUT,
     LOGS_INPUT,
     PREEMPT_INPUT,
@@ -64,6 +65,12 @@ _TOOLS = [
         "List jobs on the broker with per-state counts. Defaults to the active set (queued/assigned/running); filter by state (e.g. ['failed']) or project to find past runs. Each row is a compact summary: job_id, project, state, host, exit_code, queued_at, started_at — call jobd_status for a job's full record. Use to answer 'what is running / queued right now?' or to locate a job id you've lost.",
         LIST_INPUT,
         t.jobd_list,
+    ),
+    (
+        "jobd_events",
+        "The broker's event stream — the surface that explains WHY, not just what. /jobs says a job is queued; only this says it has been skipped 400 times because no worker advertises cuda-32gb, or that its dependency was cancelled, or that a watchdog killed it. Filter by since (2h/3d/1w), event type, job_id, project, or source (broker|worker). Use when a job is not doing what you expect and jobd_status alone does not explain it.",
+        EVENTS_INPUT,
+        t.jobd_events,
     ),
     (
         "jobd_workers",
