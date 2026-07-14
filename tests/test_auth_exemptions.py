@@ -118,6 +118,76 @@ async def test_the_match_is_exact_not_a_prefix(path, monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/livez", "/readyz"])
+async def test_probes_are_reachable_from_a_NON_TAILNET_source(path, monkeypatch):
+    """The test that would have caught the real bug. There are TWO walls, not one.
+
+    The probes shipped exempt from the bearer token but NOT from the tailnet source-IP
+    ACL — so the blackbox exporter, a bridge container with source 172.20.0.4, got a 403
+    and the probes were useless for the monitoring they exist to enable. Every unit test
+    passed, because the TestClient's source IP is allow-listed. Only a real container
+    revealed it.
+
+    A monitor is, definitionally, something that is NOT on the tailnet. Assert that.
+    """
+    from jobd.auth import TailnetACLMiddleware
+
+    monkeypatch.delenv("JOBD_DISABLE_TAILNET_ACL", raising=False)
+
+    called = False
+
+    async def _next(_req):
+        nonlocal called
+        called = True
+        return "served"
+
+    class _Client:
+        host = "172.20.0.4"  # a docker bridge container: NOT tailnet, NOT loopback
+
+    class _Req:
+        from starlette.datastructures import URL
+
+        url = URL(f"http://broker{path}")
+        client = _Client()
+
+    mw = TailnetACLMiddleware(app=None)  # type: ignore[arg-type]
+    result = await mw.dispatch(_Req(), _next)  # type: ignore[arg-type]
+
+    assert called and result == "served", (
+        f"{path} was REJECTED by the tailnet ACL for a container source IP. Removing the "
+        "token wall is not enough — the ACL is a second wall, and a probe that only "
+        "clears one is exactly as unreachable as before. This is why jobd was the one "
+        "homelab service nothing monitored."
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_acl_still_rejects_a_container_on_a_real_route(monkeypatch):
+    """Sanity: the test above must be proving an exemption, not a disabled ACL."""
+    from starlette.datastructures import URL
+
+    from jobd.auth import TailnetACLMiddleware
+
+    monkeypatch.delenv("JOBD_DISABLE_TAILNET_ACL", raising=False)
+
+    async def _next(_req):
+        return "served"
+
+    class _Client:
+        host = "172.20.0.4"
+
+    class _Req:
+        url = URL("http://broker/workers")
+        client = _Client()
+
+    mw = TailnetACLMiddleware(app=None)  # type: ignore[arg-type]
+    resp = await mw.dispatch(_Req(), _next)  # type: ignore[arg-type]
+    assert getattr(resp, "status_code", None) == 403, (
+        "the ACL let a docker-bridge source reach /workers — the source-IP wall is down"
+    )
+
+
 def test_a_real_route_401s_without_a_token(authed_app):
     """Sanity: the guard above is only meaningful if auth is actually engaged here."""
     with TestClient(authed_app) as client:
