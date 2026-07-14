@@ -94,8 +94,7 @@ def test_blocked_job_warns_once_not_once_per_sweep(client, logs_dir):
                 update(Job)
                 .where(Job.id == queued)
                 .values(
-                    submitted_at=datetime.now(UTC).replace(tzinfo=None)
-                    - timedelta(minutes=minutes)
+                    submitted_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=minutes)
                 )
             )
         client.app.state.sweep_once()
