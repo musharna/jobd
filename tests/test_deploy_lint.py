@@ -285,7 +285,15 @@ def test_uv_lock_in_sync_with_pyproject():
     """CI installs with `uv sync --frozen`, which never validates the lock
     against pyproject.toml — a stale committed lock silently drops added or
     bumped dependencies (how pytest-timeout went missing). `uv lock --check`
-    is that missing gate."""
+    is that missing gate.
+
+    THIS GATE ONLY WORKS IF THE RUNNER DOES NOT RE-LOCK. `uv run` syncs before
+    it runs, rewriting a stale uv.lock in place — so `uv run pytest` handed this
+    test a lockfile it had just repaired, and the assertion below could only ever
+    pass. The committed lock sat at jobd 0.5.16 through seven releases (pyproject:
+    0.5.23) with CI green throughout. `UV_NO_SYNC: "1"` at the top of ci.yml is
+    what keeps this honest; removing it makes this test decoration again.
+    """
     if shutil.which("uv") is None:
         pytest.skip("uv not on PATH")
     result = subprocess.run(

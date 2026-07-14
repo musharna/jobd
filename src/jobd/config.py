@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal
 
@@ -30,7 +30,15 @@ class ClassifierRule:
 @dataclass
 class ProjectDefaults:
     """Per-project default values for fields that would otherwise be CLI flags
-    or fall through to global broker constants."""
+    or fall through to global broker constants.
+
+    EVERY field uses ``None`` as its "unset" sentinel — including the bools.
+    That is load-bearing: `_default.defaults` is a fleet-wide FLOOR merged under
+    every project (see `resolve_project_defaults`), and a merge can only tell
+    "the project said nothing" from "the project said false" if unset is None.
+    `escalate_to_arc: bool = False` would have made those two indistinguishable,
+    so a project could never opt out of a floor that set it.
+    """
 
     max_wall_s: int | None = None
     idle_timeout_s: int | None = None
@@ -39,7 +47,7 @@ class ProjectDefaults:
     requires: JobRequires | None = None
     preemptible: bool | None = None  # None means "do not override"
     priority: int | None = None
-    escalate_to_arc: bool = False
+    escalate_to_arc: bool | None = None
 
 
 @dataclass
@@ -244,18 +252,49 @@ def resolve_profile(profiles: dict[str, ProfileSpec], name: str) -> ProfileSpec 
     return profiles.get(name)
 
 
+def _merge_defaults(floor: ProjectDefaults, over: ProjectDefaults) -> ProjectDefaults:
+    """Field-wise merge: `over`'s set fields win, everything else falls to `floor`.
+
+    Derived from `dataclasses.fields`, never a hand-written key list — a new
+    field added to ProjectDefaults inherits the floor automatically. Hand-listing
+    here is exactly the "forgetting is what fails" shape: the field that gets
+    forgotten is the one that silently stops being inherited.
+    """
+    merged = {}
+    for f in fields(ProjectDefaults):
+        value = getattr(over, f.name)
+        merged[f.name] = value if value is not None else getattr(floor, f.name)
+    return ProjectDefaults(**merged)
+
+
 def resolve_project_defaults(
     projects: dict[str, ProjectEntry], project_name: str
 ) -> ProjectDefaults:
-    """Return ProjectDefaults for project, or empty defaults if absent.
+    """Return the effective defaults for a project: its own, over `_default`'s.
 
-    Falls back to projects['_default'].defaults; if neither is registered,
-    returns a zero-valued ProjectDefaults.
+    `_default.defaults` is a FLOOR, not a fallback. It is inherited by EVERY
+    project, and a project overrides it one key at a time.
+
+    This used to be `projects.get(name) or projects.get("_default")` — an
+    either/or. So `_default.defaults` reached only projects that were NOT in
+    projects.yaml, and the moment a project got an entry (even a bare
+    `{priority: 60}` written by `job projects set`) it silently lost the whole
+    block. The block in question is the zombie hang-guard — idle_timeout_s /
+    max_wall_s — which exists *because* a silent job once held a desktop GPU for
+    six days. So the guard covered precisely the projects nobody had configured,
+    and dropped off the ones anybody cared about. On 2026-07-14, registering 32
+    real projects to give them priorities disarmed the hang-guard on all 32,
+    including the very project whose zombie created it.
+
+    A default that a project can silently un-inherit is not a default.
     """
-    entry = projects.get(project_name) or projects.get("_default")
+    floor = projects.get("_default")
+    entry = projects.get(project_name)
     if entry is None:
-        return ProjectDefaults()
-    return entry.defaults
+        return floor.defaults if floor is not None else ProjectDefaults()
+    if floor is None or floor is entry:
+        return entry.defaults
+    return _merge_defaults(floor.defaults, entry.defaults)
 
 
 @dataclass

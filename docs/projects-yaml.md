@@ -257,12 +257,28 @@ Add to `config.py`:
 def resolve_project_defaults(
     projects: dict[str, ProjectEntry], project_name: str
 ) -> ProjectDefaults:
-    """Return ProjectDefaults for project, or empty defaults if absent."""
-    entry = projects.get(project_name) or projects.get("_default")
+    """The project's own defaults, layered OVER `_default`'s."""
+    floor = projects.get("_default")
+    entry = projects.get(project_name)
     if entry is None:
-        return ProjectDefaults()
-    return entry.defaults
+        return floor.defaults if floor is not None else ProjectDefaults()
+    if floor is None or floor is entry:
+        return entry.defaults
+    return _merge_defaults(floor.defaults, entry.defaults)
 ```
+
+**`_default.defaults` is a FLOOR, not a fallback.** Every project inherits it, and
+overrides it one key at a time — setting `idle_timeout_s` does not drop
+`max_wall_s`. Every field of `ProjectDefaults` therefore uses `None` as its unset
+sentinel (including the bools), because a merge cannot otherwise distinguish "the
+project said nothing" from "the project said `false`".
+
+This was `projects.get(name) or projects.get("_default")` — an either/or — until
+2026-07-14. A project *with* an entry never saw `_default.defaults`, so the block
+`config/projects.yaml` calls "the FLEET-WIDE hang-guard" (`idle_timeout_s`,
+`max_wall_s` — the zombie reaper) reached only projects that were **not** configured.
+Registering 32 projects to give them priorities disarmed the hang-guard on all 32.
+Guarded by `tests/test_project_defaults_floor.py`.
 
 ### Changes to `app.py:submit` (lines 121-203)
 
