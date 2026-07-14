@@ -4,6 +4,19 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.22] — 2026-07-14
+
+### Added
+
+- **`GET /livez` and `GET /readyz` — unauthenticated liveness and readiness probes.** Not a convention import: **Uptime Kuma monitors twelve homelab services and jobd was the only one it did not**, because every route sits behind a bearer token and a generic HTTP monitor cannot send one. The broker's log had zero 401s — nothing was even trying. `/livez` says the process is up and deliberately does not touch the database; `/readyz` round-trips a query to SQLite and returns 503 if it cannot. Two rather than one, because the distinction earns its keep when things break: `/livez` green with `/readyz` red is "the process is fine, the database is wedged" — fix the DB rather than restart the process, since restarting destroys the evidence.
+
+  These are the **only** unauthenticated routes on the broker and they are deliberately mute — alive-or-not, ready-or-not, with no version, counts, or job data. The tailnet ACL still gates the source IP exactly as it does for the (also unauthenticated) `/metrics`, so the trust boundary is unchanged. `/health` keeps both its auth and its version, because the container healthcheck must *prove* it is talking to jobd and not to whatever else may be listening on the port. The exemption matches by **exact path, never a prefix**, and a derived guard enumerates the live route table to assert every other route still requires a token.
+
+### Notes
+
+- **Composite indexes were considered and rejected, on measurement rather than instinct.** Against the live 2,947-row database, the retention prune runs in 1.5 ms, a project+state job list in 1.0 ms, and the dispatch scan in 0.005 ms — all already index-backed by `ix_jobs_state`. A composite index would add write cost to *every* job transition to save under a millisecond on queries that run every 30 seconds or on user request.
+
+
 ## [0.5.21] — 2026-07-14
 
 ### Added
