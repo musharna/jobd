@@ -49,6 +49,8 @@ _NOT_ON_MCP: dict[str, str] = {
     "POST /classify": "internal: the submit path already classifies; exposing it invites divergence.",
     "POST /resolve": "internal: effective-config preview. jobd_submit(dry_run) surfaces the same answer.",
     "GET /health": "infra: liveness. The container healthcheck uses it; an agent gets nothing from it.",
+    "GET /livez": "infra: unauthenticated liveness probe for external monitors (Uptime Kuma). Deliberately mute — an agent learns nothing from 'alive'.",
+    "GET /readyz": "infra: unauthenticated readiness probe. Same — jobd_workers tells an agent whether the fleet can actually take work.",
 }
 
 # route -> the MCP tool that covers it
