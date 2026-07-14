@@ -4,6 +4,17 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **A live worker's job ran four hours past its own obituary, and its result was thrown away.** The laptop worker's heartbeat lapsed (a WSL freeze). The sweeper did exactly its job and orphaned the in-flight job as `worker_died`. But the worker had not died — it came back, and it had never stopped running the job. It then reported that job in `in_flight_job_ids` on **every heartbeat for three hours**, and the broker ignored it every time.
+
+  `_reconcile_worker_in_flight` only ever queried rows it already believed were `ASSIGNED`/`RUNNING`. Terminal rows were outside its `WHERE` clause, so reported ids matching no such row were dropped on the floor. It answered *"the broker claims this is running — is it?"* and never the mirror question, *"the WORKER claims this is running — is it?"* Four hours of GPU folds ran to completion and the `/complete` was discarded by the terminal-is-terminal CAS; the ledger recorded a death at 17:56 while the GPU was at 99%.
+
+  The reconcile now runs **both** directions. A job is resurrected only when the worker reports it in flight *now*, the broker has it as `ORPHANED` (never completed/failed/cancelled), the reason is one whose entire premise is "the worker is gone" (`worker_died`/`worker_restarted`), and it is still owned by that worker — never one re-dispatched elsewhere, which would put two live copies in flight. A user's cancel is deliberately **not** undoable: the worker learns of it via `GET /jobs/{id}/signal` and kills the workload.
+
+  Resurrecting a parent also **undoes the cascade its orphaning caused** — otherwise the parent completes while the children cancelled *because it died* stay dead forever. `_cascade_on_parent_terminal` stamps each child with `parent_failed: {id} → {state}`, so its work is identifiable and invertible (a user's cancel has no such stamp and is untouched). Transitive, and a child with another genuinely-failed parent stays cancelled. Emits `job_resurrected` / `job_uncancelled`. Mutation-verified against 5 mutations, including restoring the original bug.
+
+
 ## [0.5.24] — 2026-07-14
 
 ### Fixed
