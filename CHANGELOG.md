@@ -4,6 +4,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.25] — 2026-07-14
+
 ### Fixed
 
 - **A live worker's job ran four hours past its own obituary, and its result was thrown away.** The laptop worker's heartbeat lapsed (a WSL freeze). The sweeper did exactly its job and orphaned the in-flight job as `worker_died`. But the worker had not died — it came back, and it had never stopped running the job. It then reported that job in `in_flight_job_ids` on **every heartbeat for three hours**, and the broker ignored it every time.
