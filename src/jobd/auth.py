@@ -121,8 +121,27 @@ def _check_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="bad token")
 
 
-async def require_token(authorization: str | None = Header(default=None)) -> None:
+# Paths served WITHOUT a bearer token. EXACT match, never a prefix — a prefix would let
+# "/livez-and-also-your-secrets" through, and a wildcard here is how an auth wall becomes
+# decoration.
+#
+# Why any exemption at all: a generic HTTP monitor cannot send a bearer token, so every
+# jobd route was unmonitorable. Uptime Kuma watches twelve homelab services and jobd — the
+# broker the whole fleet depends on — was the only one it did not, precisely because of
+# this wall (verified 2026-07-13; the broker log had zero 401s, so nothing was even
+# trying). These two probes are deliberately mute: alive-or-not, ready-or-not, and nothing
+# else. No version, no counts, no job data. The tailnet ACL still gates the source IP,
+# exactly as it does for the (also unauthenticated) /metrics endpoint.
+#
+# tests/test_auth_exemptions.py enumerates the live route table and asserts every OTHER
+# route still demands a token, so this list cannot quietly widen.
+_UNAUTHENTICATED_PATHS = frozenset({"/livez", "/readyz"})
+
+
+async def require_token(request: Request, authorization: str | None = Header(default=None)) -> None:
     """FastAPI dependency. Wire globally via FastAPI(dependencies=[Depends(require_token)])."""
+    if request.url.path in _UNAUTHENTICATED_PATHS:
+        return
     _check_token(authorization)
 
 
