@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import logging
 import os
 import re
 import shutil
@@ -74,6 +75,56 @@ _CAPS = _detect_caps()
 _tracked_pids_lock = threading.Lock()
 
 
+log = logging.getLogger("jobd.worker")
+
+
+class _JournalPriorityFormatter(logging.Formatter):
+    """Prefix each line with the syslog priority systemd expects.
+
+    Under systemd the worker's stderr is wired straight to the journal
+    (`StandardError=journal`), and systemd tags every line from that stream with ONE
+    priority — so before this migration a routine "starting job 2941" and a real
+    "heartbeat error" were recorded identically, and `journalctl -p err` was useless.
+
+    systemd parses a leading `<N>` kernel-style prefix and uses it as the record's
+    priority, which gets us real levels with no dependency on python-systemd. We only
+    emit the prefix when systemd is actually consuming the stream — it sets
+    JOURNAL_STREAM for exactly this purpose — so an interactive run stays readable.
+    """
+
+    _PRIORITY = {
+        logging.CRITICAL: 2,
+        logging.ERROR: 3,
+        logging.WARNING: 4,
+        logging.INFO: 6,
+        logging.DEBUG: 7,
+    }
+
+    def __init__(self, *, journal: bool) -> None:
+        super().__init__("[worker] %(message)s")
+        self._journal = journal
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        if not self._journal:
+            return msg
+        prio = self._PRIORITY.get(record.levelno, 6)
+        # A multi-line message needs the prefix on every line, or the tail lines land
+        # at the default priority and get separated from their own error.
+        return "\n".join(f"<{prio}>{line}" for line in msg.splitlines()) or msg
+
+
+def _setup_logging() -> None:
+    """Wire worker logs to stderr, with real levels. Idempotent."""
+    if log.handlers:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_JournalPriorityFormatter(journal=bool(os.environ.get("JOURNAL_STREAM"))))
+    log.addHandler(handler)
+    log.setLevel(os.environ.get("JOBD_LOG_LEVEL", "INFO").upper())
+    log.propagate = False
+
+
 def _tracked_pids_add(tracked_pids: set[int], pid: int) -> None:
     with _tracked_pids_lock:
         tracked_pids.add(pid)
@@ -108,7 +159,7 @@ def _post_event(client, event, *, job_id=None, project=None, **payload):
     try:
         client.post("/events", json=body, timeout=2.0)
     except Exception as e:
-        print(f"[worker] /events POST failed ({event}): {e}", file=sys.stderr)
+        log.error("/events POST failed (%s): %s", event, e)
 
 
 # #42 multi-tenant per-host co-routing. Default 1 preserves single-slot
@@ -218,7 +269,7 @@ def drain_in_flight(
         try:
             hook("worker_shutdown", grace_s)
         except Exception as e:
-            print(f"[worker] drain hook for job {jid} failed: {e}", file=sys.stderr)
+            log.error("drain hook for job %s failed: %s", jid, e)
     deadline = time.monotonic() + grace_s + join_margin_s
     for t in job_threads:
         t.join(max(0.0, deadline - time.monotonic()))
@@ -284,7 +335,7 @@ def _sweep_stale_scopes() -> list[str]:
             check=False,
         ).stdout
     except Exception as e:
-        print(f"[worker] stale-scope sweep: list-units failed: {e}", file=sys.stderr)
+        log.error("stale-scope sweep: list-units failed: %s", e)
         return []
     swept: list[str] = []
     for line in out.splitlines():
@@ -304,13 +355,10 @@ def _sweep_stale_scopes() -> list[str]:
                     timeout=5,
                 )
         except Exception as e:
-            print(f"[worker] stale-scope sweep: {unit}: {e}", file=sys.stderr)
+            log.error("stale-scope sweep: %s: %s", unit, e)
             continue
         swept.append(unit)
-        print(
-            f"[worker] stale-scope sweep: killed {unit} ({len(killed)} pid(s))",
-            file=sys.stderr,
-        )
+        log.info("stale-scope sweep: killed %s (%s pid(s))", unit, len(killed))
     return swept
 
 
@@ -364,10 +412,7 @@ def _in_flight_pid_map() -> dict[str, list[int]]:
                 if scope_path is not None:
                     pids.extend(p for p in _cgroup_walk.list_scope_pids(scope_path) if p != pid)
             except Exception as e:
-                print(
-                    f"[worker] in-flight pid map: cgroup read failed for job {jid}: {e}",
-                    file=sys.stderr,
-                )
+                log.error("in-flight pid map: cgroup read failed for job %s: %s", jid, e)
         out[str(jid)] = pids
     return out
 
@@ -405,10 +450,7 @@ def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
             if scope_path is not None:
                 owned.update(_cgroup_walk.list_scope_pids(scope_path))
         except Exception as e:  # best-effort; never block a heartbeat
-            print(
-                f"[worker] cgroup-walk owned-pid resolve failed for job {jid}: {e}",
-                file=sys.stderr,
-            )
+            log.error("cgroup-walk owned-pid resolve failed for job %s: %s", jid, e)
     return owned
 
 
@@ -713,7 +755,7 @@ def heartbeat_loop(client: httpx.Client, tracked_pids: set[int], stop_event: thr
             snap = resource_snapshot(tracked_pids)
             client.post("/heartbeat", json=snap, timeout=10.0)
         except Exception as e:
-            print(f"[worker] heartbeat error: {e}", file=sys.stderr)
+            log.error("heartbeat error: %s", e)
         stop_event.wait(HEARTBEAT_INTERVAL_S)
 
 
@@ -768,9 +810,8 @@ def _post_complete_with_retry(client, job_id, payload, *, sleep=time.sleep) -> N
             client.post(f"/jobs/{job_id}/complete", json=payload, timeout=10.0)
             return
         except Exception as e:
-            print(
-                f"[worker] complete POST error for job {job_id} (attempt {i + 1}/{attempts}): {e}",
-                file=sys.stderr,
+            log.warning(
+                "complete POST error for job %s (attempt %s/%s): %s", job_id, i + 1, attempts, e
             )
             if i < len(_COMPLETE_RETRY_BACKOFF_S):
                 sleep(_COMPLETE_RETRY_BACKOFF_S[i])
@@ -783,10 +824,10 @@ def _wait_after_kill(proc, job_id, *, timeout=_POST_KILL_WAIT_S) -> int:
     try:
         return proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        print(
-            f"[worker] job {job_id}: process unresponsive {timeout}s after SIGKILL, "
-            "abandoning wait (rc=-9)",
-            file=sys.stderr,
+        log.warning(
+            "job %s: process unresponsive %ss after SIGKILL, abandoning wait (rc=-9)",
+            job_id,
+            timeout,
         )
         return -9
 
@@ -812,7 +853,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # preempted/worker_shutdown so the broker record doesn't strand in
     # ASSIGNED (docs/plans/sigterm-drain.md, dispatch-side gap race).
     if _drain_event.is_set():
-        print(f"[worker] job {job_id}: refusing to start, worker is draining", file=sys.stderr)
+        log.warning("job %s: refusing to start, worker is draining", job_id)
         _post_complete_with_retry(
             client,
             job_id,
@@ -845,10 +886,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # exit 127. The broker excludes this host for this job, so it won't be
     # re-offered here (no hot loop).
     if not os.path.isdir(cwd):
-        print(
-            f"[worker] job {job_id}: cwd missing here ({cwd}); refusing admission",
-            file=sys.stderr,
-        )
+        log.warning("job %s: cwd missing here (%s); refusing admission", job_id, cwd)
         try:
             client.post(
                 f"/jobs/{job_id}/refuse-admission",
@@ -856,10 +894,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 timeout=10.0,
             )
         except Exception as e:
-            print(
-                f"[worker] cwd-missing refuse post failed for job {job_id}: {e}",
-                file=sys.stderr,
-            )
+            log.error("cwd-missing refuse post failed for job %s: %s", job_id, e)
         return
 
     # Pre-dispatch launcher-exists check. Without this, a missing absolute-
@@ -868,10 +903,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     # check. Fail loud at dispatch with termination_reason=launcher_missing.
     missing = _missing_launcher_path(cmd, cwd)
     if missing is not None:
-        print(
-            f"[worker] job {job_id}: launcher missing or non-executable: {missing}",
-            file=sys.stderr,
-        )
+        log.warning("job %s: launcher missing or non-executable: %s", job_id, missing)
         try:
             client.post(
                 f"/jobs/{job_id}/log",
@@ -890,10 +922,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 timeout=10.0,
             )
         except Exception as post_err:
-            print(
-                f"[worker] launcher_missing POST error for job {job_id}: {post_err}",
-                file=sys.stderr,
-            )
+            log.error("launcher_missing POST error for job %s: %s", job_id, post_err)
         return
 
     # Per-job timeouts — submit-time value wins; otherwise worker-wide default
@@ -957,7 +986,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             "--",
         ] + cmd
 
-    print(f"[worker] starting job {job_id}: {full_cmd}", file=sys.stderr)
+    log.info("starting job %s: %s", job_id, full_cmd)
     try:
         proc = subprocess.Popen(
             full_cmd,
@@ -973,7 +1002,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             text=False,
         )
     except (OSError, FileNotFoundError) as e:
-        print(f"[worker] failed to start job {job_id}: {e}", file=sys.stderr)
+        log.error("failed to start job %s: %s", job_id, e)
         try:
             client.post(
                 f"/jobs/{job_id}/log",
@@ -986,7 +1015,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 timeout=10.0,
             )
         except Exception as post_err:
-            print(f"[worker] complete POST error: {post_err}", file=sys.stderr)
+            log.error("complete POST error: %s", post_err)
         return
     # `proc.pid` is the job's top-level process (for a scope-wrapped job,
     # systemd-run --scope exec-replaces into it, so this pid lives in the scope
@@ -1008,7 +1037,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     try:
         client.post(f"/jobs/{job_id}/started", timeout=10.0)
     except Exception as e:
-        print(f"[worker] /started POST error for job {job_id}: {e}", file=sys.stderr)
+        log.error("/started POST error for job %s: %s", job_id, e)
 
     stop_signal = threading.Event()
     got_signal: dict[str, str | None] = {"signal": None}
@@ -1057,16 +1086,13 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     )
                     return
                 except Exception as e:
-                    print(
-                        f"[worker] systemctl kill {scope_unit} {sig_name} error: {e}",
-                        file=sys.stderr,
-                    )
+                    log.error("systemctl kill %s %s error: %s", scope_unit, sig_name, e)
             # fast_path or systemd-run unavailable: signal the direct child.
             try:
                 sig = signal.SIGKILL if sig_name == "KILL" else signal.SIGTERM
                 proc.send_signal(sig)
             except Exception as e:
-                print(f"[worker] proc.send_signal {sig_name} error: {e}", file=sys.stderr)
+                log.error("proc.send_signal %s error: %s", sig_name, e)
 
         termination_initiated = threading.Event()
 
@@ -1090,9 +1116,8 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
 
             def _kill_after_grace():
                 if proc.poll() is None:
-                    print(
-                        f"[worker] job {job_id}: {kind} grace {grace_s}s expired, sending SIGKILL",
-                        file=sys.stderr,
+                    log.warning(
+                        "job %s: %s grace %ss expired, sending SIGKILL", job_id, kind, grace_s
                     )
                     _signal_workload("KILL")
 
@@ -1107,10 +1132,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 # Wall-clock cap: total runtime exceeded. Trips even when the job
                 # is producing output — useful for runaway training runs.
                 if max_wall_s is not None and (now - job_started) > max_wall_s:
-                    print(
-                        f"[worker] job {job_id}: max_wall_s={max_wall_s}s exceeded, killing",
-                        file=sys.stderr,
-                    )
+                    log.warning("job %s: max_wall_s=%ss exceeded, killing", job_id, max_wall_s)
                     _post_event(
                         client,
                         "watchdog_fired",
@@ -1139,10 +1161,10 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     and not first_output_landed[0]
                     and (now - job_started) > first_output_timeout_s
                 ):
-                    print(
-                        f"[worker] job {job_id}: no output within "
-                        f"first_output_timeout_s={first_output_timeout_s}s of start, killing",
-                        file=sys.stderr,
+                    log.warning(
+                        "job %s: no output within first_output_timeout_s=%ss of start, killing",
+                        job_id,
+                        first_output_timeout_s,
                     )
                     _post_event(
                         client,
@@ -1163,10 +1185,11 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     with last_log_lock:
                         silent_for = now - last_log_monotonic[0]
                     if silent_for > idle_timeout_s:
-                        print(
-                            f"[worker] job {job_id}: no output for {silent_for:.0f}s "
-                            f"(idle_timeout_s={idle_timeout_s}), killing",
-                            file=sys.stderr,
+                        log.warning(
+                            "job %s: no output for %.0fs (idle_timeout_s=%s), killing",
+                            job_id,
+                            silent_for,
+                            idle_timeout_s,
                         )
                         _post_event(
                             client,
@@ -1247,7 +1270,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 try:
                     client.post(f"/jobs/{job_id}/log", content=chunk, timeout=10.0)
                 except Exception as e:
-                    print(f"[worker] log POST error: {e}", file=sys.stderr)
+                    log.error("log POST error: %s", e)
         finally:
             proc.stdout.close()
             stop_signal.set()
@@ -1272,7 +1295,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             try:
                 client.post(f"/jobs/{job_id}/checkpoint-complete", timeout=10.0)
             except Exception as e:
-                print(f"[worker] /checkpoint-complete POST error: {e}", file=sys.stderr)
+                log.error("/checkpoint-complete POST error: %s", e)
 
         _unregister_drain_hook(job_id)
         _unregister_in_flight_pid(job_id)
@@ -1291,16 +1314,15 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 if scope_path is not None:
                     reaped = _cgroup_walk.kill_scope(scope_path)
                     if reaped:
-                        print(
-                            f"[worker] job {job_id}: cgroup-walk reaped "
-                            f"{len(reaped)} surviving PID(s) in {scope_unit}: {reaped}",
-                            file=sys.stderr,
+                        log.info(
+                            "job %s: cgroup-walk reaped %s surviving PID(s) in %s: %s",
+                            job_id,
+                            len(reaped),
+                            scope_unit,
+                            reaped,
                         )
             except Exception as e:
-                print(
-                    f"[worker] job {job_id}: cgroup-walk error for {scope_unit}: {e}",
-                    file=sys.stderr,
-                )
+                log.error("job %s: cgroup-walk error for %s: %s", job_id, scope_unit, e)
 
         # Audit 2026-05-18 spec-review (S4 missing-bullet): /proc reparented-
         # orphan sweep. Anything whose ppid is this worker but isn't in the
@@ -1322,16 +1344,14 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     _tracked_pids_snapshot(tracked_pids)
                 )
                 if killed:
-                    print(
-                        f"[worker] job {job_id}: subreaper /proc-sweep reaped "
-                        f"{len(killed)} reparented orphan PID(s): {killed}",
-                        file=sys.stderr,
+                    log.info(
+                        "job %s: subreaper /proc-sweep reaped %s reparented orphan PID(s): %s",
+                        job_id,
+                        len(killed),
+                        killed,
                     )
             except Exception as e:
-                print(
-                    f"[worker] job {job_id}: subreaper /proc-sweep error: {e}",
-                    file=sys.stderr,
-                )
+                log.error("job %s: subreaper /proc-sweep error: %s", job_id, e)
 
         final_state = "completed"
         if got_signal["signal"] == "cancel":
@@ -1359,10 +1379,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         _terminal_posted = True
         _post_complete_with_retry(client, job_id, complete_payload)
     except Exception as _exc:
-        print(
-            f"[worker] job {job_id}: run_job raised after dispatch: {_exc!r}",
-            file=sys.stderr,
-        )
+        log.error("job %s: run_job raised after dispatch: %r", job_id, _exc)
     finally:
         # F2 (audit 2026-07-12): stop the signal-poll thread. The normal path
         # sets this in the inner read-loop finally, but a raise BEFORE that loop
@@ -1400,14 +1417,13 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                     },
                 )
             except Exception as _pe:
-                print(
-                    f"[worker] job {job_id}: failed to post terminal state "
-                    f"after run_job error: {_pe}",
-                    file=sys.stderr,
+                log.error(
+                    "job %s: failed to post terminal state after run_job error: %s", job_id, _pe
                 )
 
 
 def main():
+    _setup_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--jobd-url", default=os.environ.get("JOBD_URL", "http://127.0.0.1:8765"))
     args = parser.parse_args()
@@ -1448,10 +1464,8 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
 
     max_concurrent = _max_concurrent_jobs()
-    print(
-        f"[worker] starting on {hostname()} -> {args.jobd_url} "
-        f"(max_concurrent_jobs={max_concurrent})",
-        file=sys.stderr,
+    log.info(
+        "starting on %s -> %s (max_concurrent_jobs=%s)", hostname(), args.jobd_url, max_concurrent
     )
 
     def _dispatch_in_thread(job: dict) -> None:
@@ -1460,7 +1474,7 @@ def main():
         try:
             run_job(client, job, tracked_pids)
         except Exception as e:
-            print(f"[worker] run_job error: {e}", file=sys.stderr)
+            log.error("run_job error: %s", e)
         finally:
             _unregister_drain_hook(int(job["id"]))
             _unregister_in_flight_pid(int(job["id"]))
@@ -1509,10 +1523,8 @@ def main():
                 # knows the matcher's vram_gb is overstated or that the
                 # foreign holder is benign / about to exit.
                 if command_has_concurrent_ok(job.get("cmd")):
-                    print(
-                        f"[worker] job {job['id']}: live admission gate "
-                        "bypassed via # CONCURRENT_OK marker",
-                        file=sys.stderr,
+                    log.warning(
+                        "job %s: live admission gate bypassed via # CONCURRENT_OK marker", job["id"]
                     )
                     _dispatch(job)
                     continue
@@ -1520,13 +1532,13 @@ def main():
                 admission = gpu_admission_check(required_gb, _effective_owned_pids(tracked_pids))
                 if admission["blocked"]:
                     job_id = job["id"]
-                    print(
-                        f"[worker] refusing job {job_id}: "
-                        f"required {admission['required_gb']:.1f} GB, "
-                        f"free {admission['free_gb']:.1f} GB, "
-                        f"foreign holders {admission['foreign_pids']} "
-                        f"({admission['foreign_vram_gb']:.1f} GB)",
-                        file=sys.stderr,
+                    log.info(
+                        "refusing job %s: required %.1f GB, free %.1f GB, foreign holders %s (%.1f GB)",
+                        job_id,
+                        admission["required_gb"],
+                        admission["free_gb"],
+                        admission["foreign_pids"],
+                        admission["foreign_vram_gb"],
                     )
                     try:
                         client.post(
@@ -1540,10 +1552,7 @@ def main():
                             timeout=10.0,
                         )
                     except Exception as e:
-                        print(
-                            f"[worker] refuse-admission post failed for job {job_id}: {e}",
-                            file=sys.stderr,
-                        )
+                        log.error("refuse-admission post failed for job %s: %s", job_id, e)
                     # Cool off so we don't immediately re-pull the same job
                     # while contention persists. Heartbeat updates the
                     # broker's `unregistered_vram_gb` view within ~5s.
@@ -1559,17 +1568,14 @@ def main():
                     time.sleep(2)
             job_threads = [t for t in job_threads if t.is_alive()]
         except Exception as e:
-            print(f"[worker] poll error: {e}", file=sys.stderr)
+            log.error("poll error: %s", e)
             time.sleep(5)
 
     # stop_event set (SIGTERM/SIGINT): drain in-flight jobs in this thread —
     # the only place the shared client is safe to use during shutdown.
-    print("[worker] stop requested — draining in-flight jobs", file=sys.stderr)
+    log.info("stop requested — draining in-flight jobs")
     summary = _graceful_shutdown(client, job_threads)
-    print(
-        f"[worker] drain complete: signaled={summary['signaled']} aborted={summary['aborted']}",
-        file=sys.stderr,
-    )
+    log.info("drain complete: signaled=%s aborted=%s", summary["signaled"], summary["aborted"])
 
 
 if __name__ == "__main__":
