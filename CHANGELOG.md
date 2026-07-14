@@ -4,6 +4,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.24] — 2026-07-14
+
 ### Fixed
 
 - **`_default.defaults` was a fallback, not a floor — so configuring a project silently disarmed its zombie hang-guard.** `resolve_project_defaults` did `projects.get(name) or projects.get("_default")`, an either/or: a project *with* an entry never saw `_default.defaults` at all. That block is the fleet hang-guard — `idle_timeout_s` and `max_wall_s`, the reaper written after a silent job held a desktop GPU for six days — and `config/projects.yaml` described it as "the FLEET-WIDE hang-guard: any unlisted project inherits them". It reached exactly the projects nobody had configured, and fell off the moment anyone gave a project a priority: `job projects set NAME 70` writes a bare `{priority: 70}`, and that alone was enough.
