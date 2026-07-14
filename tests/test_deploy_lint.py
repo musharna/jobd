@@ -302,3 +302,112 @@ def test_uv_lock_in_sync_with_pyproject():
     assert result.returncode == 0, (
         f"uv.lock is stale vs pyproject.toml — run `uv lock` and commit:\n{result.stderr}"
     )
+
+
+# --- worker CD: the idle gate ---------------------------------------------
+#
+# The workers had no deployment story at all while the broker self-deployed, so
+# they drifted — and a fix that never reaches a worker is not a fix. The
+# `cwd_missing` pre-dispatch check shipped in v0.5.10 and did nothing for twelve
+# days because the workers were still on 0.5.3/0.5.7. Nine jobs died of the exact
+# fault it prevents. CI was green throughout.
+#
+# scripts/update-worker.sh closes that. Its one dangerous power is `systemctl
+# restart`, which SIGTERMs any in-flight job (60s drain, then worker_shutdown --
+# 13 jobs died that way on 2026-07-13/14, every one killed by a human upgrading a
+# worker). So the idle gate is the whole safety property, and these tests guard it.
+
+_UPDATE_WORKER = _REPO_ROOT / "scripts" / "update-worker.sh"
+
+
+def test_update_worker_script_exists_and_is_executable():
+    assert _UPDATE_WORKER.exists(), "scripts/update-worker.sh is missing"
+    assert _UPDATE_WORKER.stat().st_mode & 0o111, "update-worker.sh is not executable"
+
+
+def test_update_worker_never_restarts_without_checking_idle_first():
+    """THE safety property. Every `systemctl restart` must be dominated by a
+    running-count check, or an upgrade silently kills whatever the worker is
+    doing — which is precisely the accident this script was written to stop."""
+    lines = _UPDATE_WORKER.read_text().splitlines()
+    restart_lines = [i for i, ln in enumerate(lines) if "systemctl" in ln and "restart" in ln]
+    assert restart_lines, "no restart in update-worker.sh — did the script change shape?"
+
+    gate_lines = [i for i, ln in enumerate(lines) if "running=$(busy)" in ln]
+    assert gate_lines, "the idle gate (`running=$(busy)`) is gone from update-worker.sh"
+
+    for r in restart_lines:
+        assert any(g < r for g in gate_lines), (
+            f"line {r + 1} restarts the worker with no preceding idle check. A restart "
+            "SIGTERMs the in-flight job (60s grace, then worker_shutdown)."
+        )
+
+
+def test_update_worker_rechecks_idle_after_the_pip_install():
+    """pip takes seconds, and the worker long-polls — it can claim a job in that
+    window. One check before the install is not enough; the gate must be re-read
+    immediately before the restart."""
+    body = _UPDATE_WORKER.read_text()
+    # Anchor on the INVOCATION, not the word "pip" — which also appears in the
+    # comments above, before the first gate. Anchoring on the substring made this
+    # test pass with the recheck deleted: the slice still contained the *first*
+    # gate. A guard that inspects the wrong text is not a guard (see the
+    # HEALTHCHECK parser above, same mistake).
+    install_at = body.index('"$VENV/bin/pip" install')
+    restart_at = body.index("systemctl --user restart")
+    assert install_at < restart_at, "the install must precede the restart"
+    between = body[install_at:restart_at]
+    assert "running=$(busy)" in between, (
+        "update-worker.sh installs, then restarts, without re-checking idle. The "
+        "worker long-polls and can claim a job during the pip install — and would "
+        "then lose it to the restart, which is the exact accident this script exists "
+        "to prevent."
+    )
+
+
+def test_update_worker_targets_the_broker_version_not_pypi_latest():
+    """A worker must never run ahead of its broker: the broker is the schema
+    authority. Pulling 'latest' from PyPI would upgrade workers past it."""
+    body = _UPDATE_WORKER.read_text()
+    assert "/health" in body, "update-worker.sh must read its target from the broker's /health"
+    assert "pip install --upgrade jobd[worker]\n" not in body, (
+        "unpinned upgrade — the worker would jump to PyPI latest, ahead of the broker"
+    )
+    assert '=="${target}"' in body or "==${target}" in body, (
+        "the install must PIN the broker's exact version"
+    )
+
+
+def test_the_worker_host_is_not_a_systemd_hostname_specifier():
+    """%l is the machine hostname (SCAR18); the worker's identity to the broker is
+    a stable name (laptop). The idle gate looks the worker up BY THAT NAME — get it
+    wrong and the lookup matches nothing, reads running=0, and restarts a busy host.
+    A gate that cannot find itself always says 'idle'."""
+    unit = (_REPO_ROOT / "scripts" / "jobd-worker-update.service").read_text()
+    assert "JOBD_WORKER_HOST=%l" not in unit and "JOBD_WORKER_HOST=%H" not in unit, (
+        "JOBD_WORKER_HOST is being set from a systemd hostname specifier. It must come "
+        "from the shared env file, or the idle gate silently matches no worker."
+    )
+    assert "EnvironmentFile" in unit, "the update unit must share the worker's env file"
+
+
+def test_every_shell_script_actually_parses():
+    """`bash -n` on everything in scripts/.
+
+    The deploy-lint tests above read these scripts as TEXT — they grep for an idle
+    gate, a pinned version, a bind address. Not one of them would notice that the
+    file is not a valid shell script at all. update-worker.sh shipped with an
+    apostrophe inside a `${VAR:?word}` expansion (bash does quote processing in
+    there, so it opened a quote that never closed); every text-matching guard was
+    green and the script died at line 1 with `unexpected EOF`.
+
+    Grepping a script is not the same as knowing it runs.
+    """
+    scripts = sorted((_REPO_ROOT / "scripts").glob("*.sh"))
+    assert scripts, "no shell scripts found — did scripts/ move?"
+    broken = []
+    for s in scripts:
+        r = subprocess.run(["bash", "-n", str(s)], capture_output=True, text=True)
+        if r.returncode != 0:
+            broken.append(f"{s.name}: {r.stderr.strip().splitlines()[-1] if r.stderr else '?'}")
+    assert not broken, "shell scripts with syntax errors:\n  " + "\n  ".join(broken)
