@@ -13,6 +13,20 @@ concurrency:
 permissions:
   contents: read
 
+# `uv run` SYNCS BEFORE IT RUNS — it rewrites uv.lock in the workspace if the lock
+# is stale. That silently defeated test_uv_lock_in_sync_with_pyproject: the guard
+# shells out to `uv lock --check`, but `uv run pytest` had already re-locked the
+# very file it was about to inspect, so it could only ever pass. The committed lock
+# sat stale at jobd 0.5.16 through seven releases (pyproject: 0.5.23) with CI green
+# the whole way. Verified both directions on a pristine checkout: with the rewrite,
+# a stale lock PASSES; with UV_NO_SYNC, it FAILS as it always should have.
+#
+# Set here, once, at the workflow level — not on individual `uv run` lines, because
+# the next `uv run` someone adds would not have it. The env installed by the
+# `uv sync --frozen` step above is what every step then uses, unchanged.
+env:
+  UV_NO_SYNC: "1"
+
 jobs:
   test:
     runs-on: ubuntu-latest

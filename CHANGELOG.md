@@ -4,6 +4,16 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **`_default.defaults` was a fallback, not a floor — so configuring a project silently disarmed its zombie hang-guard.** `resolve_project_defaults` did `projects.get(name) or projects.get("_default")`, an either/or: a project *with* an entry never saw `_default.defaults` at all. That block is the fleet hang-guard — `idle_timeout_s` and `max_wall_s`, the reaper written after a silent job held a desktop GPU for six days — and `config/projects.yaml` described it as "the FLEET-WIDE hang-guard: any unlisted project inherits them". It reached exactly the projects nobody had configured, and fell off the moment anyone gave a project a priority: `job projects set NAME 70` writes a bare `{priority: 70}`, and that alone was enough.
+
+  On 2026-07-14, registering 32 real projects to set their priorities disarmed the hang-guard on all 32 — including `orchid-sdxl`, the project whose 170-hour zombie *created* the guard. Nothing failed and no test went red; the guard was simply gone from everything that mattered, while the config file went on claiming it was fleet-wide.
+
+  `_default.defaults` is now a **floor**: merged under every project, overridden one key at a time (setting `idle_timeout_s` no longer drops `max_wall_s`). The merge is derived from `dataclasses.fields`, so a field added later is inherited without anyone remembering to add it. `ProjectDefaults.escalate_to_arc` changes from `bool = False` to `bool | None = None`: every field now uses `None` as its unset sentinel, because a merge cannot otherwise tell "the project said nothing" from "the project said false" — and a project must be able to opt out of a floor. Guarded by `tests/test_project_defaults_floor.py`, mutation-verified against the old either/or.
+
+- **`test_uv_lock_in_sync_with_pyproject` could only ever pass in CI, and the committed lock was stale through seven releases.** `uv run` syncs before it runs: handed a stale `uv.lock` it rewrites the file, *then* starts pytest. So the guard shelled out to `uv lock --check` against a lockfile its own runner had just repaired. `uv.lock` sat at `jobd 0.5.16` while `pyproject.toml` said `0.5.23`, with CI green the whole way; the staleness only surfaced running pytest directly. Fixed by setting `UV_NO_SYNC: "1"` once at the workflow level in `ci.yml` — not on individual `uv run` lines, because the next `uv run` someone adds would not have it — and re-locking. Verified both directions on a pristine checkout: with the rewrite a stale lock passes, with `UV_NO_SYNC` it fails as it always should have.
+
 ## [0.5.23] — 2026-07-14
 
 ### Fixed
