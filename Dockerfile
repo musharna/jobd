@@ -1,6 +1,7 @@
-# Pinned to a specific Debian release for reproducibility. For stricter supply-
-# chain guarantees, pin by digest instead: FROM python:3.11-slim-bookworm@sha256:<digest>
-FROM python:3.11-slim-bookworm
+# Digest-pinned (audit 2026-07-15 Sec-B): a tag is mutable and can be re-pushed
+# under the same name; the digest is the image. This is python:3.11-slim-bookworm
+# as of 2026-07-15 — bump deliberately, with the tag comment kept in sync.
+FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
@@ -10,28 +11,25 @@ ENV PYTHONUNBUFFERED=1 \
     JOBD_LOGS_DIR=/app/logs \
     JOBD_PORT=8765
 
-# README.md is required because pyproject.toml declares `readme = "README.md"`,
-# which hatchling reads during metadata generation at `pip install .`.
-COPY pyproject.toml README.md ./
-# Phase 1 — install third-party dependencies in a layer keyed only on
-# pyproject.toml + README, so editing application source does NOT re-resolve or
-# re-download them (previously `COPY src` sat above the install, busting the dep
-# layer on every code change). hatchling needs the wheel-target package dirs to
-# exist to build metadata, so stub them; entry points resolve at runtime, not
-# install time, so an empty stub installs fine. The stub is removed before the
-# real source is copied.
-RUN mkdir -p src/jobd src/job_cli \
-    && touch src/jobd/__init__.py src/job_cli/__init__.py \
-    && pip install -U pip \
-    && pip install . \
-    && rm -rf src
+# Phase 1 — third-party dependencies, EXACTLY the versions CI tested
+# (audit 2026-07-15 Sec-B). `pip install .` used to re-resolve everything fresh
+# from PyPI at build time, so the shipped image carried dependency versions no
+# test had ever seen — and was open to a dependency hijack at every release
+# build. requirements-docker.txt is exported from uv.lock (hashes included) and
+# kept in lockstep by a deploy-lint check; --require-hashes makes substitution
+# fail closed. The layer keys on the requirements file alone, so editing
+# application source still does not re-download dependencies.
+COPY requirements-docker.txt ./
+RUN pip install -U pip \
+    && pip install --no-deps --require-hashes -r requirements-docker.txt
 
-# Phase 2 — copy the real source and reinstall just the package (deps already
-# satisfied above). `--no-deps` skips dependency work; `--force-reinstall`
-# replaces the stub even though the version string is unchanged. Only this layer
-# reruns when source changes.
+# Phase 2 — the application itself. `--no-deps` because phase 1 installed the
+# complete transitive set; the project wheel carries no third-party code.
+# README.md is required because pyproject.toml declares `readme = "README.md"`,
+# which hatchling reads during metadata generation.
+COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-deps --force-reinstall .
+RUN pip install --no-deps .
 
 COPY scripts/healthcheck.py /app/healthcheck.py
 
