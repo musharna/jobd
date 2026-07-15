@@ -15,10 +15,52 @@ on:
   push:
     tags: ["v*"]
 
+env:
+  # See ci.yml: `uv run` re-locks a stale lockfile unless told not to, which
+  # would let the test gate below test something other than the committed lock.
+  UV_NO_SYNC: "1"
+
 jobs:
+  # Audit 2026-07-15 T-2: without this, a tag pushed against a pyproject that
+  # still carries the PREVIOUS version publishes a ghcr image whose name lies
+  # about its contents — a poisoned rollback target that sits in the registry
+  # forever. (publish-image.yml has always had this check; the main release
+  # path did not.) Both publishers gate on it.
+  verify:
+    name: Tag matches pyproject version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Verify tag == pyproject version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "$VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != pyproject version ${PYPROJECT_VERSION} — refusing to publish a mislabeled artifact"
+            exit 1
+          fi
+
+  # Audit 2026-07-15: the release pipeline never ran a single test — a tag on a
+  # commit CI never saw (pushed straight to main, or tagged mid-red) released
+  # blind. One lean leg here; the full matrix still runs on PRs.
+  test:
+    name: Test the tagged commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+      - name: Install dependencies (from lockfile)
+        run: uv sync --frozen --python 3.12 --extra dev --extra worker --extra mcp
+      - name: Tests (excluding live broker)
+        run: uv run pytest -m "not live" -q
+
   build:
     name: Build distributions
     runs-on: ubuntu-latest
+    needs: verify
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install uv
@@ -33,7 +75,7 @@ jobs:
 
   pypi:
     name: Publish to PyPI
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -48,7 +90,7 @@ jobs:
 
   docker:
     name: Publish container image to GHCR
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,7 +123,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
+          # Provenance attestations ON (audit 2026-07-15 Sec-C): the deploy
+          # pulls by mutable tag from an automated timer; the attestation is
+          # the counter-signal that lets a pulled image be traced back to the
+          # workflow run that built it.
+          provenance: true
 
   github-release:
     name: Create GitHub release

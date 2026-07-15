@@ -45,8 +45,17 @@ jobs:
           # checkout would happily resolve a branch or a SHA; this job must only ever
           # build from a real release tag, or the image contents would not match the
           # version string baked into its name.
-          if ! git rev-parse -q --verify "refs/tags/${{ inputs.tag }}" >/dev/null; then
-            echo "::error::${{ inputs.tag }} is not a tag in this repository"
+          #
+          # $TAG (env), never the workflow-input expression spliced into this
+          # script: the input is attacker-shaped text and this job holds
+          # packages:write. Splicing it was a shell injection (audit
+          # 2026-07-15) — the same step already did it right two lines down.
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::${TAG} is not a tag in this repository"
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/${TAG}^{commit}")" ]; then
+            echo "::error::checkout is not sitting on ${TAG} — refusing to build"
             exit 1
           fi
           VERSION="${TAG#v}"
@@ -77,4 +86,5 @@ jobs:
           # Only the exact version. Never `latest` — a backfill of an OLD release must
           # not move the tag that newer things may follow.
           tags: ghcr.io/${{ github.repository }}:${{ env.version }}
-          provenance: false
+          # Provenance ON — see release.yml (audit 2026-07-15 Sec-C).
+          provenance: true
