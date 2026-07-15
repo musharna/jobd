@@ -333,8 +333,8 @@ def test_update_worker_never_restarts_without_checking_idle_first():
     restart_lines = [i for i, ln in enumerate(lines) if "systemctl" in ln and "restart" in ln]
     assert restart_lines, "no restart in update-worker.sh — did the script change shape?"
 
-    gate_lines = [i for i, ln in enumerate(lines) if "running=$(busy)" in ln]
-    assert gate_lines, "the idle gate (`running=$(busy)`) is gone from update-worker.sh"
+    gate_lines = [i for i, ln in enumerate(lines) if "running=$(busy || true)" in ln]
+    assert gate_lines, "the idle gate (`running=$(busy || true)`) is gone from update-worker.sh"
 
     for r in restart_lines:
         assert any(g < r for g in gate_lines), (
@@ -357,12 +357,46 @@ def test_update_worker_rechecks_idle_after_the_pip_install():
     restart_at = body.index("systemctl --user restart")
     assert install_at < restart_at, "the install must precede the restart"
     between = body[install_at:restart_at]
-    assert "running=$(busy)" in between, (
+    assert "running=$(busy || true)" in between, (
         "update-worker.sh installs, then restarts, without re-checking idle. The "
         "worker long-polls and can claim a job during the pip install — and would "
         "then lose it to the restart, which is the exact accident this script exists "
         "to prevent."
     )
+
+
+def test_update_worker_gate_reads_job_rows_not_the_heartbeat_gauge():
+    """The /workers `running` gauge is refreshed only by the worker's own
+    heartbeat — a job claimed via long-poll right after a heartbeat is invisible
+    to it for up to ~5s, which is a real gate-miss window. Job rows are written
+    synchronously by the /next-job claim, so the gate must count those
+    (audit 2026-07-15 F2)."""
+    body = _UPDATE_WORKER.read_text()
+    assert "/jobs?state_filter=" in body, (
+        "the idle gate no longer reads job rows at all — the heartbeat gauge lags "
+        "claims by up to a heartbeat interval and will miss one"
+    )
+    assert "count_state assigned" in body and "count_state running" in body, (
+        "the gate must count BOTH assigned and running rows: an assigned job is a "
+        "claim the restart would kill just as dead as a running one"
+    )
+    assert "/workers" not in body, (
+        "update-worker.sh consults /workers again — that gauge is heartbeat-lagged; "
+        "the gate must read job rows"
+    )
+
+
+def test_no_script_passes_the_bearer_token_on_argv():
+    """`curl -H "Authorization: Bearer $TOKEN"` puts the token in argv, which any
+    local user can read from /proc/*/cmdline for the lifetime of every
+    timer-driven curl. The scripts pass it via a /dev/fd curl config instead
+    (audit 2026-07-15)."""
+    for s in sorted((_REPO_ROOT / "scripts").glob("*.sh")):
+        code = "\n".join(ln for ln in s.read_text().splitlines() if not ln.lstrip().startswith("#"))
+        assert '-H "Authorization' not in code, (
+            f"{s.name} passes the bearer token on curl's argv — readable in "
+            "/proc/*/cmdline by any local user. Use `-K <(printf 'header = ...')`."
+        )
 
 
 def test_update_worker_targets_the_broker_version_not_pypi_latest():
@@ -412,7 +446,14 @@ def test_committed_units_do_not_use_unexpanded_shell_vars_in_environment():
     """
     import re
 
-    for unit in _REPO_ROOT.glob("scripts/*.service"):
+    # *.timer files carry Environment= just as legally as *.service files, and
+    # the .timer half of this pipeline already shipped one bug (an inert
+    # Persistent=, dropped in 8651b2d) — lint both (audit 2026-07-15).
+    units = sorted(_REPO_ROOT.glob("scripts/*.service")) + sorted(
+        _REPO_ROOT.glob("scripts/*.timer")
+    )
+    assert units, "no systemd units under scripts/ — did they move?"
+    for unit in units:
         for ln in unit.read_text().splitlines():
             s = ln.strip()
             if s.startswith("#") or not s.startswith("Environment"):
