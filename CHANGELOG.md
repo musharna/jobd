@@ -4,6 +4,13 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security
+
+- **The shipped image now installs exactly the dependency versions CI tested (audit 2026-07-15 Sec-B).** `pip install .` re-resolved everything fresh from PyPI at build time, so every release image carried versions no test had ever seen — and was exposed to a dependency hijack on each build. The Dockerfile now installs `requirements-docker.txt` (exported from uv.lock, hashes included) with `--require-hashes`, kept in lockstep by a deploy-lint check; the base image is digest-pinned; project installs are `--no-deps`. Verified by a real build + import smoke test. The stub-package phase-1 hack became unnecessary and is gone.
+- **The release pipeline gates on tests and version lockstep (audit T-2).** `release.yml` never ran a single test, and unlike `publish-image.yml` it never checked the tag against pyproject — a tag pushed on a stale pyproject published a GHCR image whose name lies about its contents (a poisoned rollback target, forever). New `verify` (tag↔pyproject) and `test` jobs gate both publishers; a workflow-shape lint keeps them there.
+- **Buildx provenance attestations are ON in both image workflows (audit Sec-C)** — the deploy pulls by mutable tag from an automated timer, and the attestation is the counter-signal tracing a pulled image back to the workflow run that built it.
+- **`publish-image.yml` no longer splices the workflow input into its shell script (audit LOW-1)** — it's attacker-shaped text in a job holding `packages:write`; it now flows through `env:` only, the job asserts HEAD is actually sitting on the tag, and a lint bans GitHub-expression splices in `run:` blocks across all workflows.
+
 ### Fixed
 
 - **A cancel issued while a worker was frozen was silently dropped across an orphan→resurrect round trip (audit 2026-07-15 F1, HIGH).** The resurrect (v0.5.25) promises a user cancel is honored "through `GET /jobs/{id}/signal`" — but both worker-gone orphan writes (`worker_died` in the sweeper, `worker_restarted` in the reconcile) erased the pending signal with `signal=None`, so by resurrect time there was nothing left to poll. Exact scenario: worker freezes, user cancels the hung job, sweeper orphans it, worker thaws, job resurrects and **runs to completion** — durable user intent gone. Both writes now preserve the signal (inert on a terminal row if the worker never returns; a resurrected worker's next poll delivers the kill). A pending *preempt* survives the round trip too — a resurrect is the same incarnation, not a fresh one, so the M1 stale-signal hazard does not apply.
