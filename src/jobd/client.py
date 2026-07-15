@@ -101,13 +101,48 @@ class JobdClient:
     def logs(self, job_id: int, *, tail_bytes: int = 8192) -> dict:
         return self._request("GET", f"/jobs/{job_id}/output", params={"tail": tail_bytes}).json()
 
-    def list_jobs(self, *, state: str | None = None, project: str | None = None) -> dict:
+    def list_jobs(
+        self,
+        *,
+        state: str | None = None,
+        project: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
         params: dict[str, str] = {}
         if state:
             params["state_filter"] = state
         if project:
             params["project"] = project
+        if limit is not None:
+            params["limit"] = str(limit)
         return self._request("GET", "/jobs", params=params).json()
+
+    def list_jobs_with_total(
+        self,
+        *,
+        state: str | None = None,
+        project: str | None = None,
+        limit: int | None = None,
+    ) -> tuple[list, int]:
+        """Like list_jobs, but also return the broker's X-Total-Count — the size
+        of the FULL filtered set, independent of `limit`. Lets a bounded page
+        still report exact counts (audit 2026-07-15 L-8: jobd_list used to fetch
+        the entire job history per call to compute them)."""
+        params: dict[str, str] = {}
+        if state:
+            params["state_filter"] = state
+        if project:
+            params["project"] = project
+        if limit is not None:
+            params["limit"] = str(limit)
+        resp = self._request("GET", "/jobs", params=params)
+        rows = resp.json()
+        rows = rows if isinstance(rows, list) else rows.get("jobs", [])
+        try:
+            total = int(resp.headers.get("X-Total-Count", ""))
+        except ValueError:
+            total = len(rows)  # pre-pagination broker: the page IS the set
+        return rows, total
 
     def events(
         self,
