@@ -29,6 +29,18 @@ VENV=${JOBD_WORKER_VENV:-$HOME/jobd-worker/.venv}
 UNIT=${JOBD_WORKER_UNIT:-job-worker.service}
 DRY=${DRY_RUN:-0}
 
+# This fleet has TWO venv shapes, and assuming one broke this script twice:
+#   - laptop:            a uv-managed venv with NO pip binary at all.
+#   - desktop/gt76/msi:  plain venvs that DO carry their own pip; two of those
+#                        hosts have no uv installed anywhere.
+# So there is no single install tool that works everywhere. The install step
+# below prefers the venv's own pip and falls back to uv — see install_jobd().
+# uv is resolved to an ABSOLUTE path (it lives in ~/.local/bin, which is NOT on
+# the systemd user-service PATH; a bare `uv` under systemd is a 127). It may be
+# absent, and that is fine on a host whose venv has pip — do NOT hard-fail here.
+UV=${JOBD_UV:-$(command -v uv || true)}
+[ -x "${UV:-}" ] || UV="$HOME/.local/bin/uv"
+
 # NB: no apostrophes inside ${VAR:?word} — bash still does quote processing in
 # there, so a lone ' opens a quoted region and the script dies at EOF.
 : "${JOBD_URL:?JOBD_URL not set - source the worker environment file}"
@@ -76,17 +88,32 @@ if [ "${running:-1}" != "0" ]; then
 fi
 
 if [ "$DRY" = "1" ]; then
-  echo "update-worker: [dry] would pip install jobd[worker]==$target and restart $UNIT"
+  echo "update-worker: [dry] would install jobd[worker]==$target into $VENV and restart $UNIT"
   exit 0
 fi
 
-# Install BEFORE the second idle check: pip is the slow part (seconds), and doing
-# it first keeps the window between "still idle?" and "restart" as short as
-# possible. Writing into the venv does not disturb the running process.
-"$VENV/bin/pip" install -q --upgrade "jobd[worker]==${target}"
+# Install BEFORE the second idle check: the install is the slow part (seconds),
+# and doing it first keeps the window between "still idle?" and "restart" as
+# short as possible. Writing into the venv does not disturb the running process.
+# Pinned to the broker's version (never PyPI latest).
+#
+# Prefer the venv's own pip; fall back to uv for a pip-less (uv-managed) venv.
+# Requiring uv fleet-wide was the second wrong fix: three hosts have pip and no
+# uv, so a uv-only install 127s on exactly the hosts the first version worked on.
+install_jobd() {
+  if [ -x "$VENV/bin/pip" ]; then
+    "$VENV/bin/pip" install -q --upgrade "jobd[worker]==${target}"
+  elif [ -x "$UV" ]; then
+    "$UV" pip install --python "$VENV/bin/python" -q "jobd[worker]==${target}"
+  else
+    echo "update-worker: venv has no pip ($VENV/bin/pip) and no uv ($UV) — cannot install" >&2
+    return 1
+  fi
+}
+install_jobd
 
 # Re-check. The worker long-polls, so it can claim a job at any moment; this
-# narrows the race to the width of a systemctl call rather than a pip install.
+# narrows the race to the width of a systemctl call rather than an install.
 # It does not eliminate it — if we lose, the job takes the normal 60s drain and
 # the broker resurrects it on the next heartbeat (v0.5.25).
 running=$(busy)
