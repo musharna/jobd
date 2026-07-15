@@ -104,6 +104,23 @@ def _deps_satisfied_bulk(jobs: Sequence[Job], session) -> set[int]:
     return satisfied
 
 
+def _job_requires_idempotent(job: Job) -> bool:
+    """Whether the submitter declared this job idempotent (requires.idempotent).
+
+    Malformed or absent requires_json => False: non-idempotent is the safe
+    default (longer reclaim windows; orphan instead of requeue). This is a
+    POLICY decision that used to be pasted at three reclaim/reconcile sites —
+    the kind of triplication where one copy gets edited and two don't
+    (audit 2026-07-15 L-5).
+    """
+    if not job.requires_json or job.requires_json == "{}":
+        return False
+    try:
+        return bool(JobRequires.model_validate_json(job.requires_json).idempotent)
+    except Exception:
+        return False
+
+
 def _cas_state(session, job_id: int, expected: tuple[JobState, ...], **values) -> int:
     """Compare-and-swap a job's state: apply `values` only if the row is still
     in one of `expected`. Returns the affected rowcount — 1 = we won, 0 = the
@@ -371,14 +388,7 @@ def _reconcile_worker_in_flight(
         j.reconcile_misses = (j.reconcile_misses or 0) + 1
         if j.reconcile_misses < RECONCILE_MISS_THRESHOLD:
             continue
-        idempotent = False
-        if j.requires_json and j.requires_json != "{}":
-            try:
-                req = JobRequires.model_validate_json(j.requires_json)
-                if req.idempotent:
-                    idempotent = True
-            except Exception:
-                pass
+        idempotent = _job_requires_idempotent(j)
         # CAS-guarded on the state we read (ASSIGNED or RUNNING) so a /complete
         # from the just-revived worker — which lands on its own session right as
         # this reconcile decides the worker is gone — isn't clobbered (F1). If

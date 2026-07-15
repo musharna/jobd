@@ -395,9 +395,53 @@ class ClassifyResult(BaseModel):
     reason: str | None = None
 
 
+# The complete event vocabulary this system emits — every broker emit_event()
+# name and every worker _post_event() name. ONE definition (audit 2026-07-15
+# Q-1/Sec-A): the Prometheus counter buckets anything outside it to "other"
+# (free-form ingest names must not mint unbounded label cardinality), and the
+# MCP jobd_events schema derives its documented filter values from it instead
+# of hand-listing them (the hand list was stale within a day of shipping).
+# Hook/MCP-ingested events may use names beyond this set by design — they land
+# in events.jsonl at full fidelity; only the metric label is bucketed.
+KNOWN_EVENTS = frozenset(
+    {
+        # job lifecycle (broker)
+        "job_submitted",
+        "job_dispatched",
+        "job_started",
+        "job_completed",
+        "job_cancelled",
+        "job_orphaned",
+        "job_resurrected",
+        "job_uncancelled",
+        "scheduling_timeout",
+        "dispatch_skip",
+        "admission_blocked",
+        "auto_preempt",
+        "checkpoint_complete",
+        "cwd_refused",
+        "submit_warning",
+        "sweep_warning",
+        # retention (broker)
+        "jobs_pruned",
+        "logs_pruned",
+        # worker lifecycle (broker-observed)
+        "worker_registered",
+        "worker_offline",
+        "worker_stale",
+        # worker-posted
+        "worker_shutdown",
+        "watchdog_fired",
+        "stale_scope_sweep",
+    }
+)
+
+
 class EventIngest(BaseModel):
     source: Literal["worker", "hook", "mcp"]
-    event: str
+    # Free-form BY DESIGN (hooks name their own events) but bounded: an
+    # unbounded name would land verbatim in events.jsonl rows and error logs.
+    event: str = Field(min_length=1, max_length=64)
     job_id: int | None = None
     project: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)

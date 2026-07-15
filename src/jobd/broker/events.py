@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from jobd import events as _events
 from jobd.broker.constants import _SINCE_RELATIVE_RE
 from jobd.metrics import EVENTS_TOTAL
+from jobd.models import KNOWN_EVENTS
 
 log = logging.getLogger("jobd")
 
@@ -62,8 +63,16 @@ def _emit_event(
     """
     # M-3: mirror every event to a Prometheus Counter for rate-based alerting.
     # Guarded like the jsonl append below — observability never breaks liveness.
+    # The label is allowlisted (audit 2026-07-15 Sec-A): `event` arrives
+    # free-form from POST /events (hooks name their own events), and every
+    # distinct label value is a PERMANENT time series in the in-process
+    # registry — unbounded names would let any token holder (or a buggy hook
+    # loop) grow the broker's memory and the /metrics scrape body without
+    # limit. Unknown names all share one bucket; events.jsonl keeps the real
+    # name at full fidelity.
     try:
-        EVENTS_TOTAL.labels(event=event, source=source).inc()
+        label = event if event in KNOWN_EVENTS else "other"
+        EVENTS_TOTAL.labels(event=label, source=source).inc()
     except Exception as e:  # pragma: no cover - defensive
         log.warning("event metric inc failed (%s): %s", event, e)
 

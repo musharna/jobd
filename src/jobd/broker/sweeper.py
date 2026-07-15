@@ -42,6 +42,7 @@ from jobd.broker.state import (
     _cas_state,
     _cascade_on_parent_terminal,
     _emit_cascade_cancellations,
+    _job_requires_idempotent,
     _requeue_or_honor_cancel,
 )
 from jobd.db import Job, Worker
@@ -347,14 +348,9 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
             session.execute(select(Job).where(Job.state == JobState.ASSIGNED)).scalars().all()
         )
         for j in assigned:
-            reclaim_seconds = DEAD_WORKER_SECONDS
-            if j.requires_json and j.requires_json != "{}":
-                try:
-                    req = JobRequires.model_validate_json(j.requires_json)
-                    if req.idempotent:
-                        reclaim_seconds = IDEMPOTENT_RECLAIM_SECONDS
-                except Exception:
-                    pass
+            reclaim_seconds = (
+                IDEMPOTENT_RECLAIM_SECONDS if _job_requires_idempotent(j) else DEAD_WORKER_SECONDS
+            )
             cutoff = now - timedelta(seconds=reclaim_seconds)
             w = session.execute(select(Worker).where(Worker.host == j.worker)).scalar_one_or_none()
             if w is None or w.last_heartbeat < cutoff:
@@ -435,16 +431,8 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                         (j.id, j.project, j.worker, last_hb, "wall_clock_exceeded")
                     )
                     continue
-            reclaim_seconds = DEAD_WORKER_SECONDS
-            idempotent = False
-            if j.requires_json and j.requires_json != "{}":
-                try:
-                    req = JobRequires.model_validate_json(j.requires_json)
-                    if req.idempotent:
-                        idempotent = True
-                        reclaim_seconds = IDEMPOTENT_RECLAIM_SECONDS
-                except Exception:
-                    pass
+            idempotent = _job_requires_idempotent(j)
+            reclaim_seconds = IDEMPOTENT_RECLAIM_SECONDS if idempotent else DEAD_WORKER_SECONDS
             cutoff = now - timedelta(seconds=reclaim_seconds)
             w = session.execute(select(Worker).where(Worker.host == j.worker)).scalar_one_or_none()
             if w is not None and w.last_heartbeat >= cutoff:
