@@ -353,7 +353,7 @@ def test_update_worker_rechecks_idle_after_the_pip_install():
     # test pass with the recheck deleted: the slice still contained the *first*
     # gate. A guard that inspects the wrong text is not a guard (see the
     # HEALTHCHECK parser above, same mistake).
-    install_at = body.index('"$VENV/bin/pip" install')
+    install_at = body.index("\ninstall_jobd\n")  # the CALL, not the function body
     restart_at = body.index("systemctl --user restart")
     assert install_at < restart_at, "the install must precede the restart"
     between = body[install_at:restart_at]
@@ -376,6 +376,52 @@ def test_update_worker_targets_the_broker_version_not_pypi_latest():
     assert '=="${target}"' in body or "==${target}" in body, (
         "the install must PIN the broker's exact version"
     )
+
+
+def test_update_worker_handles_both_pip_and_uv_venvs():
+    """This fleet has TWO venv shapes and no single install tool spans them:
+      - the laptop's venv is uv-managed and has NO pip binary;
+      - the other three carry their own pip and two of them have no uv at all.
+    The script broke TWICE on this — first assuming pip everywhere (127 on the
+    laptop), then assuming uv everywhere (127 on the three pip hosts). Both were
+    invisible to the text lints here and only surfaced on real execution (see
+    real-execution-testing). The correct installer tries the venv's pip and
+    falls back to uv, so BOTH invocations must be present.
+    """
+    code = "\n".join(
+        ln for ln in _UPDATE_WORKER.read_text().splitlines()
+        if not ln.lstrip().startswith("#")
+    )
+    assert '"$VENV/bin/pip" install' in code, (
+        "the installer must use the venv's own pip when present — three of four "
+        "hosts have a pip venv and no uv, and a uv-only install 127s on them."
+    )
+    assert '"$UV" pip install' in code, (
+        "the installer must fall back to uv for a pip-less (uv-managed) venv — the "
+        "laptop's venv has no pip, and a pip-only install 127s on it."
+    )
+
+
+def test_committed_units_do_not_use_unexpanded_shell_vars_in_environment():
+    """systemd does NOT do shell expansion in Environment= — `$HOME/x` is passed
+    to the process as the literal 6 characters `$HOME/`, not the home directory.
+    A deploy helper injected `Environment=JOBD_WORKER_VENV=$HOME/jobd-worker/.venv`
+    into three workers' update units; the script then looked for jobd under a
+    literal `$HOME` path, found nothing (installed=none), and — with the pip bug —
+    127'd. Use an absolute path or a systemd specifier (%h) instead. Guard every
+    committed unit so this gotcha cannot re-enter through one.
+    """
+    import re
+    for unit in _REPO_ROOT.glob("scripts/*.service"):
+        for ln in unit.read_text().splitlines():
+            s = ln.strip()
+            if s.startswith("#") or not s.startswith("Environment"):
+                continue
+            value = s.split("=", 1)[1] if "=" in s else ""
+            assert not re.search(r"\$\{?[A-Za-z_]", value), (
+                f"{unit.name}: `{s}` puts a shell variable in Environment=. systemd "
+                "will NOT expand it — use an absolute path or a %h/%i specifier."
+            )
 
 
 def test_the_worker_host_is_not_a_systemd_hostname_specifier():
