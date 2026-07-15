@@ -389,8 +389,7 @@ def test_update_worker_handles_both_pip_and_uv_venvs():
     falls back to uv, so BOTH invocations must be present.
     """
     code = "\n".join(
-        ln for ln in _UPDATE_WORKER.read_text().splitlines()
-        if not ln.lstrip().startswith("#")
+        ln for ln in _UPDATE_WORKER.read_text().splitlines() if not ln.lstrip().startswith("#")
     )
     assert '"$VENV/bin/pip" install' in code, (
         "the installer must use the venv's own pip when present — three of four "
@@ -412,6 +411,7 @@ def test_committed_units_do_not_use_unexpanded_shell_vars_in_environment():
     committed unit so this gotcha cannot re-enter through one.
     """
     import re
+
     for unit in _REPO_ROOT.glob("scripts/*.service"):
         for ln in unit.read_text().splitlines():
             s = ln.strip()
