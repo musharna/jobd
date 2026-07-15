@@ -39,16 +39,23 @@ log() { echo "[$(date -Is)] deploy-broker: $*"; }
 die() { log "FATAL: $*"; exit 1; }
 
 [ -f "$ENV_FILE" ] || die "no .env at $ENV_FILE"
+# The .env carries JOBD_API_TOKEN; keep it out of everyone else's reach.
+# Idempotent, and cheap insurance against a hand-created file (audit 2026-07-15).
+chmod 600 "$ENV_FILE" 2>/dev/null || true
 
 # --- Where are we now? Ask the broker, don't infer. -------------------------------
-# shellcheck disable=SC1090  # runtime path, and we only read two vars out of it
 JOBD_HOST=$(grep -E '^JOBD_HOST=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
 JOBD_HOST=${JOBD_HOST:-127.0.0.1}
+# The port the broker binds is config too — healthcheck.py reads JOBD_PORT, and a
+# health gate probing a hardcoded :8765 on a non-default deployment can never
+# pass (audit 2026-07-15).
+JOBD_PORT=$(grep -E '^JOBD_PORT=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
 TOKEN=$(grep -E '^JOBD_API_TOKEN=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
-BASE="http://${JOBD_HOST}:8765"
+BASE="http://${JOBD_HOST}:${JOBD_PORT:-8765}"
 
 broker_version() {
-	curl -sS -m 5 -H "Authorization: Bearer ${TOKEN}" "$BASE/health" 2>/dev/null \
+	# Token via a /dev/fd curl config, not argv (visible in /proc/*/cmdline).
+	curl -sS -m 5 -K <(printf 'header = "Authorization: Bearer %s"\n' "$TOKEN") "$BASE/health" 2>/dev/null \
 		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true
 }
 
@@ -86,6 +93,12 @@ if [ -z "$TARGET" ]; then
 		| python3 -c 'import sys,json; print(json.load(sys.stdin).get("tag_name","").lstrip("v"))' 2>/dev/null || true)
 	[ -n "$TARGET" ] || die "could not resolve the latest release from the GitHub API"
 fi
+
+# TARGET reaches a sed replacement into the file that holds JOBD_API_TOKEN, and
+# it arrives from argv or a remote API. Refuse anything that is not a plain
+# version before it touches the .env (audit 2026-07-15): this also keeps
+# sed-special characters (| & newline) out of the pin_tag expression.
+[[ "$TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "target '$TARGET' is not a plain X.Y.Z version"
 
 RUNNING=$(broker_version)
 PINNED=$(current_pin)

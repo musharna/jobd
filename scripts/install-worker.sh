@@ -2,7 +2,15 @@
 # install-worker.sh — set up a jobd worker on a fresh host.
 #
 # Usage:
-#   bash install-worker.sh --broker http://127.0.0.1:8765 --host <name> [--tags tag1,tag2] [--dry-run]
+#   JOBD_API_TOKEN=... bash install-worker.sh --broker http://127.0.0.1:8765 --host <name> \
+#       [--version X.Y.Z] [--tags tag1,tag2] [--dry-run]
+#
+# The installed version is PINNED to what the broker is running (asked via
+# /health, which needs JOBD_API_TOKEN) or to an explicit --version. There is
+# deliberately no unpinned fallback: a worker must never run ahead of its
+# broker (the schema authority), and "pip install latest" on a fresh host is
+# exactly how one would (audit 2026-07-15). update-worker.sh keeps it in
+# lockstep afterwards — install its timer, see the closing instructions.
 #
 # Assumes: python3.11+, bash. Does NOT require sudo, a clone, or git — the
 # worker ships on PyPI as jobd[worker] and runs via the `jobd-worker` command.
@@ -14,12 +22,17 @@ set -euo pipefail
 BROKER_URL=""
 HOST_NAME=""
 EXTRA_TAGS=""
+PIN_VERSION=""
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--broker)
 		BROKER_URL="$2"
+		shift 2
+		;;
+	--version)
+		PIN_VERSION="$2"
 		shift 2
 		;;
 	--host)
@@ -46,6 +59,23 @@ done
 	exit 1
 }
 [[ -z "$HOST_NAME" ]] && HOST_NAME="$(hostname)"
+
+# --- resolve the version to pin (broker's own, or explicit) ----------------
+if [[ -z "$PIN_VERSION" && -n "${JOBD_API_TOKEN:-}" ]]; then
+	PIN_VERSION=$(curl -sf -K <(printf 'header = "Authorization: Bearer %s"\n' "$JOBD_API_TOKEN") \
+		"$BROKER_URL/health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])' || true)
+fi
+[[ -n "$PIN_VERSION" ]] || {
+	echo "cannot determine which jobd version to install: set JOBD_API_TOKEN so this" >&2
+	echo "script can ask $BROKER_URL/health, or pass --version X.Y.Z explicitly." >&2
+	echo "There is no unpinned fallback — a fresh worker installed from PyPI latest" >&2
+	echo "can run AHEAD of its broker, which the fleet invariant forbids." >&2
+	exit 1
+}
+[[ "$PIN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+	echo "resolved version '$PIN_VERSION' is not a plain X.Y.Z" >&2
+	exit 1
+}
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -87,6 +117,7 @@ echo "  gpu:   $HAS_NVIDIA"
 echo "  tags:  ${DETECTED_TAGS[*]}"
 if [[ -n "$EXTRA_TAGS" ]]; then echo "  extra: $EXTRA_TAGS"; fi
 echo "  broker: $BROKER_URL"
+echo "  jobd:   $PIN_VERSION (pinned to the broker)"
 
 if [[ $DRY_RUN == 1 ]]; then
 	echo "(dry-run — exiting)"
@@ -107,8 +138,9 @@ fi
 # The worker + capability detection ship inside the jobd package; the [worker]
 # extra pulls httpx, psutil, pyyaml, and nvidia-ml-py (pure-Python; harmless on
 # non-GPU hosts). Installs the `jobd-worker` console script into the venv.
+# Pinned to the broker's version — never PyPI latest (see header).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-"$INSTALL_DIR/.venv/bin/pip" install "jobd[worker]"
+"$INSTALL_DIR/.venv/bin/pip" install "jobd[worker]==${PIN_VERSION}"
 
 # Config file
 #
@@ -155,3 +187,9 @@ echo "To auto-start (systemd user unit, requires 'sudo loginctl enable-linger \$
 echo "  cp $SCRIPT_DIR/job-worker.service ~/.config/systemd/user/"
 echo "  # then edit ExecStart in the unit to: $INSTALL_DIR/.venv/bin/jobd-worker"
 echo "  systemctl --user enable --now job-worker.service"
+echo ""
+echo "To keep this worker in lockstep with the broker (STRONGLY recommended —"
+echo "a worker that never self-updates is how fixes rot undeployed for weeks):"
+echo "  cp $SCRIPT_DIR/jobd-worker-update.service $SCRIPT_DIR/jobd-worker-update.timer ~/.config/systemd/user/"
+echo "  # edit the unit's Environment= lines for this host, then:"
+echo "  systemctl --user enable --now jobd-worker-update.timer"
