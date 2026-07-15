@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal
@@ -15,6 +16,8 @@ from jobd.models import (
     ProfileSpec,
     ResolutionSource,
 )
+
+log = logging.getLogger("jobd.config")
 
 
 @dataclass
@@ -71,6 +74,26 @@ _DEFAULTS_KEYS = {
     "escalate_to_arc",
 }
 
+# Bounds mirror JobSubmit (models.py) — YAML values bypass Pydantic, and an
+# unvalidated value splits broker/worker semantics (audit 2026-07-15 F3):
+# `max_wall_s: 0` reads as "unset" to the worker (`or`-falsy) but "enforce" to
+# the sweeper (`is not None`), which then orphans a healthy job as
+# wall_clock_exceeded; a STRING value TypeErrors the whole sweep pass every
+# 30s. Out-of-bounds/mistyped values are dropped loudly, which also means a
+# `0` cannot opt a project out of a _default floor — matching the floor's
+# existing "None means unset, and unset gets the floor" contract.
+_DEFAULTS_BOUNDS: dict[str, tuple[int, int]] = {
+    "max_wall_s": (1, 7 * 24 * 3600),
+    "idle_timeout_s": (1, 24 * 3600),
+    "checkpoint_grace_s": (1, 300),
+    "priority": (0, 100),
+}
+_DEFAULTS_TYPES: dict[str, type] = {
+    "host_pin": str,
+    "preemptible": bool,
+    "escalate_to_arc": bool,
+}
+
 
 def _parse_defaults(raw: dict | None) -> ProjectDefaults:
     if not isinstance(raw, dict):
@@ -86,6 +109,25 @@ def _parse_defaults(raw: dict | None) -> ProjectDefaults:
             elif isinstance(v, dict):
                 kwargs["requires"] = JobRequires(**v)
             # any other shape is ignored
+        elif v is not None and k in _DEFAULTS_BOUNDS:
+            lo, hi = _DEFAULTS_BOUNDS[k]
+            if not isinstance(v, int) or isinstance(v, bool) or not (lo <= v <= hi):
+                log.warning(
+                    "projects.yaml defaults.%s=%r is not an int in [%d, %d] — ignoring it",
+                    k,
+                    v,
+                    lo,
+                    hi,
+                )
+                continue
+            kwargs[k] = v
+        elif v is not None and k in _DEFAULTS_TYPES and not isinstance(v, _DEFAULTS_TYPES[k]):
+            log.warning(
+                "projects.yaml defaults.%s=%r is not a %s — ignoring it",
+                k,
+                v,
+                _DEFAULTS_TYPES[k].__name__,
+            )
         else:
             kwargs[k] = v
     return ProjectDefaults(**kwargs)

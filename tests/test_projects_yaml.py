@@ -263,3 +263,81 @@ def test_priority_endpoints_work_against_a_read_only_config_dir(tmp_path):
         assert got["project-d"]["priority"] == 55
     finally:
         cfg.chmod(0o755)
+
+
+# --- defaults validation (audit 2026-07-15 F3) ------------------------------
+#
+# YAML values bypass Pydantic. An unvalidated `max_wall_s: 0` splits
+# broker/worker semantics: the worker reads it as unset (`or`-falsy) and never
+# enforces, the sweeper reads it as set (`is not None`) and orphans the healthy
+# job as wall_clock_exceeded — which is not resurrectable. A STRING value
+# TypeErrors the whole sweep pass every 30s. Both must die at parse time.
+
+
+def _defaults_yaml(tmp_path, defaults_body: str):
+    path = tmp_path / "projects.yaml"
+    path.write_text(
+        f"""
+projects:
+  p:
+    priority: 50
+    defaults:
+{defaults_body}
+  _default:
+    priority: 40
+"""
+    )
+    return load_projects(path)["p"].defaults
+
+
+def test_zero_wall_clock_is_dropped_not_half_enforced(tmp_path, caplog):
+    d = _defaults_yaml(tmp_path, "      max_wall_s: 0")
+    assert d.max_wall_s is None, (
+        "max_wall_s=0 must not reach Job rows: the worker treats 0 as unset but the "
+        "sweeper treats it as set, and orphans a healthy running job as wall_clock_exceeded"
+    )
+    assert any("max_wall_s" in r.message for r in caplog.records), "the drop must be loud"
+
+
+def test_a_string_duration_is_dropped_before_it_can_kill_the_sweep(tmp_path):
+    d = _defaults_yaml(tmp_path, '      max_wall_s: "8h"')
+    assert d.max_wall_s is None, (
+        "a string max_wall_s flows into Job.max_wall_s and the sweeper's arithmetic "
+        "raises TypeError — aborting the ENTIRE sweep pass (timeouts, reclaims, "
+        "retention) every 30 seconds"
+    )
+
+
+def test_out_of_bounds_values_are_dropped(tmp_path):
+    d = _defaults_yaml(
+        tmp_path,
+        "      max_wall_s: 999999999\n      idle_timeout_s: -5\n      checkpoint_grace_s: 301\n      priority: 150",
+    )
+    assert d.max_wall_s is None
+    assert d.idle_timeout_s is None
+    assert d.checkpoint_grace_s is None
+    assert d.priority is None
+
+
+def test_a_boolean_is_not_an_int_here(tmp_path):
+    # YAML `max_wall_s: true` is a Python bool, which IS an int subclass —
+    # without the explicit bool check it would land as max_wall_s=1.
+    d = _defaults_yaml(tmp_path, "      max_wall_s: true")
+    assert d.max_wall_s is None
+
+
+def test_mistyped_flag_fields_are_dropped(tmp_path):
+    d = _defaults_yaml(tmp_path, '      preemptible: "yes please"\n      host_pin: 7')
+    assert d.preemptible is None
+    assert d.host_pin is None
+
+
+def test_valid_defaults_still_parse_bounds_inclusive(tmp_path):
+    d = _defaults_yaml(
+        tmp_path,
+        "      max_wall_s: 604800\n      idle_timeout_s: 1\n      checkpoint_grace_s: 300\n      priority: 0",
+    )
+    assert d.max_wall_s == 604800
+    assert d.idle_timeout_s == 1
+    assert d.checkpoint_grace_s == 300
+    assert d.priority == 0
