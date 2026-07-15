@@ -473,6 +473,14 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 elif outcome == "requeued":
                     requeued_ids.append(j.id)
             else:
+                # A pending signal is deliberately PRESERVED (audit 2026-07-15
+                # F1): a worker_died orphan is resurrectable, and the resurrect
+                # path honors a pending cancel/preempt through the revived
+                # worker's GET /signal poll. Erasing it here silently dropped a
+                # user cancel across an orphan->resurrect round trip. Inert on
+                # the terminal row if the worker never returns. (Contrast
+                # wall_clock_exceeded above: a deliberate, non-resurrectable
+                # terminal, which does clear it.)
                 if not _cas_state(
                     session,
                     j.id,
@@ -480,7 +488,6 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                     state=JobState.ORPHANED.value,
                     finished_at=now,
                     termination_reason="worker_died",
-                    signal=None,
                 ):
                     continue
                 session.refresh(j)  # sync ORM state so the cascade sees ORPHANED

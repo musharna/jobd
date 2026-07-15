@@ -22,13 +22,15 @@ mirror question, "the WORKER claims this is running — is it?". Same shape as t
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
 from jobd.app import build_app
-from jobd.db import Job
+from jobd.broker import state as state_mod
+from jobd.db import Job, Worker
 
 
 @pytest.fixture
@@ -94,10 +96,23 @@ def _row(client: TestClient, job_id: int) -> Job:
     engine = client.app.state.engine
     with engine.begin() as conn:
         return conn.execute(
-            select(Job.state, Job.termination_reason, Job.finished_at, Job.warning).where(
-                Job.id == job_id
-            )
+            select(
+                Job.state,
+                Job.termination_reason,
+                Job.finished_at,
+                Job.warning,
+                Job.signal,
+                Job.last_enqueued_at,
+            ).where(Job.id == job_id)
         ).one()
+
+
+def _dead(client: TestClient, host: str) -> None:
+    """Age the worker's heartbeat past DEAD_WORKER_SECONDS so the sweeper reaps."""
+    engine = client.app.state.engine
+    stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
+    with engine.begin() as conn:
+        conn.execute(update(Worker).where(Worker.host == host).values(last_heartbeat=stale))
 
 
 # --- the regression -------------------------------------------------------
@@ -306,3 +321,151 @@ def test_old_workers_that_do_not_report_reconcile_nothing(client):
     _hb(client, "laptop")  # no in_flight_job_ids at all
 
     assert _row(client, job_id).state == "orphaned"
+
+
+# --- a cancel issued while the worker was frozen (audit 2026-07-15 F1) ------
+#
+# The resurrect docstring promises a user cancel is honored "through GET
+# /jobs/{id}/signal". That only works if the signal SURVIVES the orphan: both
+# worker-gone orphan writes used to erase it (signal=None), so by resurrect
+# time there was nothing left to poll — the cancelled job ran to completion.
+
+
+def test_the_sweeper_orphan_preserves_a_pending_cancel(client):
+    """worker_died: the reaper's orphan write must not erase durable user intent."""
+    job_id = _claim(client, "laptop")
+    assert client.post(f"/jobs/{job_id}/cancel").status_code == 200  # signal armed
+    _dead(client, "laptop")
+
+    client.app.state.sweep_once()
+
+    row = _row(client, job_id)
+    assert row.state == "orphaned"
+    assert row.termination_reason == "worker_died"
+    assert row.signal == "cancel", (
+        "the orphan write erased the pending cancel — if this worker comes back, "
+        "the resurrect has no signal left to deliver and the job runs to completion"
+    )
+
+
+def test_the_reconcile_orphan_preserves_a_pending_cancel(client):
+    """worker_restarted: same invariant on the forward reconcile's orphan write."""
+    job_id = _claim(client, "laptop")
+    assert client.post(f"/jobs/{job_id}/cancel").status_code == 200
+    old = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=120)
+    _force(client, job_id, started_at=old)  # past RECONCILE_MIN_AGE_SECONDS
+
+    _hb(client, "laptop", in_flight=[])  # miss 1
+    _hb(client, "laptop", in_flight=[])  # miss 2 -> orphaned worker_restarted
+
+    row = _row(client, job_id)
+    assert row.state == "orphaned"
+    assert row.termination_reason == "worker_restarted"
+    assert row.signal == "cancel"
+
+
+def test_a_cancel_issued_during_the_freeze_is_delivered_after_resurrect(client):
+    """End to end: cancel lands while the worker is frozen, the sweeper orphans,
+    the worker thaws and resurrects — its next signal poll MUST see the cancel."""
+    job_id = _claim(client, "laptop")
+    assert client.post(f"/jobs/{job_id}/cancel").status_code == 200
+    _dead(client, "laptop")
+    client.app.state.sweep_once()
+    assert _row(client, job_id).state == "orphaned"
+
+    _hb(client, "laptop", in_flight=[job_id])  # the thaw
+
+    row = _row(client, job_id)
+    assert row.state == "running"
+    assert client.get(f"/jobs/{job_id}/signal").json()["signal"] == "cancel", (
+        "the resurrected worker polled /signal and got nothing — the user's cancel "
+        "was silently dropped across the orphan->resurrect round trip"
+    )
+
+
+# --- a resurrect on a stale report must self-heal (audit 2026-07-15 F4) -----
+
+
+def test_a_resurrect_on_a_stale_report_self_heals(client):
+    """A heartbeat snapshot taken just before the worker finished can resurrect a
+    row nothing is running. The forward reconcile must re-orphan it within
+    RECONCILE_MISS_THRESHOLD heartbeats — pin the self-heal."""
+    job_id = _claim(client, "laptop")
+    old = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=120)
+    _force(client, job_id, state="orphaned", termination_reason="worker_died", started_at=old)
+
+    _hb(client, "laptop", in_flight=[job_id])  # the stale report
+    assert _row(client, job_id).state == "running"
+
+    _hb(client, "laptop", in_flight=[])  # miss 1
+    _hb(client, "laptop", in_flight=[])  # miss 2
+
+    row = _row(client, job_id)
+    assert row.state == "orphaned", "the flap never healed — a ghost job pins its slot forever"
+    assert row.termination_reason == "worker_restarted"
+
+
+# --- the un-cascade must not leak the cancelled interval (audit F5) ---------
+
+
+def test_a_restored_child_gets_a_fresh_queue_clock(client):
+    """The time a child sat cascade-cancelled is not time 'waiting to be
+    scheduled': without a fresh last_enqueued_at, a restored child with
+    scheduling_timeout_s shorter than the outage goes straight back to
+    SCHEDULING_TIMEOUT on the next sweep."""
+    parent = _claim(client, "laptop")
+    child = client.post("/submit", json={**_SUBMIT, "depends_on": [parent]}).json()["id"]
+    stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=3)
+    _force(client, parent, state="orphaned", termination_reason="worker_died")
+    _force(
+        client,
+        child,
+        state="cancelled",
+        warning=f"parent_failed: {parent} → orphaned",
+        last_enqueued_at=stale,
+    )
+
+    _hb(client, "laptop", in_flight=[parent])
+
+    row = _row(client, child)
+    assert row.state == "queued"
+    assert row.last_enqueued_at is not None and row.last_enqueued_at > stale, (
+        "the restore kept the pre-outage queue clock — a scheduling_timeout child "
+        "will be killed for time it spent cancelled"
+    )
+
+
+def test_the_cascade_write_loses_cleanly_to_a_concurrent_user_cancel(client, monkeypatch):
+    """F5: the cascade's child write is a CAS on QUEUED. If a user cancel wins the
+    race after the cascade's QUEUED snapshot, the cascade must not overwrite it —
+    stamping parent_failed on a HUMAN cancel would make it wrongly restorable by
+    a later resurrect's un-cascade. Injected like the other clobber tests: flip
+    the row right as the CAS runs, then delegate to the real one."""
+    parent = _claim(client, "laptop")
+    child = client.post("/submit", json={**_SUBMIT, "depends_on": [parent]}).json()["id"]
+
+    real = state_mod._cas_state
+
+    def racing(session, job_id, expected, **values):
+        if job_id == child and values.get("state") == "cancelled":
+            session.execute(  # the user's cancel lands in the window
+                update(Job).where(Job.id == child).values(state="cancelled", warning=None)
+            )
+        return real(session, job_id, expected, **values)
+
+    monkeypatch.setattr(state_mod, "_cas_state", racing)
+
+    _dead(client, "laptop")
+    client.app.state.sweep_once()  # parent -> orphaned worker_died, cascade fires
+
+    crow = _row(client, child)
+    assert crow.state == "cancelled"
+    assert crow.warning is None, (
+        "the cascade clobbered a user cancel with a parent_failed warning — "
+        "a later parent resurrect would restore a job a human cancelled"
+    )
+
+    monkeypatch.setattr(state_mod, "_cas_state", real)
+    _hb(client, "laptop", in_flight=[parent])  # the resurrect must not restore it
+    assert _row(client, parent).state == "running"
+    assert _row(client, child).state == "cancelled"

@@ -4,6 +4,13 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cancel issued while a worker was frozen was silently dropped across an orphan→resurrect round trip (audit 2026-07-15 F1, HIGH).** The resurrect (v0.5.25) promises a user cancel is honored "through `GET /jobs/{id}/signal`" — but both worker-gone orphan writes (`worker_died` in the sweeper, `worker_restarted` in the reconcile) erased the pending signal with `signal=None`, so by resurrect time there was nothing left to poll. Exact scenario: worker freezes, user cancels the hung job, sweeper orphans it, worker thaws, job resurrects and **runs to completion** — durable user intent gone. Both writes now preserve the signal (inert on a terminal row if the worker never returns; a resurrected worker's next poll delivers the kill). A pending *preempt* survives the round trip too — a resurrect is the same incarnation, not a fresh one, so the M1 stale-signal hazard does not apply.
+- **The un-cascade restored children with a stale queue clock (audit F5).** A child restored to QUEUED by a parent's resurrect kept its pre-outage `last_enqueued_at`, so one with `scheduling_timeout_s` shorter than the outage went straight back to SCHEDULING_TIMEOUT on the next sweep — the interval it spent *cancelled* counted as time "waiting to be scheduled". The restore CAS now stamps a fresh `last_enqueued_at`.
+- **The dependency cascade's child write is now a CAS on QUEUED (audit F5).** It was a plain ORM assignment against a QUEUED snapshot; a user cancel landing in the window was overwritten with a `parent_failed` warning — same final state, but the stamp made the human's cancel wrongly restorable by a later parent resurrect's un-cascade. The CAS loses cleanly: the cancel stays untouched and unrestorable.
+- **A resurrect flap on a stale in-flight report is pinned as self-healing (audit F4).** A heartbeat snapshot taken just before a worker finished a job can resurrect a row nothing is running; the forward reconcile re-orphans it within `RECONCILE_MISS_THRESHOLD` heartbeats. Behavior was already correct — now there is a regression test holding it.
+
 ### Added
 
 - **Worker CD (`scripts/update-worker.sh` + a 15-minute user timer) — the workers had no deployment story at all.** The broker self-deploys; the workers were upgraded only when a human remembered to restart them, so they drifted. That is not cosmetic: the `cwd_missing` pre-dispatch check shipped in **v0.5.10 on 2026-06-30 and did nothing for twelve days**, because the workers were still on 0.5.3/0.5.7. Nine jobs died of the exact fault it had been written to prevent, and CI was green the whole time. **A fix that never reaches a worker is not a fix.**

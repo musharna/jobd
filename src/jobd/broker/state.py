@@ -264,10 +264,21 @@ def _cascade_on_parent_terminal(session, parent: Job) -> list[tuple[int, str]]:
             if child.id in processed:
                 continue
             processed.add(child.id)
-            child.state = JobState.CANCELLED.value
-            child.finished_at = now
-            child.warning = f"parent_failed: {pid} → {pstate}"
-            child.warning_at = now
+            # CAS on QUEUED rather than a plain ORM assignment (F5, audit
+            # 2026-07-15): a user cancel that lands between the snapshot above
+            # and this write must win untouched — overwriting it would stamp a
+            # parent_failed warning on a HUMAN cancel, making it wrongly
+            # restorable by a later parent resurrect's un-cascade.
+            if not _cas_state(
+                session,
+                child.id,
+                (JobState.QUEUED,),
+                state=JobState.CANCELLED.value,
+                finished_at=now,
+                warning=f"parent_failed: {pid} → {pstate}",
+                warning_at=now,
+            ):
+                continue
             cancelled.append((child.id, child.project))
             # The cancelled child is now a failed-side terminal; cascade to its
             # own default-policy children.
@@ -396,6 +407,12 @@ def _reconcile_worker_in_flight(
                     cascade_records.append((j.id, j.state, cascaded))
                 cancelled_records.append((j.id, j.project, cur.value))
         else:
+            # A pending signal is deliberately PRESERVED (audit 2026-07-15 F1):
+            # this orphan is resurrectable, and the resurrect path relies on the
+            # revived worker polling GET /signal to honor a cancel/preempt the
+            # frozen worker never saw. Erasing it here silently dropped a user
+            # cancel across an orphan->resurrect round trip. On a terminal row
+            # the signal is inert; nothing re-dispatches an ORPHANED job.
             if _cas_state(
                 session,
                 j.id,
@@ -403,7 +420,6 @@ def _reconcile_worker_in_flight(
                 state=JobState.ORPHANED.value,
                 finished_at=now,
                 termination_reason="worker_restarted",
-                signal=None,
             ):
                 session.refresh(j)  # sync ORM state so the cascade sees ORPHANED
                 cascaded = _cascade_on_parent_terminal(session, j)
@@ -508,6 +524,7 @@ def _uncascade_on_parent_resurrect(session, parent: Job) -> list[tuple[int, str]
     is still in a failed-side terminal — otherwise it remains genuinely
     un-runnable and must stay cancelled.
     """
+    now = datetime.now(UTC).replace(tzinfo=None)
     restored: list[tuple[int, str]] = []
     processed: set[int] = set()
     frontier: list[int] = [parent.id]
@@ -549,6 +566,12 @@ def _uncascade_on_parent_resurrect(session, parent: Job) -> list[tuple[int, str]
                 finished_at=None,
                 warning=None,
                 warning_at=None,
+                # F5 (audit 2026-07-15): restart the scheduling_timeout clock —
+                # the interval spent cascade-cancelled is not time "waiting to
+                # be scheduled", and without this a child that sat cancelled
+                # longer than its timeout goes straight to SCHEDULING_TIMEOUT
+                # on the next sweep.
+                last_enqueued_at=now,
             ):
                 restored.append((c.id, c.project))
                 frontier.append(c.id)
