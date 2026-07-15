@@ -69,3 +69,36 @@ def test_worker_module_has_no_print_calls_left():
         "an undifferentiated priority, so it cannot be filtered and it re-creates the "
         "hole this migration closed. Use log.info/warning/error."
     )
+
+
+def test_an_invalid_log_level_falls_back_to_info_instead_of_crashing(monkeypatch):
+    """`log.setLevel("DEUBG")` raises ValueError — at import of the logging
+    setup, under Restart=on-failure, i.e. a crash LOOP from one typo'd env var
+    (audit 2026-07-15 L-3). The worker must run at INFO and say so."""
+    import jobd.worker.job_worker as jw
+
+    monkeypatch.setenv("JOBD_LOG_LEVEL", "DEUBG")
+    log = logging.getLogger("jobd.worker")
+    old = (log.handlers[:], log.level, log.propagate)
+    log.handlers = []
+    try:
+        jw._setup_logging()  # must not raise
+        assert log.level == logging.INFO
+    finally:
+        # restore propagate too — _setup_logging sets it False, and leaking
+        # that breaks every later caplog-based worker test in the suite
+        log.handlers, log.level, log.propagate = old
+
+
+def test_a_valid_log_level_is_still_honored(monkeypatch):
+    import jobd.worker.job_worker as jw
+
+    monkeypatch.setenv("JOBD_LOG_LEVEL", "debug")
+    log = logging.getLogger("jobd.worker")
+    old = (log.handlers[:], log.level, log.propagate)
+    log.handlers = []
+    try:
+        jw._setup_logging()
+        assert log.level == logging.DEBUG
+    finally:
+        log.handlers, log.level, log.propagate = old

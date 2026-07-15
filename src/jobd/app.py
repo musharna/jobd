@@ -51,6 +51,7 @@ from jobd.broker.joblog import job_log_path
 from jobd.broker.projects import (
     _persist_projects,
     _projects_to_jsonable,
+    projects_mutation_lock,
 )
 from jobd.broker.scheduling import (
     _build_snapshots,
@@ -1197,8 +1198,12 @@ def build_app(
                     # for it would make them re-emit on their next poll.
                     # pop, not del: concurrent /next-job attempts share this dict
                     # and another thread can remove the same key underneath us.
+                    # list(skip_state), not skip_state: iterating the live dict
+                    # while a concurrent attempt INSERTS raises "dictionary
+                    # changed size during iteration" → that /next-job 500s
+                    # (audit 2026-07-15 F6).
                     for stale in [
-                        k for k in skip_state if k[1] == q.host and k[0] not in queued_by_id
+                        k for k in list(skip_state) if k[1] == q.host and k[0] not in queued_by_id
                     ]:
                         skip_state.pop(stale, None)
                     return None
@@ -1326,28 +1331,33 @@ def build_app(
 
     @app.post("/projects/{name}")
     def set_project_priority(name: str, payload: SetPriorityRequest):
-        priority = max(0, min(100, payload.priority))
-        existing = state["projects"].get(name)
-        if existing is None:
-            state["projects"][name] = ProjectEntry(priority=priority)
-        else:
-            existing.priority = priority
-        _persist_projects(state)
-        return _projects_to_jsonable(state["projects"])
+        # Lock: these endpoints run on the threadpool and mutate-then-iterate
+        # the shared projects dict; unsynchronized, a concurrent set/nudge can
+        # blow up mid-iteration or last-write-win the overlay (F7).
+        with projects_mutation_lock:
+            priority = max(0, min(100, payload.priority))
+            existing = state["projects"].get(name)
+            if existing is None:
+                state["projects"][name] = ProjectEntry(priority=priority)
+            else:
+                existing.priority = priority
+            _persist_projects(state)
+            return _projects_to_jsonable(state["projects"])
 
     @app.post("/projects/{name}/nudge")
     def nudge_project_priority(name: str, payload: NudgePriorityRequest):
-        delta = payload.delta
-        existing = state["projects"].get(name)
-        if existing is None:
-            base_entry = state["projects"].get("_default")
-            base = base_entry.priority if base_entry is not None else 40
-            new_priority = max(0, min(100, base + delta))
-            state["projects"][name] = ProjectEntry(priority=new_priority)
-        else:
-            existing.priority = max(0, min(100, existing.priority + delta))
-        _persist_projects(state)
-        return _projects_to_jsonable(state["projects"])
+        with projects_mutation_lock:
+            delta = payload.delta
+            existing = state["projects"].get(name)
+            if existing is None:
+                base_entry = state["projects"].get("_default")
+                base = base_entry.priority if base_entry is not None else 40
+                new_priority = max(0, min(100, base + delta))
+                state["projects"][name] = ProjectEntry(priority=new_priority)
+            else:
+                existing.priority = max(0, min(100, existing.priority + delta))
+            _persist_projects(state)
+            return _projects_to_jsonable(state["projects"])
 
     @app.post("/reload")
     def reload_config():

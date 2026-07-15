@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import os
+import threading
+
 import yaml
 
 from jobd.broker.context import BrokerState
 from jobd.config import ProjectEntry
+
+# Serializes the /projects mutation endpoints against each other and against
+# _persist_projects' iteration (audit 2026-07-15 F7): set/nudge run on the
+# threadpool, mutate the shared dict, then iterate it to persist — a concurrent
+# insert mid-iteration raises "dictionary changed size", and two concurrent
+# persists last-write-win the overlay file.
+projects_mutation_lock = threading.Lock()
 
 
 def _entry_to_yaml_dict(entry: ProjectEntry) -> dict:
@@ -73,4 +83,9 @@ def _persist_projects(state: BrokerState) -> None:
     }
     path = state["paths"]["project_overrides"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump({"priorities": overrides}, sort_keys=False))
+    # tmp + os.replace: a crash mid-write must not leave a truncated overlay —
+    # this file is read back at startup/reload, and half a YAML document would
+    # take the runtime priorities down with it.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(yaml.safe_dump({"priorities": overrides}, sort_keys=False))
+    os.replace(tmp, path)

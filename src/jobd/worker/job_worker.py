@@ -121,7 +121,15 @@ def _setup_logging() -> None:
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(_JournalPriorityFormatter(journal=bool(os.environ.get("JOURNAL_STREAM"))))
     log.addHandler(handler)
-    log.setLevel(os.environ.get("JOBD_LOG_LEVEL", "INFO").upper())
+    # A typo'd level ("DEUBG") must not take the worker down: setLevel raises
+    # ValueError on unknown names, and under Restart=on-failure that is a crash
+    # LOOP, at import time, from an env var (audit 2026-07-15 L-3).
+    level = os.environ.get("JOBD_LOG_LEVEL", "INFO").upper()
+    if level not in logging.getLevelNamesMapping():
+        log.setLevel(logging.INFO)
+        log.warning("JOBD_LOG_LEVEL=%r is not a log level; using INFO", level)
+    else:
+        log.setLevel(level)
     log.propagate = False
 
 
@@ -470,7 +478,6 @@ def _is_solo_in_flight() -> bool:
 def _reserve_and_dispatch(
     job: dict,
     *,
-    max_concurrent: int,
     job_threads: list,
     run_in_thread,
 ) -> None:
@@ -478,11 +485,11 @@ def _reserve_and_dispatch(
 
     Registering the reservation HERE — in the calling (poll-loop) thread,
     before this function returns — is what bounds concurrency. The poll loop's
-    capacity gate reads ``len(_in_flight)`` on its next iteration; because the
-    reservation is already recorded, it cannot claim more jobs against a stale
-    (too-low) count and oversubscribe past ``max_concurrent``. The pre-fix code
-    registered inside the worker thread, so between ``t.start()`` and the thread
-    scheduling, the gate could re-poll and overcommit.
+    capacity gate reads ``len(_in_flight)`` against its max_concurrent on the
+    next iteration; because the reservation is already recorded, it cannot
+    claim more jobs against a stale (too-low) count and oversubscribe. The
+    pre-fix code registered inside the worker thread, so between ``t.start()``
+    and the thread scheduling, the gate could re-poll and overcommit.
 
     The job ALWAYS runs in a daemon thread, even at ``max_concurrent == 1``.
     Inline execution would park the main thread inside proc.stdout.read() for
@@ -1489,7 +1496,6 @@ def main():
         here, so a refused job is never reserved."""
         _reserve_and_dispatch(
             job,
-            max_concurrent=max_concurrent,
             job_threads=job_threads,
             run_in_thread=_dispatch_in_thread,
         )

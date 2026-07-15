@@ -1284,7 +1284,6 @@ def test_reserve_and_dispatch_registers_before_returning_threaded():
     try:
         job_worker._reserve_and_dispatch(
             {"id": 940, "vram_gb": 8.0, "ram_gb": 4.0, "cpus": 2},
-            max_concurrent=4,
             job_threads=threads,
             run_in_thread=fake_run,
         )
@@ -1323,7 +1322,6 @@ def test_reserve_and_dispatch_single_slot_also_threads():
     try:
         job_worker._reserve_and_dispatch(
             {"id": 941, "vram_gb": 8.0, "ram_gb": 4.0, "cpus": 2},
-            max_concurrent=1,
             job_threads=threads,
             run_in_thread=fake_run,
         )
@@ -1364,7 +1362,6 @@ def test_reserve_and_dispatch_caps_concurrent_reservations():
                 continue  # gate refuses, exactly as the poll loop does
             job_worker._reserve_and_dispatch(
                 {"id": jid, "vram_gb": 8.0, "ram_gb": 4.0, "cpus": 2},
-                max_concurrent=max_concurrent,
                 job_threads=threads,
                 run_in_thread=fake_run,
             )
