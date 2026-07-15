@@ -47,13 +47,20 @@ UV=${JOBD_UV:-$(command -v uv || true)}
 : "${JOBD_API_TOKEN:?JOBD_API_TOKEN not set}"
 HOST=${JOBD_WORKER_HOST:-$(hostname)}
 
-api() { curl -sf -H "Authorization: Bearer ${JOBD_API_TOKEN}" "$@"; }
+# The token goes to curl via a config file on a /dev/fd path (process
+# substitution), NOT via -H on argv — argv is world-readable in /proc/*/cmdline
+# for the lifetime of every timer-driven curl (audit 2026-07-15).
+api() {
+  curl -sf -K <(printf 'header = "Authorization: Bearer %s"\n' "$JOBD_API_TOKEN") "$@"
+}
 
 # --- target = whatever the broker is running ------------------------------
 # Deliberately NOT "latest on PyPI": a worker must never run ahead of its broker.
 # The broker is the schema authority; matching it is the only version that is
 # guaranteed to interoperate.
-target=$(api "${JOBD_URL}/health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
+# `|| true`: under set -e a failed pipeline in this assignment would kill the
+# script HERE, making the diagnostic branch below unreachable (audit 2026-07-15).
+target=$(api "${JOBD_URL}/health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])' || true)
 installed=$("$VENV/bin/python" -c 'import jobd;print(jobd.__version__)' 2>/dev/null || echo "none")
 
 if [ -z "$target" ]; then
@@ -67,20 +74,31 @@ fi
 echo "update-worker: $HOST $installed -> $target"
 
 # --- the gate: never restart a worker that is running a job ---------------
-busy() {
-  api "${JOBD_URL}/workers" | python3 -c "
+# Counts JOB ROWS (assigned/running, owned by this host), not the worker
+# registry's `running` gauge. The gauge is only refreshed by this worker's own
+# heartbeat, so a job claimed via long-poll right after a heartbeat is invisible
+# to it for up to ~5s — a real gate-miss window. Job rows are written
+# synchronously by the /next-job claim itself, so they are authoritative the
+# instant a claim exists (audit 2026-07-15 F2).
+count_state() {
+  api "${JOBD_URL}/jobs?state_filter=$1" | python3 -c "
 import sys, json
 me = ${HOST@Q}
-for w in json.load(sys.stdin):
-    if w['host'] == me:
-        print(w.get('running') or 0)
-        break
-else:
-    print(0)   # broker has never seen us: nothing of ours is in flight
+print(sum(1 for j in json.load(sys.stdin) if j.get('worker') == me))
 "
 }
 
-running=$(busy)
+busy() {
+  local a r
+  a=$(count_state assigned) || return 1
+  r=$(count_state running) || return 1
+  echo $((a + r))
+}
+
+# `|| true`: if the broker is unreachable busy() must yield EMPTY (not kill the
+# script under set -e), so the ${running:-1} fail-safe below actually engages —
+# unknown means busy, never "assume idle and restart".
+running=$(busy || true)
 if [ "${running:-1}" != "0" ]; then
   echo "update-worker: $HOST is running $running job(s) — deferring. A restart would"
   echo "               SIGTERM them (60s grace, then worker_shutdown). Next tick."
@@ -113,10 +131,14 @@ install_jobd() {
 install_jobd
 
 # Re-check. The worker long-polls, so it can claim a job at any moment; this
-# narrows the race to the width of a systemctl call rather than an install.
-# It does not eliminate it — if we lose, the job takes the normal 60s drain and
-# the broker resurrects it on the next heartbeat (v0.5.25).
-running=$(busy)
+# narrows the race to the width of a systemctl call (claim rows are visible
+# immediately — see the gate above). It does not eliminate it — and losing is
+# NOT free: the restart SIGTERMs the job (60s drain), it terminalizes as
+# preempted/worker_shutdown — a DELIBERATE terminal the resurrect will not
+# undo — and its default-policy dependents cascade-cancel. The previous claim
+# here ("the broker resurrects it") was wrong: resurrection only undoes
+# worker_died/worker_restarted, never a drain (audit 2026-07-15 F2).
+running=$(busy || true)
 if [ "${running:-1}" != "0" ]; then
   echo "update-worker: $HOST claimed a job mid-upgrade — venv is staged, restart deferred"
   exit 0
