@@ -96,20 +96,28 @@ _TOOLS = [
 
 
 def _log_call(name: str, arguments: dict | None, error_kind: str | None, ms: float) -> None:
-    log_dir = Path(
-        os.environ.get("JOBD_MCP_LOG_DIR") or os.path.expanduser("~/.claude/state/jobd-mcp")
-    )
-    log_dir.mkdir(parents=True, exist_ok=True)
-    entry: dict[str, Any] = {
-        "ts": time.time(),
-        "tool": name,
-        "job_id": (arguments or {}).get("job_id"),
-        "ms": round(ms, 1),
-    }
-    if error_kind:
-        entry["error_kind"] = error_kind
-    with (log_dir / "calls.jsonl").open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    # Telemetry must never outrank the payload (audit 2026-07-15 Q-2): this is
+    # invoked from a `finally` on the tool-call hot path, so an unguarded
+    # OSError here (read-only HOME, full disk, sandboxed MCP process) would
+    # replace every ALREADY-COMPUTED successful broker result with a logging
+    # failure. Swallow filesystem errors; the call log is best-effort.
+    try:
+        log_dir = Path(
+            os.environ.get("JOBD_MCP_LOG_DIR") or os.path.expanduser("~/.claude/state/jobd-mcp")
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        entry: dict[str, Any] = {
+            "ts": time.time(),
+            "tool": name,
+            "job_id": (arguments or {}).get("job_id"),
+            "ms": round(ms, 1),
+        }
+        if error_kind:
+            entry["error_kind"] = error_kind
+        with (log_dir / "calls.jsonl").open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 _INSTRUCTIONS = """\

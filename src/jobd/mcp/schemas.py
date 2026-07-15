@@ -1,6 +1,9 @@
-"""JSON schemas for the 7 MCP tools (per spec §3)."""
+"""JSON schemas for the MCP tools (per spec §3; the authoritative tool list is
+server._TOOLS, parity-tested against the broker's live route table)."""
 
 from __future__ import annotations
+
+from jobd.models import KNOWN_EVENTS
 
 SUBMIT_INPUT = {
     "type": "object",
@@ -134,18 +137,26 @@ EVENTS_INPUT = {
         },
         "event": {
             "type": "string",
+            # DERIVED from models.KNOWN_EVENTS (audit 2026-07-15 Q-1): the old
+            # hand-typed list was stale within a day of shipping — 7 real event
+            # types (job_resurrected among them) simply weren't advertised, so
+            # an agent debugging a resurrected job was told the filter value
+            # didn't exist. KNOWN_EVENTS itself is completeness-tested against
+            # every emit site in the source (AST sweep), closing the loop.
             "description": (
-                "Filter to one event type: job_submitted, job_dispatched, job_started, "
-                "job_completed, job_cancelled, job_orphaned, dispatch_skip, submit_warning, "
-                "sweep_warning, cwd_refused, worker_offline, worker_stale, auto_preempt, "
-                "watchdog_fired, logs_pruned."
+                "Filter to one event type. Known types: "
+                + ", ".join(sorted(KNOWN_EVENTS))
+                + ". Hook-ingested events may carry custom names beyond these."
             ),
         },
         "job_id": {"type": "integer", "description": "Only events for this job."},
         "project": {"type": "string", "description": "Only events for this project."},
         "source": {
             "type": "string",
-            "enum": ["broker", "worker"],
+            # broker-emitted rows + every EventIngest source the broker accepts.
+            # The old ["broker","worker"] enum FORBADE filtering to hook/mcp
+            # events even though the broker records and filters them fine.
+            "enum": ["broker", "worker", "hook", "mcp"],
             "description": "Which side emitted the event.",
         },
         "limit": {

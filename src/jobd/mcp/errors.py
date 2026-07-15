@@ -6,6 +6,7 @@ Order matters — first match wins.
 
 from __future__ import annotations
 
+import json
 import re
 
 from jobd.client import BrokerRefusal
@@ -122,6 +123,13 @@ _DELIBERATELY_UNMAPPED: dict[int, str] = {
 def map_broker_refusal(e: BrokerRefusal) -> dict:
     """Return {kind, message, hint} for a BrokerRefusal."""
     detail = e.detail or ""
+    # A REAL FastAPI 422 carries `detail` as a list of error dicts, not a
+    # string — regex.search() then raises TypeError, so a malformed tool body
+    # crashed this mapper instead of returning kind="invalid_arguments".
+    # Found by the first run of the real-broker contract test (audit
+    # 2026-07-15 T-LOW-5): the synthetic tests had only ever fed it strings.
+    if not isinstance(detail, str):
+        detail = json.dumps(detail)
     for status, regex, kind, hint in _RULES:
         if e.status_code == status and regex.search(detail):
             return {"kind": kind, "message": detail, "hint": hint}

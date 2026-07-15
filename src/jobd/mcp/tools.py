@@ -9,7 +9,8 @@ field names. All translation lives in `translate.py`.
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
+from collections import Counter
+from typing import Any
 
 from jobd.client import JobdClient
 from jobd.mcp.translate import (
@@ -18,7 +19,7 @@ from jobd.mcp.translate import (
     xlate_job_info,
     xlate_submit_payload,
 )
-from jobd.models import TERMINAL_STATES
+from jobd.models import TERMINAL_STATES, JobState
 
 POLL_INTERVAL_S = 2.0
 MAX_WAIT_S = 270
@@ -275,7 +276,10 @@ _LIST_SUMMARY_FIELDS = (
 )
 
 
-_LIST_DEFAULT_STATES = ("queued", "assigned", "running")
+# Derived, not hand-listed (audit 2026-07-15 L-8): a future non-terminal state
+# re-enumerated here would silently vanish from the default view — the exact
+# drift class TERMINAL_STATES centralization killed everywhere else.
+_LIST_DEFAULT_STATES = tuple(s.value for s in JobState if s.value not in TERMINAL_STATES)
 _LIST_LIMIT_DEFAULT = 50
 _LIST_LIMIT_MAX = 200
 
@@ -289,42 +293,47 @@ def jobd_list(client: JobdClient, args: dict) -> dict:
     states = args.get("state")
     if states is None:
         states = list(_LIST_DEFAULT_STATES)
-    # GET /jobs takes a single state_filter; forward one state, filter
-    # multi-state client-side over the unfiltered (newest-first) list.
-    state = states[0] if len(states) == 1 else None
-    raw_list = client.list_jobs(state=state, project=args.get("project"))
-    rows = raw_list if isinstance(raw_list, list) else raw_list.get("jobs", [])
-    if len(states) > 1:
-        wanted = set(states)
-        rows = [j for j in rows if j.get("state") in wanted]
-    wrapped = wrap_jobs(rows)
     try:
         limit = int(args.get("limit", _LIST_LIMIT_DEFAULT))
     except (TypeError, ValueError):
         limit = _LIST_LIMIT_DEFAULT
     limit = max(1, min(limit, _LIST_LIMIT_MAX))
+
+    # One BOUNDED request per requested state (audit 2026-07-15 L-8): the old
+    # implementation forwarded at most one state and pulled the ENTIRE job
+    # history to compute counts — the very transfer the broker's pagination
+    # was built to end. X-Total-Count keeps the per-state counts exact while
+    # the rows stay capped. Explicit []=all is a single bounded request whose
+    # counts cover the returned page (noted via `total`).
+    project = args.get("project")
+    if states:
+        rows = []
+        counts: dict[str, int] = {}
+        for s in states:
+            page, total = client.list_jobs_with_total(state=s, project=project, limit=limit)
+            rows.extend(page)
+            if total:
+                counts[s] = total
+        rows.sort(key=lambda j: j.get("id") or 0, reverse=True)  # newest-first across states
+        total_all = sum(counts.values())
+    else:
+        rows, total_all = client.list_jobs_with_total(project=project, limit=limit)
+        counts = dict(Counter(j.get("state") for j in rows))
+
+    wrapped = wrap_jobs(rows)
     jobs = [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in wrapped["jobs"]]
-    # counts cover the full filtered set; the jobs array is capped to the
-    # newest `limit` (broker order is id desc) with the overflow noted.
-    result = {"jobs": jobs[:limit], "counts": wrapped["counts"]}
-    if len(jobs) > limit:
-        result["truncated"] = len(jobs) - limit
+    result: dict[str, Any] = {"jobs": jobs[:limit], "counts": counts}
+    if total_all > len(jobs[:limit]):
+        result["truncated"] = total_all - len(jobs[:limit])
     return result
 
 
-STALE_AFTER_S = 60
-
-
-def _heartbeat_age_s(iso_ts: str) -> float:
-    if iso_ts.endswith("Z"):
-        iso_ts = iso_ts[:-1] + "+00:00"
-    dt = datetime.fromisoformat(iso_ts)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return (datetime.now(UTC) - dt).total_seconds()
-
-
 def jobd_workers(client: JobdClient, args: dict) -> dict:
+    # Trust WorkerInfo.state — the broker already computes staleness, with an
+    # env-tunable threshold (JOBD_STALE_WORKER_THRESHOLD_S). The old local
+    # STALE_AFTER_S=60 re-derivation duplicated that tunable's DEFAULT, so an
+    # operator who tuned the broker got contradictory verdicts: `job workers`
+    # said online while jobd_workers said degraded (audit 2026-07-15 L-7).
     raw = client.workers()
     wrapped = wrap_workers(raw if isinstance(raw, list) else raw.get("workers", []))
     workers = wrapped["workers"]
@@ -332,11 +341,9 @@ def jobd_workers(client: JobdClient, args: dict) -> dict:
         return {"workers": [], "fleet_health": "empty", "warnings": ["no workers registered"]}
     warnings: list[str] = []
     for w in workers:
-        ts = w.get("last_heartbeat")
-        if ts:
-            age = _heartbeat_age_s(ts)
-            if age > STALE_AFTER_S:
-                warnings.append(f"worker {w.get('host', '?')} stale ({int(age)}s)")
+        state = w.get("state")
+        if state and state != "online":
+            warnings.append(f"worker {w.get('host', '?')} {state}")
     health = "degraded" if warnings else "healthy"
     return {"workers": workers, "fleet_health": health, "warnings": warnings}
 
