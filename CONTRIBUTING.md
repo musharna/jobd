@@ -80,7 +80,7 @@ With a token-protected broker, set `JOBD_API_TOKEN` to the same value on the bro
 
 - **CI must pass.** Ruff and the `not live` test suite gate every PR across the 3.11–3.13 matrix; mypy is reported but non-blocking.
 - Keep changes focused and add tests for new behavior (use the `live` marker only for tests that genuinely need a real broker).
-- Update [`CHANGELOG.md`](CHANGELOG.md) for any user-facing change.
+- Add a [`changelog.d/`](changelog.d/README.md) fragment (`<slug>.<category>.md`) for any user-facing change — do not edit `CHANGELOG.md` directly; `scripts/roll-changelog.py` assembles the fragments at release time.
 - Update docs (`README.md`, `docs/`) when you change install/usage/config surface.
 
 ### Branch / mirror note

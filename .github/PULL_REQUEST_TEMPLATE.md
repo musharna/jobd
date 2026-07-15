@@ -21,5 +21,5 @@ Fixes #
 - [ ] `uv run ruff check .` passes
 - [ ] `uv run pytest -m "not live" -q` passes
 - [ ] Added/updated tests for the change (used the `live` marker only where a real broker is genuinely required)
-- [ ] Updated `CHANGELOG.md` for any user-facing change
+- [ ] Added a `changelog.d/<slug>.<category>.md` fragment for any user-facing change (see `changelog.d/README.md` — do not edit `CHANGELOG.md` directly)
 - [ ] Updated docs (`README.md`, `docs/`) if install/usage/config surface changed
