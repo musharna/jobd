@@ -4,6 +4,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.26] — 2026-07-15
+
 ### Fixed
 
 - **A malformed MCP tool body crashed the error mapper instead of explaining itself (found by the new real-broker contract test).** A real FastAPI 422 carries `detail` as a *list* of error dicts; `map_broker_refusal` regex-searched it and raised TypeError, surfacing a transport error instead of `kind="invalid_arguments"`. The synthetic error tests never caught it because they only ever fed the mapper strings — the exact drift class the audit flagged (T-LOW-5). The mapper now coerces non-string details, and `tests/mcp/test_errors_real_broker_contract.py` drives the REAL app to emit every mapped refusal (missing parent, terminal parent, 404, 422), so a reworded broker message fails CI instead of silently degrading agents to `bad_request`.
