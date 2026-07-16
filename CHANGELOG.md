@@ -4,6 +4,17 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.29] — 2026-07-15
+
+### Changed
+
+- **README: the comparison table now covers the neighbors people actually ask about, accurately.** Added Pueue (whose own README declares distributed execution out of scope — jobd is that missing layer) and HyperQueue (the closest multi-machine rival: single binary, but no VRAM tracking, no preemption/checkpoint, no agent interface); corrected the SkyPilot row to say what its "existing machines" mode really does (installs a k3s cluster on your boxes) and dstack's real host prerequisites (Docker + passwordless sudo). New "Coming from pueue or task-spooler?" section maps the verbs one-to-one (`pueue follow` → `job wait`, groups → projects) — a single-machine jobd deployment behaves like a network-reachable pueue, so the migration costs nothing.
+- **Repo visuals: renderer-proof architecture diagram + social preview.** The README architecture image was a mermaid pre-render that drew its labels with `foreignObject` HTML — fine in a browser, blank or garbled anywhere that treats SVG as a static image — and its trebuchet styling clashed with the terminal demo card above it. Replaced with a hand-authored, self-contained SVG (plain SVG text only, same dark palette as the demo terminal) that renders identically on GitHub light/dark and PyPI, and now also shows the tailnet boundary, the broker's storage/observability chips, and the long-poll/CD dispatch loop. Added a matching 1280×640 social-preview card (`docs/assets/social-preview.png`) and a GHCR container badge.
+
+### Added
+
+- **`job fleet add user@host` — a new worker in one command.** The manual closing instructions of `install-worker.sh` (copy units, edit ExecStart, wire the env file, enable the timer) are now automated over a single ssh connection: the installer *and* `update-worker.sh` are pushed on stdin (the API token never touches an argv, local or remote — proven by the ssh-stub tests), the install is pinned to the broker's running version, the generated systemd units share one `worker.env` (0600) and point at the pushed updater — not the `%h/jobd/scripts/…` git-clone path the committed templates assume — and the command then waits for the worker to actually register with the broker before declaring success. `--dry-run` runs only the remote detection preflight; `--no-systemd` installs the venv and config without units. **`job fleet status`** shows every worker's version against the broker's with a drift marker. Drift guards: the generated unit's load-bearing directives (KillMode=mixed, TimeoutStopSec, Restart) are test-pinned to `scripts/job-worker.service`, and a packaging test builds a real wheel and asserts the fleet assets landed — a silently-dropped force-include would otherwise strand every pip-installed CLI.
+- **`job submit --stdin` and `job logs --follow/-f`.** `--stdin` reads one shell command per line and submits each as an independent job sharing the invocation's project/profile/resource options (run via `bash -c`, so pipes and redirects survive; blank lines and `#`-comments skipped; one `id<TAB>command` per line on stdout for composability) — simple_gpu_scheduler's batch idiom, fleet-wide. `logs -f` replays a job's log from the start and streams until terminal, exiting with the job's own exit code — `pueue follow` muscle memory over the existing `/wait` SSE stream.
 ## [0.5.28] — 2026-07-15
 
 ### Changed
