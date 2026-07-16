@@ -1095,6 +1095,11 @@ class _WorkloadRun:
         # linger for up to grace_s holding the proc alive.
         self.kill_timers: list[threading.Timer] = []
         self.kill_timers_lock = threading.Lock()
+        # Set (under the lock) once the process is gone and the list drained.
+        # A cancel/preempt landing in the same instant the workload exits must
+        # not start a fresh timer — it would linger for up to grace_s after
+        # run_job returns (harmless, proc.poll() is non-None, but a leak).
+        self.kill_timers_closed = False
         self.termination_initiated = threading.Event()
 
     def signal_workload(self, sig_name: str) -> None:
@@ -1147,8 +1152,10 @@ class _WorkloadRun:
 
         kill_timer = threading.Timer(grace_s, _kill_after_grace)
         with self.kill_timers_lock:
+            if self.kill_timers_closed:
+                return
             self.kill_timers.append(kill_timer)
-        kill_timer.start()
+            kill_timer.start()
 
     def _watchdog_kill(self, reason: str, threshold_s: int) -> None:
         """Shared tail of the three poll_signals watchdogs: emit the
@@ -1299,6 +1306,11 @@ class _WorkloadRun:
         return rc
 
     def cancel_kill_timers(self) -> None:
+        # Close before draining: any timer appended before the flag flips is
+        # in the list and gets cancelled; any initiate_termination that sees
+        # the flag never starts one. No window either way.
+        with self.kill_timers_lock:
+            self.kill_timers_closed = True
         _cancel_kill_timers(self.kill_timers, self.kill_timers_lock)
 
     def reap_stragglers(self, tracked_pids: set[int]) -> None:
