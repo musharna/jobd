@@ -18,7 +18,7 @@
 <!-- mcp-name: io.github.musharna/jobd -->
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/musharna/jobd/main/docs/assets/demo.svg" alt="jobd in action: submit a GPU job, watch it route to a worker with free VRAM and stream back, then inspect the full lifecycle" width="100%">
+  <img src="https://raw.githubusercontent.com/musharna/jobd/main/docs/assets/demo.svg" alt="jobd in action: job fleet status shows four workers and their versions; a GPU job routes to the worker with enough free VRAM and streams back; a stdin batch submits two jobs at once; job logs -f follows one to completion" width="100%">
 </p>
 
 You have a couple of boxes with GPUs — a workstation, a server, maybe a laptop — wired together over [Tailscale](https://tailscale.com/) or a LAN. You want to fire off training runs, data pipelines, and long batch jobs from anywhere, have them land on whichever machine actually has the VRAM free, survive across sessions, and get preempted cleanly when something more important shows up. You don't have a cloud, a Kubernetes cluster, or a Slurm install, and you don't want one.
@@ -118,7 +118,9 @@ For a real multi-host deployment (Docker broker + systemd workers, Tailscale bin
 job fleet add user@newbox      # ssh in, install pinned to the broker's version,
                                # wire systemd units + the self-update timer,
                                # verify it registers. `job fleet status` shows drift.
-``` Day-2 operations (health, draining a worker, upgrades, token rotation, backups) are in **[docs/runbook.md](https://github.com/musharna/jobd/blob/main/docs/runbook.md)**.
+```
+
+Day-2 operations (health, draining a worker, upgrades, token rotation, backups) are in **[docs/runbook.md](https://github.com/musharna/jobd/blob/main/docs/runbook.md)**.
 
 ## Supported platforms
 

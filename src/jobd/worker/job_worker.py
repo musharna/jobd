@@ -683,6 +683,16 @@ def _detect_mount_roots() -> list[str]:
                 found.append(r)
         except OSError:
             pass
+    # The worker can always run jobs under its OWN home — advertise it even
+    # when it falls outside the candidate list. /home covers ordinary users,
+    # but root's home is /root: a root-run worker (every "try it in docker"
+    # quickstart) otherwise rejects submits from its own $HOME with a
+    # mount-roots refusal. Found by the launch-prep clean-container dry-run.
+    home = os.path.expanduser("~")
+    if os.path.isdir(home) and not any(
+        home == r or home.startswith(r.rstrip("/") + "/") for r in found
+    ):
+        found.append(home)
     return found
 
 
