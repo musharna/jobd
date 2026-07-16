@@ -254,7 +254,10 @@ def test_drain_grace_cap_overrides_job_checkpoint_grace(tmp_path, monkeypatch):
         "cmd": [
             "python3",
             "-c",
-            "import signal,time\nsignal.signal(signal.SIGTERM, lambda *a: None)\ntime.sleep(30)\n",
+            "import signal,time\n"
+            "signal.signal(signal.SIGTERM, lambda *a: None)\n"
+            'print("READY", flush=True)\n'
+            "time.sleep(30)\n",
         ],
         "cwd": str(tmp_path),
         "checkpoint_grace_s": 300,
@@ -264,7 +267,17 @@ def test_drain_grace_cap_overrides_job_checkpoint_grace(tmp_path, monkeypatch):
     t.start()
 
     hook = _wait_for_hook(8003)
-    time.sleep(0.5)  # let the workload install its SIGTERM-ignoring handler
+    # Wait for the workload's READY byte (streamed to /log) — proof its
+    # SIGTERM-ignoring handler is installed. A fixed sleep raced a cold
+    # python3 start: fire too early and the TERM ends the job within grace,
+    # so the SIGKILL-cap path under test never executes (vacuous pass).
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if any(p[0].endswith("/log") and b"READY" in bytes(p[1]) for p in client.posts):
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("workload never printed READY")
     hook("worker_shutdown", 1.0)
     t.join(15)
     elapsed = time.monotonic() - t0

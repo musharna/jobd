@@ -20,23 +20,6 @@ mid-run) while the cascade in ``jobd.broker.state`` keeps the real constant.
 
 import json
 
-import pytest
-from fastapi.testclient import TestClient
-
-from jobd.app import build_app
-
-
-@pytest.fixture
-def client(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml):
-    app = build_app(
-        db_url=f"sqlite:///{tmp_path}/jobd.db",
-        projects_path=sample_projects_yaml,
-        profiles_path=sample_profiles_yaml,
-        classifier_path=sample_classifier_yaml,
-        logs_path=tmp_path / "logs",
-    )
-    return TestClient(app)
-
 
 def _submit(client, depends_on=None, any_exit=False):
     body = {"cmd": ["true"], "cwd": "/tmp", "project": "project-a"}

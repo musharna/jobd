@@ -117,9 +117,11 @@ Python 3.11+ everywhere.
 
 | Component                              | Linux   | macOS       | Windows              |
 | -------------------------------------- | ------- | ----------- | -------------------- |
-| **Broker** (`jobd`)                    | ✅      | ✅          | ✅ (WSL recommended) |
-| **CLI** (`job`) / **MCP** (`jobd-mcp`) | ✅      | ✅          | ✅                   |
+| **Broker** (`jobd`)                    | ✅      | ☑️          | ☑️ (WSL recommended) |
+| **CLI** (`job`) / **MCP** (`jobd-mcp`) | ✅      | ☑️          | ☑️                   |
 | **Worker** (`jobd-worker`)             | ✅ full | ⚠️ degraded | ⚠️ degraded          |
+
+✅ = CI-tested (the test matrix runs on Linux). ☑️ = pure-Python and expected to work, but not exercised by CI — please file an issue if something is broken there.
 
 The **worker** runs its best on Linux with a systemd user instance: memory caps, process reaping, and preemption use `systemd-run --user` scopes and cgroups. On non-systemd hosts the worker still executes jobs, but silently drops those guarantees — fine for a single trusted box, not for hard resource isolation. GPU features need NVIDIA + `nvidia-ml-py`. The broker, CLI, and MCP server are pure-Python and portable.
 

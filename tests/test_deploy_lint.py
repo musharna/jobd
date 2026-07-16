@@ -603,6 +603,24 @@ def test_release_publishers_gate_on_tests_and_version_lockstep():
         )
 
 
+def test_ci_enforces_a_branch_coverage_floor():
+    """The coverage gate is one edited line away from being decorative: drop
+    `--cov-fail-under` and CI still prints a pretty report while gating
+    nothing. Require the floor AND `--cov-branch` (line coverage alone lets an
+    untested `else` arm count as covered because its `if` line ran)."""
+    wf = yaml.safe_load((_WORKFLOWS / "ci.yml").read_text())
+    runs = [
+        step.get("run") or ""
+        for job in (wf.get("jobs") or {}).values()
+        for step in job.get("steps") or []
+    ]
+    gated = [r for r in runs if "--cov-fail-under=" in r]
+    assert gated, "ci.yml lost the coverage floor (--cov-fail-under)"
+    assert any("--cov-branch" in r for r in gated), (
+        "the coverage gate no longer measures branch coverage"
+    )
+
+
 def test_workflow_run_blocks_do_not_splice_github_expressions():
     """`${{ inputs.* }}` or `${{ github.event.* }}` inside a run: script is
     shell injection into a job that may hold packages:write — route untrusted
