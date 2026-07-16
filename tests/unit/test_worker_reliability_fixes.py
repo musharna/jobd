@@ -230,3 +230,30 @@ def test_run_job_cancels_kill_timer_on_exit(monkeypatch, tmp_path):
     # Whatever timers were scheduled must have been cancelled by run_job.
     for t in captured_timers:
         assert not t.is_alive()
+
+
+def test_initiate_termination_after_timer_drain_starts_no_timer():
+    """The exit/cancel photo-finish, forced deterministically: the workload
+    exits (wait_with_grace drains + closes the timer list) at the same instant
+    a cancel lands, so initiate_termination runs against an already-closed
+    list. It must not start a fresh escalation timer — the timer thread would
+    outlive run_job for up to grace_s. This is the ordering
+    test_run_job_cancels_kill_timer_on_exit only hits by scheduler luck
+    (CI flake on the v0.5.31 main push)."""
+    proc = MagicMock()
+    proc.poll.return_value = 0  # already exited
+    run = job_worker._WorkloadRun(
+        MagicMock(),
+        {"id": 777},
+        proc,
+        None,
+        checkpoint_grace_s=None,
+        max_wall_s=None,
+        idle_timeout_s=None,
+    )
+
+    run.cancel_kill_timers()  # process gone: drain + close
+    run.initiate_termination("cancel", None, 60)
+
+    with run.kill_timers_lock:
+        assert run.kill_timers == []
