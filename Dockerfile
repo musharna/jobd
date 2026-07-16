@@ -29,6 +29,12 @@ RUN pip install -U pip \
 # which hatchling reads during metadata generation.
 COPY pyproject.toml README.md ./
 COPY src ./src
+# The wheel force-includes these (job fleet add pushes them at runtime) —
+# hatchling's metadata generation FileNotFoundErrors without them, which is
+# exactly how the v0.5.29 GHCR publish died: the PR suite builds the wheel
+# from a full checkout and cannot see a missing COPY. A deploy-lint now keeps
+# every force-include source COPY'd here before this install.
+COPY scripts/install-worker.sh scripts/update-worker.sh ./scripts/
 RUN pip install --no-deps .
 
 COPY scripts/healthcheck.py /app/healthcheck.py
