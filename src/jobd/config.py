@@ -244,8 +244,26 @@ def load_effective_projects(
 
 
 def load_profiles(path: Path | str) -> dict[str, ProfileSpec]:
-    """Load profiles.yaml into {name: ProfileSpec}."""
-    data = yaml.safe_load(Path(path).read_text()) or {}
+    """Load profiles.yaml into {name: ProfileSpec}.
+
+    Missing file → {}: the README's contract is that all three config files
+    are optional, and `load_projects` has honored it since day one — but this
+    loader (and the classifier's) hard-crashed instead, so a bare `pip
+    install jobd && jobd` on a machine without /app/config died at startup.
+    Found by the launch-prep quickstart dry-run in a pristine container;
+    invisible before because CI exports JOBD_CONFIG_DIR and the production
+    broker runs in Docker where the path exists.
+    """
+    import logging
+
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        logging.getLogger("jobd.config").info(
+            "no profiles.yaml found at %s; no profiles defined", path
+        )
+        return {}
+    data = yaml.safe_load(text) or {}
     profiles = data.get("profiles", {})
     out: dict[str, ProfileSpec] = {}
     for name, cfg in profiles.items():
@@ -254,8 +272,20 @@ def load_profiles(path: Path | str) -> dict[str, ProfileSpec]:
 
 
 def load_classifier_rules(path: Path | str) -> list[ClassifierRule]:
-    """Load classifier.yaml into list of ClassifierRule."""
-    data = yaml.safe_load(Path(path).read_text()) or {}
+    """Load classifier.yaml into list of ClassifierRule.
+
+    Missing file → [] — see load_profiles: the config files are optional by
+    documented contract, and a missing one must not stop the broker."""
+    import logging
+
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        logging.getLogger("jobd.config").info(
+            "no classifier.yaml found at %s; no classifier rules", path
+        )
+        return []
+    data = yaml.safe_load(text) or {}
     rules = data.get("rules", [])
     out: list[ClassifierRule] = []
     for r in rules:
