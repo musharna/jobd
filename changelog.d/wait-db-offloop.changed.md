@@ -1,1 +1,0 @@
-- `/wait`'s per-tick job-state read runs off the event loop (`asyncio.to_thread`) — it was the last synchronous SQLite call issued directly on the async loop, where a contended read would stall every in-flight request in the process, once per waiting client per 0.5s tick.
