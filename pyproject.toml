@@ -74,6 +74,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/jobd", "src/job_cli"]
 
+# `job fleet add` pushes these over ssh at runtime; the canonical copies stay
+# in scripts/ (where the deploy-lints and CD tests read them), the wheel gets
+# copies. tests/test_fleet_cli.py builds a real wheel and asserts they landed.
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/install-worker.sh" = "jobd/fleet_assets/install-worker.sh"
+"scripts/update-worker.sh" = "jobd/fleet_assets/update-worker.sh"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
