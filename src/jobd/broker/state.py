@@ -20,6 +20,7 @@ from jobd.broker.constants import (
     _DEPENDS_TERMINAL,
     _DEPENDS_TERMINAL_ANY,
     _FAILED_SIDE_TERMINAL,
+    _PARENT_FAILED_WARNING_PREFIX,
     RECONCILE_MIN_AGE_SECONDS,
     RECONCILE_MISS_THRESHOLD,
 )
@@ -292,7 +293,7 @@ def _cascade_on_parent_terminal(session, parent: Job) -> list[tuple[int, str]]:
                 (JobState.QUEUED,),
                 state=JobState.CANCELLED.value,
                 finished_at=now,
-                warning=f"parent_failed: {pid} → {pstate}",
+                warning=f"{_PARENT_FAILED_WARNING_PREFIX}{pid} → {pstate}",
                 warning_at=now,
             ):
                 continue
@@ -544,7 +545,7 @@ def _uncascade_on_parent_resurrect(session, parent: Job) -> list[tuple[int, str]
             session.execute(
                 select(Job).where(
                     Job.state == JobState.CANCELLED.value,
-                    Job.warning.like(f"parent_failed: {int(pid)} → %"),
+                    Job.warning.like(f"{_PARENT_FAILED_WARNING_PREFIX}{int(pid)} → %"),
                 )
             )
             .scalars()
