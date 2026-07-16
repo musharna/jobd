@@ -12,24 +12,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import update
 
-from jobd.app import build_app
 from jobd.broker.sweeper import prune_old_logs
 from jobd.db import Job
-
-
-@pytest.fixture
-def app(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml):
-    return build_app(
-        db_url=f"sqlite:///{tmp_path}/jobd.db",
-        projects_path=sample_projects_yaml,
-        profiles_path=sample_profiles_yaml,
-        classifier_path=sample_classifier_yaml,
-        logs_path=tmp_path / "logs",
-    )
 
 
 def _finished_job(app, client, *, age_days: int, log_text: str = "hello") -> int:

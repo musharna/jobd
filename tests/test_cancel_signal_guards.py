@@ -25,23 +25,10 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
 from jobd import app as app_mod
-from jobd.app import build_app
 from jobd.broker import sweeper as sweeper_mod
 from jobd.broker.constants import MAX_LOG_CHUNK_BYTES
 from jobd.db import Job
 from jobd.models import JobState
-
-
-@pytest.fixture
-def client(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml):
-    app = build_app(
-        db_url=f"sqlite:///{tmp_path}/jobd.db",
-        projects_path=sample_projects_yaml,
-        profiles_path=sample_profiles_yaml,
-        classifier_path=sample_classifier_yaml,
-        logs_path=tmp_path / "logs",
-    )
-    return TestClient(app)
 
 
 def _hb(client: TestClient, host: str, in_flight: list[int] | None = None):

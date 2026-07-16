@@ -62,10 +62,15 @@ jobs:
         run: uv run pytest -m "not live" -q
 
       # One matrix leg also enforces a coverage floor (term-missing report,
-      # no external uploader). Measured ~85% at the time this gate landed.
+      # no external uploader). BRANCH coverage — line coverage alone lets an
+      # untested `else` arm count as covered because the `if` line ran.
+      # Measured 85% branch (86% line) at calibration (2026-07-15); floor 83
+      # leaves two points of headroom. One leg on purpose: coverage varies by
+      # what the suite executes, not by interpreter version, and tripling the
+      # slowest step buys nothing.
       - name: Tests with coverage gate (excluding live broker)
         if: matrix.python-version == '3.12'
-        run: uv run pytest -m "not live" -q --cov=src/jobd --cov=src/job_cli --cov-report=term-missing --cov-fail-under=82
+        run: uv run pytest -m "not live" -q --cov=src/jobd --cov=src/job_cli --cov-branch --cov-report=term-missing --cov-fail-under=83
 
       # mypy is clean and now gates the build: type regressions fail CI.
       - name: Types (mypy)
