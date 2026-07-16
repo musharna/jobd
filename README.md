@@ -6,6 +6,7 @@
 [![PyPI](https://img.shields.io/pypi/v/jobd)](https://pypi.org/project/jobd/)
 ![Python](https://img.shields.io/pypi/pyversions/jobd)
 [![Glama](https://glama.ai/mcp/servers/musharna/jobd/badges/score.svg)](https://glama.ai/mcp/servers/musharna/jobd)
+[![GHCR](https://img.shields.io/badge/ghcr.io-musharna%2Fjobd-2496ED?logo=docker&logoColor=white)](https://github.com/musharna/jobd/pkgs/container/jobd)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/musharna/jobd/blob/main/LICENSE)
 
 **A self-hostable, GPU-aware job broker for your own machines — with native MCP/agent integration.**
@@ -55,7 +56,7 @@ Closest in spirit are task-spooler (single-node) and on-prem SkyPilot (heavier, 
 ## Architecture
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/musharna/jobd/main/docs/assets/architecture.svg" alt="Architecture: job CLI, jobd-mcp MCP tools, and HTTP/SSE clients talk to the jobd broker (FastAPI — queue, matcher, priorities, SQLite), which dispatches via poll to workers A (24 GB GPU), B (8 GB GPU), and C (CPU-only)" width="560">
+  <img src="https://raw.githubusercontent.com/musharna/jobd/main/docs/assets/architecture.svg" alt="Architecture: job CLI, jobd-mcp MCP tools, and HTTP/SSE clients talk to the jobd broker (FastAPI — queue, VRAM matcher, priorities, SQLite) over one tailnet; the broker dispatches via long-poll claims and heartbeats to workers A (24 GB GPU), B (8 GB GPU), and C (CPU-only)" width="640">
 </p>
 
 <details>
