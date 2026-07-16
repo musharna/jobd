@@ -4,6 +4,15 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.30] — 2026-07-15
+
+### Fixed
+
+- **The v0.5.29 GHCR image publish failed — the Dockerfile didn't COPY the fleet assets the wheel force-includes.** hatchling's metadata generation hard-fails on a missing force-include source, and `scripts/install-worker.sh` wasn't in the image build context when `pip install --no-deps .` ran. Invisible to the PR suite by construction (the wheel-packaging test builds from a full checkout), so it fired at the one moment it could: on the tag. Fixed with the COPY, verified by a real `docker build` + in-image asset check, and a new deploy-lint requires every pyproject force-include source to be COPY'd before the project install — mutation-verified against the broken Dockerfile. (v0.5.29 shipped fine to PyPI; only its container image is missing, and this release supersedes it.)
+
+### Added
+
+- **`docs/agent-cookbook.md` — the worked tour of driving jobd from an LLM agent.** Five patterns with the real tool calls: fire-and-babysit on the ETA's own cadence (and why `idle_timeout_s` is non-negotiable for agent-submitted work), surviving preemption via the `install_preemption_handler` three-liner + resubmit-from-checkpoint, sweeps with dependency-chained collect jobs, asking the broker *why* a job won't schedule (warnings, live capacity, `dispatch_skip` events), and events-as-flight-recorder post-mortems — plus ground rules worth pasting into an agent's instructions. Writing it caught a README drift: the front page advertised `jobd_job_get` (long gone) and omitted `jobd_events`; fixed, and a new parity test pins the README's and cookbook's tool mentions to the registered `_TOOLS` list so neither can go stale again.
 ## [0.5.29] — 2026-07-15
 
 ### Changed
