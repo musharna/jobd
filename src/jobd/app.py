@@ -66,7 +66,7 @@ from jobd.broker.state import (
     _reject_stale_worker,
 )
 from jobd.broker.submit import submit_job
-from jobd.broker.sweeper import prune_old_jobs, sweep_once
+from jobd.broker.sweeper import prune_old_jobs, scrub_terminal_env, sweep_once
 from jobd.config import (
     ProjectEntry,
     load_classifier_rules,
@@ -903,9 +903,15 @@ def build_app(
                 for ev in drain_new_bytes():
                     yield ev
 
-                # Check job state
-                with SessionLocal() as session:
-                    job = session.get(Job, job_id)
+                # Check job state — off the event loop: this generator runs ON
+                # the loop (async SSE), and a sync session.get against a
+                # contended SQLite would otherwise stall every request in the
+                # process for its duration, once per waiting client per tick.
+                def _get_job():
+                    with SessionLocal() as session:
+                        return session.get(Job, job_id)
+
+                job = await asyncio.to_thread(_get_job)
 
                 if job is None:
                     yield {"event": "error", "data": "no such job"}
@@ -1409,6 +1415,9 @@ def build_app(
     def _prune_old_jobs(now: datetime | None = None) -> int:
         return prune_old_jobs(SessionLocal, logs_dir, now)
 
+    def _scrub_terminal_env(now: datetime | None = None) -> int:
+        return scrub_terminal_env(SessionLocal, logs_dir, now)
+
     def _sweep_once() -> None:
         sweep_once(SessionLocal, logs_dir, _wake_dispatchers)
 
@@ -1419,6 +1428,7 @@ def build_app(
     # names from static analysis (audit 2026-07-05, A5).
     app.state.sweep_once = _sweep_once
     app.state.prune_old_jobs = _prune_old_jobs
+    app.state.scrub_terminal_env = _scrub_terminal_env
     app.state.engine = engine
 
     return app

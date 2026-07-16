@@ -59,6 +59,19 @@ JOB_RETENTION_DAYS_DEFAULT = 0
 # unlinked, KEEPING the row. Bounds the log dir (the actual disk cost) without
 # losing job history. Override via JOBD_LOG_RETENTION_DAYS; 0 disables.
 LOG_RETENTION_DAYS_DEFAULT = 60
+# Env-at-rest scrub: a TERMINAL job's env_json values are masked to "***"
+# (keys kept — same shape every read surface already returns) once finished_at
+# is this many hours old. Real values are only ever read by the /next-job
+# claim, which no terminal job can reach again — the one exception, a
+# cascade-cancelled child a parent resurrect may restore to QUEUED, is
+# excluded by its `parent_failed:` warning stamp. So the grace hours buy
+# safety margin, not observability: reads were always masked. Override via
+# JOBD_ENV_SCRUB_HOURS; negative disables.
+ENV_SCRUB_HOURS_DEFAULT = 1.0
+# Warning stamp a cascade-cancel writes on a child; the un-cascade restores
+# exactly the rows carrying it (state.py) and the env scrub must exclude
+# exactly those rows (sweeper.py) — one constant so the two can't drift.
+_PARENT_FAILED_WARNING_PREFIX = "parent_failed: "
 # /next-job long-poll: a waiting worker re-attempts the pick at least this often
 # even with no wake, so a missed wake site costs at most this much latency (not
 # the full wait_s). Small enough to be a safe backstop, large enough that an

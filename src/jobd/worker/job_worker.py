@@ -874,6 +874,15 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
 
     env = os.environ.copy()
 
+    # The worker's broker credential is not the workload's to have: any script,
+    # framework, or crash reporter inside the job can dump its environment, and
+    # the token would ride along into logs, checkpoints, and telemetry. Every
+    # jobd facility a workload legitimately uses is delivered separately
+    # (JOBD_CHECKPOINT_* below). A job that genuinely needs broker API access
+    # gets the token the explicit way: `env: {"JOBD_API_TOKEN": ...}` at
+    # submit, which layers over this pop.
+    env.pop("JOBD_API_TOKEN", None)
+
     # Apply caller-submitted env vars (the `env` field on the /submit payload,
     # delivered here via the /next-job claim response — the one read surface that
     # returns real env values; all others mask them, see docs/security.md) so

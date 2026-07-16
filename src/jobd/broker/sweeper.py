@@ -8,6 +8,7 @@ wrapper and the whole sweep pass is testable in isolation.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -20,8 +21,10 @@ from sqlalchemy import select
 from jobd.broker.constants import (
     _AUTO_PREEMPT_WARNING_PREFIX,
     _BLOCKED_WARNING_PREFIX,
+    _PARENT_FAILED_WARNING_PREFIX,
     _UNMATCHEABLE_WARNING_PREFIX,
     DEAD_WORKER_SECONDS,
+    ENV_SCRUB_HOURS_DEFAULT,
     IDEMPOTENT_RECLAIM_SECONDS,
     JOB_RETENTION_DAYS_DEFAULT,
     LOG_RETENTION_DAYS_DEFAULT,
@@ -32,6 +35,7 @@ from jobd.broker.constants import (
     WALL_CLOCK_BACKSTOP_GRACE_SECONDS,
 )
 from jobd.broker.events import _emit_event
+from jobd.broker.jobinfo import _redact_env
 from jobd.broker.joblog import job_log_path
 from jobd.broker.scheduling import (
     _build_snapshots,
@@ -182,6 +186,78 @@ def prune_old_logs(session_local, logs_dir: Path, now: datetime | None = None) -
             retention_days=retention_days,
         )
     return unlinked
+
+
+def scrub_terminal_env(session_local, logs_dir: Path, now: datetime | None = None) -> int:
+    """Mask the ``env_json`` VALUES of terminal jobs finished more than
+    ``JOBD_ENV_SCRUB_HOURS`` ago (keys kept, values → ``"***"``). Returns the
+    number of rows scrubbed; a negative setting disables the pass.
+
+    Rows are kept forever by default (``JOB_RETENTION_DAYS_DEFAULT=0``), so a
+    secret submitted via ``env`` otherwise sits plaintext in the SQLite file —
+    and every backup of it — indefinitely. Nothing observable is lost: every
+    read surface already masks values (``_redact_env``); the real values are
+    only ever consumed by the ``/next-job`` claim, which no terminal row can
+    reach again. The one terminal→QUEUED path — a cascade-cancelled child a
+    parent resurrect can restore — is excluded by its ``parent_failed:``
+    warning stamp (the exact predicate the un-cascade matches on), so a
+    restored child is re-claimed with its real env intact.
+
+    ``env_scrubbed_at`` keeps the scan monotonic (a scrubbed row is never
+    re-examined). Unparseable ``env_json`` is replaced with ``{}`` — for a
+    write whose whole point is removing secrets at rest, dropping malformed
+    ciphertext-of-nothing beats retrying it every 30s forever.
+    """
+    raw = os.environ.get("JOBD_ENV_SCRUB_HOURS", "").strip()
+    try:
+        scrub_hours = float(raw) if raw else ENV_SCRUB_HOURS_DEFAULT
+    except ValueError:
+        scrub_hours = ENV_SCRUB_HOURS_DEFAULT
+    if scrub_hours < 0:
+        return 0
+    if now is None:
+        now = datetime.now(UTC).replace(tzinfo=None)
+    cutoff = now - timedelta(hours=scrub_hours)
+    terminal = [s.value for s in TERMINAL_STATES]
+    scrubbed = 0
+    with session_local() as session:
+        rows = (
+            session.execute(
+                select(Job).where(
+                    Job.state.in_(terminal),
+                    Job.finished_at.is_not(None),
+                    Job.finished_at < cutoff,
+                    Job.env_scrubbed_at.is_(None),
+                    Job.env_json.is_not(None),
+                    Job.env_json.not_in(("{}", "")),
+                    (
+                        Job.warning.is_(None)
+                        | ~Job.warning.like(f"{_PARENT_FAILED_WARNING_PREFIX}%")
+                    ),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for job in rows:
+            try:
+                env = json.loads(job.env_json)
+            except ValueError:
+                env = None
+            job.env_json = json.dumps(_redact_env(env)) if isinstance(env, dict) else "{}"
+            job.env_scrubbed_at = now
+            scrubbed += 1
+        if scrubbed:
+            session.commit()
+    if scrubbed:
+        _emit_event(
+            logs_dir,
+            "env_scrubbed",
+            source="broker",
+            count=scrubbed,
+            scrub_hours=scrub_hours,
+        )
+    return scrubbed
 
 
 def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], None]) -> None:
@@ -687,3 +763,4 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
     # JOBD_LOG_RETENTION_DAYS (logs, default 60d). See constants.py.
     prune_old_jobs(session_local, logs_dir, now)
     prune_old_logs(session_local, logs_dir, now)
+    scrub_terminal_env(session_local, logs_dir, now)

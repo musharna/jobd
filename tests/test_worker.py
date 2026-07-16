@@ -1488,6 +1488,56 @@ def test_run_job_propagates_submitted_env(tmp_path, monkeypatch):
     assert captured["env"]["JOBD_CHECKPOINT_DIR"].endswith("/9300")
 
 
+def test_run_job_scrubs_broker_token_from_workload_env(tmp_path, monkeypatch):
+    """The worker's JOBD_API_TOKEN must not be inherited by workloads — any
+    script or framework inside the job can dump its environment, and the
+    shared broker credential would ride along. A job that genuinely needs it
+    opts in by passing it in its own submitted `env`, which layers over the
+    scrub. Ordinary worker-side env vars are still inherited."""
+    import subprocess
+
+    monkeypatch.setenv("JOBD_API_TOKEN", "worker-secret-token")
+    monkeypatch.setenv("SOME_WORKER_VAR", "inherited-ok")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    captured: dict[str, dict] = {}
+
+    class _StubProc:
+        def __init__(self, cmd, **kw):
+            captured["env"] = kw.get("env") or {}
+            self.pid = 12347
+            self.stdout = type("F", (), {"read": lambda _s, _n: b"", "close": lambda _s: None})()
+
+        def send_signal(self, _sig):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", _StubProc)
+
+    job = {"id": 9400, "cmd": ["printenv"], "cwd": str(tmp_path), "fast_path": True}
+    run_job(_FakeClient(cancel_after_s=999.0), job, set())
+    assert "JOBD_API_TOKEN" not in captured["env"], (
+        "the broker credential leaked into the workload environment"
+    )
+    assert captured["env"].get("SOME_WORKER_VAR") == "inherited-ok"
+
+    # Explicit opt-in: a submitted env carrying the token IS delivered.
+    job = {
+        "id": 9401,
+        "cmd": ["printenv"],
+        "cwd": str(tmp_path),
+        "fast_path": True,
+        "env": {"JOBD_API_TOKEN": "job-scoped-token"},
+    }
+    run_job(_FakeClient(cancel_after_s=999.0), job, set())
+    assert captured["env"].get("JOBD_API_TOKEN") == "job-scoped-token"
+
+
 def test_run_job_checkpoint_dir_root_override(tmp_path, monkeypatch):
     """JOBD_WORKER_CHECKPOINT_ROOT overrides the default root. Used when an
     operator wants checkpoints on a different filesystem (e.g., a fast NVMe

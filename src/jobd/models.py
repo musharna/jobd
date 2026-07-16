@@ -425,6 +425,7 @@ KNOWN_EVENTS = frozenset(
         # retention (broker)
         "jobs_pruned",
         "logs_pruned",
+        "env_scrubbed",
         # worker lifecycle (broker-observed)
         "worker_registered",
         "worker_offline",

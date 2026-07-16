@@ -66,6 +66,12 @@ class Job(Base):
     # output captured" — reporting a pruned log as empty would make a job that
     # produced megabytes look like it produced nothing.
     log_pruned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Set when the sweeper masked this row's env_json values (terminal job,
+    # past the JOBD_ENV_SCRUB_HOURS grace). Rows are kept forever by default
+    # (JOB_RETENTION_DAYS_DEFAULT=0), so without the scrub a submitted secret
+    # lives plaintext in the DB file indefinitely. The stamp keeps the scan
+    # monotonic: a scrubbed row is never re-examined.
+    env_scrubbed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     signal: Mapped[str | None] = mapped_column(String(30), nullable=True)
     requires_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -188,6 +194,7 @@ _JOB_ADDS = [
     ("array_index", "INTEGER"),
     ("array_size", "INTEGER"),
     ("reconcile_misses", "INTEGER DEFAULT 0"),
+    ("env_scrubbed_at", "DATETIME"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),
