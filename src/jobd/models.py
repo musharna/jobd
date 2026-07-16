@@ -430,6 +430,7 @@ KNOWN_EVENTS = frozenset(
         "worker_registered",
         "worker_offline",
         "worker_stale",
+        "version_drift",
         # worker-posted
         "worker_shutdown",
         "watchdog_fired",
