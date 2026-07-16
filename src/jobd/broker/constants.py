@@ -68,6 +68,14 @@ LOG_RETENTION_DAYS_DEFAULT = 60
 # safety margin, not observability: reads were always masked. Override via
 # JOBD_ENV_SCRUB_HOURS; negative disables.
 ENV_SCRUB_HOURS_DEFAULT = 1.0
+# Version-drift warning: an ONLINE worker whose self-reported version has
+# mismatched the broker's continuously for this many hours gets one
+# `version_drift` event per episode. Short-lived mismatch is NORMAL (the
+# worker CD defers while a job runs, then self-heals on an idle tick) — the
+# event exists for the case that never self-heals: a worker busy or wedged
+# for days, silently running code from several releases ago. Override via
+# JOBD_VERSION_DRIFT_WARN_HOURS; negative disables.
+VERSION_DRIFT_WARN_HOURS_DEFAULT = 24.0
 # Warning stamp a cascade-cancel writes on a child; the un-cascade restores
 # exactly the rows carrying it (state.py) and the env scrub must exclude
 # exactly those rows (sweeper.py) — one constant so the two can't drift.
