@@ -91,7 +91,7 @@ def _parse_sweep_axes(specs: list[str]) -> list[dict]:
 
 @app.command()
 def submit(
-    cmd: list[str] = typer.Argument(..., help="Command to run"),
+    cmd: list[str] = typer.Argument(None, help="Command to run (omit with --stdin)"),
     project: str = typer.Option(..., "--project", "-p"),
     profile: str | None = typer.Option(None, "--profile"),
     host: str = typer.Option("any", "--host"),
@@ -186,6 +186,14 @@ def submit(
         "`{i}` (flat index) is also available. Mutually exclusive with --count. "
         "E.g. --sweep lr=0.1,0.01 --sweep seed=1,2,3 → 6 members.",
     ),
+    stdin_mode: bool = typer.Option(
+        False,
+        "--stdin",
+        help="read one shell command per line from stdin and submit each as an "
+        "independent job (run via `bash -c`), all sharing this invocation's "
+        "project/profile/resource options. Blank lines and #-comments are "
+        "skipped. The batch idiom of simple_gpu_scheduler, fleet-wide.",
+    ),
 ):
     """Submit a job. With --wait, stream logs until terminal state.
 
@@ -236,6 +244,43 @@ def submit(
         body["scheduling_timeout_s"] = scheduling_timeout_s
     if vram_required is not None:
         body["vram_gb"] = vram_required
+    if stdin_mode:
+        # Line-per-job batch: distinct commands don't fit the array machinery
+        # (arrays share ONE template with {key} substitution), so each line is
+        # an independent job sharing this invocation's options.
+        if cmd:
+            typer.secho(
+                "--stdin and a positional command are mutually exclusive", fg="red", err=True
+            )
+            raise typer.Exit(2)
+        if count > 1 or sweep:
+            typer.secho("--stdin is line-per-job; --count/--sweep don't apply", fg="red", err=True)
+            raise typer.Exit(2)
+        if wait or explain:
+            typer.secho("--stdin doesn't support --wait/--explain", fg="red", err=True)
+            raise typer.Exit(2)
+        lines = [
+            ln.strip()
+            for ln in sys.stdin.read().splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        if not lines:
+            typer.secho("--stdin: no commands on stdin", fg="red", err=True)
+            raise typer.Exit(2)
+        ids: list[int] = []
+        with _client() as c:
+            for line in lines:
+                b = dict(body)
+                b["cmd"] = ["bash", "-c", line]
+                r = c.post("/submit", json=b)
+                jid = r.json()["id"]
+                ids.append(jid)
+                typer.echo(f"{jid}\t{line}")
+        typer.secho(f"Submitted {len(ids)} jobs from stdin (ids {ids[0]}..{ids[-1]})", err=True)
+        return
+    if not cmd:
+        typer.secho("Command required (or use --stdin)", fg="red", err=True)
+        raise typer.Exit(2)
     if count > 1:
         body["count"] = count
     if sweep:
@@ -787,9 +832,20 @@ def wait(job_id: int):
 def logs(
     job_id: int,
     tail: int = typer.Option(8192, "--tail", "-n", help="bytes to show from end of log"),
+    follow: bool = typer.Option(
+        False,
+        "--follow",
+        "-f",
+        help="replay the log from the start and keep streaming until the job is "
+        "terminal (then exit with the job's own exit code) — `pueue follow` / "
+        "`tail -f` muscle memory. --tail is ignored in this mode.",
+    ),
 ):
     """Print the tail of a job's captured stdout+stderr. Handy for post-mortem
     on a finished job without SSHing to the worker."""
+    if follow:
+        _stream_wait(job_id)
+        return
     with _client() as c:
         r = c.get(f"/jobs/{job_id}/output", params={"tail": tail})
         body = r.json()
