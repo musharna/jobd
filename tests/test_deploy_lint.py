@@ -563,6 +563,37 @@ def test_dockerfile_installs_only_hashed_pretested_dependencies():
             )
 
 
+def test_dockerfile_copies_every_wheel_force_include_before_project_install():
+    """hatchling's force-include sources must exist in the image build context
+    when `pip install .` generates metadata — a missing one is a hard
+    FileNotFoundError. This is invisible to the PR suite (the wheel test builds
+    from a full checkout) and killed the v0.5.29 GHCR publish at the one moment
+    it could: on the tag. Every force-include source must be COPY'd into the
+    Dockerfile before the project install line."""
+    import tomllib
+
+    fi = (
+        tomllib.loads(_PYPROJECT.read_text())
+        .get("tool", {})
+        .get("hatch", {})
+        .get("build", {})
+        .get("targets", {})
+        .get("wheel", {})
+        .get("force-include", {})
+    )
+    lines = _DOCKERFILE.read_text().splitlines()
+    install_at = next(
+        i for i, line in enumerate(lines) if line.strip().startswith("RUN pip install --no-deps .")
+    )
+    copied_before = "\n".join(line for line in lines[:install_at] if line.startswith("COPY"))
+    missing = [src for src in fi if src not in copied_before]
+    assert not missing, (
+        f"pyproject force-include sources not COPY'd into the Dockerfile before "
+        f"`pip install --no-deps .`: {missing} — the image build will "
+        f"FileNotFoundError during metadata generation (v0.5.29 incident)."
+    )
+
+
 def test_dockerfile_base_image_is_digest_pinned():
     from_lines = [ln for ln in _DOCKERFILE.read_text().splitlines() if ln.startswith("FROM ")]
     assert from_lines, "no FROM in the Dockerfile?"
