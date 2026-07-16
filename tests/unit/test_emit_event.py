@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from jobd.app import _emit_event
+from jobd.broker.events import _emit_event
 
 
 def test_emit_event_writes_jsonl_row(tmp_path: Path) -> None:

@@ -24,9 +24,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobd import app as app_mod
 from jobd.broker import sweeper as sweeper_mod
 from jobd.broker.constants import MAX_LOG_CHUNK_BYTES
+
+# The cancel endpoint resolves _cas_state from the routes module's globals
+# (Stage-3 split) — patch THERE; a patch on jobd.app would be a silent no-op.
+from jobd.broker.routes import jobs as jobs_routes_mod
 from jobd.db import Job
 from jobd.models import JobState
 
@@ -168,17 +171,17 @@ def test_preempt_blockers_lost_race_returns_unsignaled(client, monkeypatch):
     queued_id = _submit(client)
     _db_update(client, queued_id, priority=90)
 
-    real_cas = app_mod._cas_state
+    real_cas = jobs_routes_mod._cas_state
 
     def racing_cas(session, jid, expected, **values):
         if values.get("signal") == "preempt":
-            monkeypatch.setattr(app_mod, "_cas_state", real_cas)  # fire once
+            monkeypatch.setattr(jobs_routes_mod, "_cas_state", real_cas)  # fire once
             session.execute(
                 update(Job).where(Job.id == jid).values(state=JobState.COMPLETED.value, exit_code=0)
             )
         return real_cas(session, jid, expected, **values)
 
-    monkeypatch.setattr(app_mod, "_cas_state", racing_cas)
+    monkeypatch.setattr(jobs_routes_mod, "_cas_state", racing_cas)
     r = client.post(f"/jobs/{queued_id}/preempt-blockers", params={"force": True})
     assert r.status_code == 200
     assert r.json()["signaled"] is None

@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from jobd.app import _persist_projects
+from jobd.broker.projects import _persist_projects
 from jobd.config import (
     ProjectDefaults,
     ProjectEntry,
