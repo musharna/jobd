@@ -24,7 +24,7 @@ def _mentioned(path: Path) -> set[str]:
 
 def test_readme_advertises_exactly_the_registered_tools():
     mentioned = _mentioned(_REPO_ROOT / "README.md")
-    assert _REGISTERED <= mentioned, (
+    assert mentioned >= _REGISTERED, (
         f"README omits registered MCP tools: {sorted(_REGISTERED - mentioned)}"
     )
     ghosts = {m for m in mentioned if m not in _REGISTERED}
