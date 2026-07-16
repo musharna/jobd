@@ -112,7 +112,13 @@ job list
 job logs <id>
 ```
 
-For a real multi-host deployment (Docker broker + systemd workers, Tailscale binding, shared auth token), see **[docs/security.md](https://github.com/musharna/jobd/blob/main/docs/security.md)** and the templates in `docker-compose.yml` and `scripts/` (broker compose, `install-worker.sh`, `job-worker.service`). Day-2 operations (health, draining a worker, upgrades, token rotation, backups) are in **[docs/runbook.md](https://github.com/musharna/jobd/blob/main/docs/runbook.md)**.
+For a real multi-host deployment (Docker broker + systemd workers, Tailscale binding, shared auth token), see **[docs/security.md](https://github.com/musharna/jobd/blob/main/docs/security.md)** and the templates in `docker-compose.yml` and `scripts/`. Adding a worker to a running fleet is one command:
+
+```bash
+job fleet add user@newbox      # ssh in, install pinned to the broker's version,
+                               # wire systemd units + the self-update timer,
+                               # verify it registers. `job fleet status` shows drift.
+``` Day-2 operations (health, draining a worker, upgrades, token rotation, backups) are in **[docs/runbook.md](https://github.com/musharna/jobd/blob/main/docs/runbook.md)**.
 
 ## Supported platforms
 

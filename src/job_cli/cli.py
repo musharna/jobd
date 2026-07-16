@@ -930,6 +930,10 @@ def classify(cmd: str):
 projects_app = typer.Typer(help="Manage project priorities.")
 app.add_typer(projects_app, name="projects")
 
+from job_cli.fleet import fleet_app  # noqa: E402  # circular-safe: fleet imports _client lazily
+
+app.add_typer(fleet_app, name="fleet")
+
 
 def _entry_priority(v) -> int:
     """Server now returns ProjectEntry-shaped dicts {priority, defaults}.
