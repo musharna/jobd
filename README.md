@@ -11,7 +11,7 @@
 
 **A self-hostable, GPU-aware job broker for your own machines — with native MCP/agent integration.**
 
-> Like [task-spooler](https://manpages.ubuntu.com/manpages/noble/man1/tsp.1.html), but across more than one machine — and VRAM-aware.
+> Like [task-spooler](https://manpages.ubuntu.com/manpages/noble/man1/tsp.1.html) or [pueue](https://github.com/Nukesor/pueue), but across *all* your machines — and VRAM-aware.
 
 </div>
 
@@ -47,11 +47,13 @@ Most schedulers assume a datacenter. The lightweight ones that don't (a bare `no
 | ------------------------------------------------------------------------------ | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **`nohup` / `tmux` / ssh-and-pray**                                            | Runs a command on one box                                   | No queue, no VRAM-aware routing, no preemption, no record of what ran where                                    |
 | **[task-spooler](https://manpages.ubuntu.com/manpages/noble/man1/tsp.1.html)** | A real job queue — on a single machine                      | jobd queues across _all_ your machines and routes by live VRAM/CPU fit                                         |
+| **[Pueue](https://github.com/Nukesor/pueue)**                                  | The best single-machine command queue daemon                | Pueue's own README declares distributed execution out of scope — jobd is that missing layer, plus GPU awareness |
+| **[HyperQueue](https://github.com/It4innovations/hyperqueue)**                 | Multi-machine task scheduling with HPC roots, single binary | HQ counts GPUs but doesn't track VRAM, and has no preemption/checkpoint contract or agent interface             |
 | **Slurm**                                                                      | Datacenter-grade scheduling                                 | Heavy to stand up and operate for 2–3 personal boxes; jobd is one process + a poller per host                  |
-| **SkyPilot / Modal / dstack**                                                  | Provision and run on clouds (SkyPilot also on-prem via SSH) | jobd targets hardware you _already own_, with no cloud/K8s assumptions and a much smaller footprint            |
+| **SkyPilot / Modal / dstack**                                                  | Provision and run on clouds + your own machines             | SkyPilot's "existing machines" mode installs a k3s cluster on your boxes; dstack wants Docker + passwordless sudo on every host. jobd is one process + a poller — no containers, no sudo, no K8s |
 | **Ray**                                                                        | A distributed-compute framework                             | jobd is a job _queue_, not a programming model — submit any command, no code changes, GPU-fit routing built in |
 
-Closest in spirit are task-spooler (single-node) and on-prem SkyPilot (heavier, cloud-shaped). jobd's niche is the 2–3-GPU homelab: multi-machine VRAM-fit routing + preempt/checkpoint + a native agent interface, with nothing to stand up.
+Closest in spirit are Pueue and task-spooler (single-machine by design) and HyperQueue (multi-machine, HPC-shaped). jobd's niche is the 2–5-GPU homelab: multi-machine **live VRAM-fit** routing + **preempt/checkpoint** + a **native MCP interface** — a combination none of the above offers — with nothing heavier than a Python process per host.
 
 ## Architecture
 
@@ -165,6 +167,21 @@ job submit -p train --sweep lr=0.1,0.01 --sweep seed=1,2,3 \
 ```
 
 `--sweep` and `--count` are mutually exclusive, the product is capped at 1000 members, and `i` is reserved as an axis key. Substitution is a literal `{key}` replace (not `str.format`), so JSON literals and shell braces in the command pass through untouched.
+
+## Coming from pueue or task-spooler?
+
+The verbs map directly — what changes is that the queue spans every machine you own:
+
+| You ran…                          | With jobd                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------- |
+| `tsp <cmd>` / `pueue add -- <cmd>`| `job submit -p <project> -- <cmd>`                                          |
+| `tsp -w` / `pueue follow <id>`    | `job wait <id>` — streams the log, exits with the job's own exit code       |
+| `tsp` / `pueue status`            | `job list`                                                                  |
+| `pueue log <id>`                  | `job logs <id>`                                                             |
+| `pueue kill <id>`                 | `job cancel <id>`                                                           |
+| `pueue group` / parallelism limits| projects + priorities (`projects.yaml`); per-worker slots via `JOBD_WORKER_MAX_CONCURRENT_JOBS` |
+
+What you gain on top: jobs route to whichever machine actually has the VRAM/CPU free, survive any single box rebooting, can be preempted with a checkpoint window instead of killed, and are drivable by an LLM agent over MCP. What you lose: nothing — a one-machine deployment (broker + one worker on the same host) behaves like a network-reachable pueue.
 
 ## MCP / agent integration
 
