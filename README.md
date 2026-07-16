@@ -192,7 +192,7 @@ What you gain on top: jobs route to whichever machine actually has the VRAM/CPU 
 
 ## MCP / agent integration
 
-jobd ships an MCP server (`jobd-mcp`) exposing the queue as nine tools — `jobd_submit`, `jobd_status`, `jobd_logs`, `jobd_list`, `jobd_cancel`, `jobd_preempt`, `jobd_workers`, `jobd_job_get`, `jobd_worker_delete`.
+jobd ships an MCP server (`jobd-mcp`) exposing the queue as nine tools — `jobd_submit`, `jobd_status`, `jobd_logs`, `jobd_list`, `jobd_cancel`, `jobd_preempt`, `jobd_events`, `jobd_workers`, `jobd_worker_delete`. **[docs/agent-cookbook.md](https://github.com/musharna/jobd/blob/main/docs/agent-cookbook.md)** is the worked tour: fire-and-babysit polling, surviving preemption with checkpoints, sweeps, and asking the broker why a job won't schedule.
 
 One-liner for [Claude Code](https://docs.claude.com/en/docs/claude-code):
 
