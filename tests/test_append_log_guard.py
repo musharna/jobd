@@ -4,7 +4,7 @@ Before the fix, append_log appended any-sized body to logs_dir/<id>.log with
 no DB existence check (unlike get_output, which 404s) and no size limit.
 """
 
-from jobd.app import MAX_LOG_CHUNK_BYTES
+from jobd.broker.constants import MAX_LOG_CHUNK_BYTES
 
 
 def _submit(client):

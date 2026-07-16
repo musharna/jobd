@@ -1866,11 +1866,11 @@ def test_cancel_queued_loses_race_to_claim_falls_through_to_signal(client, monke
     queued->cancelled CAS) flips the row to ASSIGNED via a real update and
     reports 0 rows, exactly as a concurrent claim committing mid-request would.
     """
-    from jobd import app as app_mod
+    from jobd.broker.routes import jobs as jobs_routes_mod
     from jobd.models import JobState
 
     job = _submit(client).json()
-    real_cas = app_mod._cas_state
+    real_cas = jobs_routes_mod._cas_state
     calls = {"n": 0}
 
     def racing_cas(session, job_id, expected, **values):
@@ -1882,7 +1882,7 @@ def test_cancel_queued_loses_race_to_claim_falls_through_to_signal(client, monke
             return 0
         return real_cas(session, job_id, expected, **values)
 
-    monkeypatch.setattr(app_mod, "_cas_state", racing_cas)
+    monkeypatch.setattr(jobs_routes_mod, "_cas_state", racing_cas)
 
     r = client.post(f"/jobs/{job['id']}/cancel")
     assert r.status_code == 200
@@ -3636,13 +3636,14 @@ def test_wait_streams_log_in_bounded_slices_without_utf8_corruption(client, tmp_
     char that lands on a slice boundary."""
     from sqlalchemy import update
 
-    from jobd import app as app_mod
+    from jobd.broker.routes import jobs as jobs_routes_mod
     from jobd.db import Job
     from jobd.models import JobState
 
     # Force a tiny slice so the 4-byte emoji straddles a read boundary and the
-    # 20-byte log is delivered across several slices.
-    monkeypatch.setattr(app_mod, "WAIT_STREAM_CHUNK_BYTES", 8)
+    # 20-byte log is delivered across several slices. /wait resolves the
+    # constant from the routes module's globals (Stage-3 split).
+    monkeypatch.setattr(jobs_routes_mod, "WAIT_STREAM_CHUNK_BYTES", 8)
 
     job_id = client.post(
         "/submit",
