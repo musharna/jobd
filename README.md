@@ -205,6 +205,8 @@ Three optional YAML files under `JOBD_CONFIG_DIR` (defaults shipped in `config/`
 
 All three are optional; with none present, every job runs at the global default priority.
 
+Everything else is environment variables — the complete `JOBD_*` catalog (broker, worker, CLI/MCP, and the vars provided to workloads) lives in **[docs/configuration.md](https://github.com/musharna/jobd/blob/main/docs/configuration.md)**, and a CI test keeps it in lockstep with the source in both directions.
+
 ## Concurrency (multislotting)
 
 By default each worker runs **one job at a time** (`JOBD_WORKER_MAX_CONCURRENT_JOBS=1`). Raise it to let a worker bin-pack several jobs that fit side by side:

@@ -23,6 +23,8 @@ Both layers must be in place. Either alone is insufficient: a `JOBD_HOST=0.0.0.0
 
 ## Rotation
 
+The full `JOBD_*` configuration catalog (every variable, all components) is in [configuration.md](configuration.md); this page covers only the security-relevant subset in depth.
+
 Token rotation is a coordinated push: update the broker's `.env` first, then push the new token to each worker's systemd unit Environment, then update each Claude CLI / MCP wrapper's env. There is no overlap window — workers will 401 against the new broker until they're updated. Plan rotation for a queue-quiet moment.
 
 **The token is not inherited by workloads.** The worker drops `JOBD_API_TOKEN` from every job's environment before launch — any script, framework, or crash reporter inside a workload can dump its env, and the shared credential must not ride along. The jobd facilities a workload legitimately uses arrive separately (`JOBD_CHECKPOINT_DIR`, `JOBD_CHECKPOINT_GRACE_S`). A job that genuinely needs broker API access opts in explicitly: `env: {"JOBD_API_TOKEN": "..."}` at submit.
