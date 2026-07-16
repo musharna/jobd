@@ -1,6 +1,9 @@
 """Shared pytest fixtures for jobd tests."""
 
 import pytest
+from fastapi.testclient import TestClient
+
+from jobd.app import build_app
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +18,31 @@ def _bypass_auth_for_tests(monkeypatch):
 def tmp_db_url(tmp_path):
     """Give each test an isolated SQLite file."""
     return f"sqlite:///{tmp_path}/jobd.db"
+
+
+# The standard one-broker test rig. This exact fixture body was pasted into
+# 24 test files (audit 2026-07-05 L3); a file that needs a variant (other
+# projects.yaml, docs on, …) defines its own local override as before.
+@pytest.fixture
+def app(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml):
+    return build_app(
+        db_url=f"sqlite:///{tmp_path}/jobd.db",
+        projects_path=sample_projects_yaml,
+        profiles_path=sample_profiles_yaml,
+        classifier_path=sample_classifier_yaml,
+        logs_path=tmp_path / "logs",
+    )
+
+
+@pytest.fixture
+def client(app):
+    return TestClient(app)
+
+
+@pytest.fixture
+def client_logs(client, tmp_path):
+    """(client, logs_dir) pair for tests that inspect events.jsonl / job logs."""
+    return client, tmp_path / "logs"
 
 
 @pytest.fixture

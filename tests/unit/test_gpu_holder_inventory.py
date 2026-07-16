@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import threading
 
-import pytest
 from fastapi.testclient import TestClient
 
 import jobd.worker.job_worker as job_worker
-from jobd.app import build_app
 from jobd.gpu_holder_probe import GpuHolder
 
 # ---- worker side ---------------------------------------------------------
@@ -153,18 +151,6 @@ def test_run_job_registers_pid_during_run_and_unregisters_after(tmp_path, monkey
 
 
 # ---- broker side ---------------------------------------------------------
-
-
-@pytest.fixture
-def client(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml):
-    app = build_app(
-        db_url=f"sqlite:///{tmp_path}/jobd.db",
-        projects_path=sample_projects_yaml,
-        profiles_path=sample_profiles_yaml,
-        classifier_path=sample_classifier_yaml,
-        logs_path=tmp_path / "logs",
-    )
-    return TestClient(app)
 
 
 def _hb(client: TestClient, host: str, in_flight_pids: dict | None = None):
