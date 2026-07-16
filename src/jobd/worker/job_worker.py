@@ -850,117 +850,110 @@ def _cancel_kill_timers(timers: list[threading.Timer], lock: threading.Lock) -> 
         t.cancel()
 
 
-def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
-    job_id = job["id"]
-    cmd = job["cmd"]
-    cwd = job["cwd"]
+def _drain_refuse(client: httpx.Client, job_id: int) -> bool:
+    """SIGTERM drain: a job claimed just before the drain flag flipped must not
+    start a workload the drain can no longer see. Complete it as
+    preempted/worker_shutdown so the broker record doesn't strand in
+    ASSIGNED (docs/plans/sigterm-drain.md, dispatch-side gap race)."""
+    if not _drain_event.is_set():
+        return False
+    log.warning("job %s: refusing to start, worker is draining", job_id)
+    _post_complete_with_retry(
+        client,
+        job_id,
+        {
+            "exit_code": None,
+            "final_state": "preempted",
+            "termination_reason": "worker_shutdown",
+        },
+    )
+    return True
 
-    # SIGTERM drain: a job claimed just before the drain flag flipped must not
-    # start a workload the drain can no longer see. Complete it as
-    # preempted/worker_shutdown so the broker record doesn't strand in
-    # ASSIGNED (docs/plans/sigterm-drain.md, dispatch-side gap race).
-    if _drain_event.is_set():
-        log.warning("job %s: refusing to start, worker is draining", job_id)
-        _post_complete_with_retry(
-            client,
-            job_id,
-            {
-                "exit_code": None,
-                "final_state": "preempted",
-                "termination_reason": "worker_shutdown",
-            },
-        )
-        return
 
+def _initial_workload_env(job: dict) -> dict[str, str]:
     env = os.environ.copy()
 
     # The worker's broker credential is not the workload's to have: any script,
     # framework, or crash reporter inside the job can dump its environment, and
     # the token would ride along into logs, checkpoints, and telemetry. Every
     # jobd facility a workload legitimately uses is delivered separately
-    # (JOBD_CHECKPOINT_* below). A job that genuinely needs broker API access
-    # gets the token the explicit way: `env: {"JOBD_API_TOKEN": ...}` at
-    # submit, which layers over this pop.
+    # (the JOBD_CHECKPOINT_* vars run_job sets after this). A job that genuinely
+    # needs broker API access gets the token the explicit way:
+    # `env: {"JOBD_API_TOKEN": ...}` at submit, which layers over this pop.
     env.pop("JOBD_API_TOKEN", None)
 
     # Apply caller-submitted env vars (the `env` field on the /submit payload,
     # delivered here via the /next-job claim response — the one read surface that
     # returns real env values; all others mask them, see docs/security.md) so
     # they reach the workload. These layer over the worker's inherited
-    # environment; the jobd-internal JOBD_CHECKPOINT_* vars set below are written
-    # afterward and intentionally take precedence. Trusted-tailnet feature: a
-    # caller who can reach /submit can already run arbitrary commands, so env
-    # injection grants no additional privilege (see docs/security.md).
+    # environment; the jobd-internal JOBD_CHECKPOINT_* vars run_job sets are
+    # written afterward and intentionally take precedence. Trusted-tailnet
+    # feature: a caller who can reach /submit can already run arbitrary
+    # commands, so env injection grants no additional privilege (see
+    # docs/security.md).
     submitted_env = job.get("env") or {}
     if submitted_env:
         env.update({str(k): str(v) for k, v in submitted_env.items()})
+    return env
 
-    # Pre-dispatch cwd-exists check. A host-local cwd (e.g. a git worktree that
-    # lives only on another host) is absent here even though the broker's coarse
-    # mount_roots prefix filter (/home) passed the job to us. Refuse admission so
-    # the broker re-routes to a host that has the path — instead of cd-failing to
-    # exit 127. The broker excludes this host for this job, so it won't be
-    # re-offered here (no hot loop).
-    if not os.path.isdir(cwd):
-        log.warning("job %s: cwd missing here (%s); refusing admission", job_id, cwd)
-        try:
-            client.post(
-                f"/jobs/{job_id}/refuse-admission",
-                json={"reason": "cwd_missing", "cwd": cwd},
-                timeout=10.0,
-            )
-        except Exception as e:
-            log.error("cwd-missing refuse post failed for job %s: %s", job_id, e)
-        return
 
-    # Pre-dispatch launcher-exists check. Without this, a missing absolute-
-    # or relative-path script silently exits 127 inside the systemd-run
-    # scope and the user only finds out at the next manual `job list`
-    # check. Fail loud at dispatch with termination_reason=launcher_missing.
+def _cwd_admission(client: httpx.Client, job_id: int, cwd: str) -> bool:
+    """Pre-dispatch cwd-exists check; False = refused. A host-local cwd (e.g. a
+    git worktree that lives only on another host) is absent here even though the
+    broker's coarse mount_roots prefix filter (/home) passed the job to us.
+    Refuse admission so the broker re-routes to a host that has the path —
+    instead of cd-failing to exit 127. The broker excludes this host for this
+    job, so it won't be re-offered here (no hot loop)."""
+    if os.path.isdir(cwd):
+        return True
+    log.warning("job %s: cwd missing here (%s); refusing admission", job_id, cwd)
+    try:
+        client.post(
+            f"/jobs/{job_id}/refuse-admission",
+            json={"reason": "cwd_missing", "cwd": cwd},
+            timeout=10.0,
+        )
+    except Exception as e:
+        log.error("cwd-missing refuse post failed for job %s: %s", job_id, e)
+    return False
+
+
+def _launcher_admission(client: httpx.Client, job_id: int, cmd: list[str], cwd: str) -> bool:
+    """Pre-dispatch launcher-exists check; False = refused. Without this, a
+    missing absolute- or relative-path script silently exits 127 inside the
+    systemd-run scope and the user only finds out at the next manual `job list`
+    check. Fail loud at dispatch with termination_reason=launcher_missing."""
     missing = _missing_launcher_path(cmd, cwd)
-    if missing is not None:
-        log.warning("job %s: launcher missing or non-executable: %s", job_id, missing)
-        try:
-            client.post(
-                f"/jobs/{job_id}/log",
-                content=(
-                    f"[worker pre-dispatch] launcher missing or non-executable: {missing}\n"
-                ).encode(),
-                timeout=10.0,
-            )
-            client.post(
-                f"/jobs/{job_id}/complete",
-                json={
-                    "exit_code": 127,
-                    "final_state": "failed",
-                    "termination_reason": "launcher_missing",
-                },
-                timeout=10.0,
-            )
-        except Exception as post_err:
-            log.error("launcher_missing POST error for job %s: %s", job_id, post_err)
-        return
+    if missing is None:
+        return True
+    log.warning("job %s: launcher missing or non-executable: %s", job_id, missing)
+    try:
+        client.post(
+            f"/jobs/{job_id}/log",
+            content=(
+                f"[worker pre-dispatch] launcher missing or non-executable: {missing}\n"
+            ).encode(),
+            timeout=10.0,
+        )
+        client.post(
+            f"/jobs/{job_id}/complete",
+            json={
+                "exit_code": 127,
+                "final_state": "failed",
+                "termination_reason": "launcher_missing",
+            },
+            timeout=10.0,
+        )
+    except Exception as post_err:
+        log.error("launcher_missing POST error for job %s: %s", job_id, post_err)
+    return False
 
-    # Per-job timeouts — submit-time value wins; otherwise worker-wide default
-    # via env var; otherwise unbounded (None). Idle watchdog kills jobs that
-    # produce zero new log bytes for N seconds; wall timeout kills jobs that
-    # exceed N seconds of total runtime regardless of liveness.
-    idle_timeout_s = job.get("idle_timeout_s") or _env_int("JOBD_WORKER_IDLE_TIMEOUT_S")
-    max_wall_s = job.get("max_wall_s") or _env_int("JOBD_WORKER_MAX_WALL_S")
-    # Per-job preemption grace window. None = use the worker default below
-    # (60s); an explicit value overrides. Capped server-side at 300s so a
-    # stuck checkpoint can't pin a slot.
-    checkpoint_grace_s = job.get("checkpoint_grace_s")
-    # Surface to the workload so jobd.client.install_preemption_handler
-    # can compute time_remaining() inside the user's checkpoint_fn.
-    env["JOBD_CHECKPOINT_GRACE_S"] = str(
-        checkpoint_grace_s if checkpoint_grace_s is not None else 60
-    )
 
-    # Per-job durable checkpoint directory. Default root puts checkpoints at
-    # ~/.local/share/jobd/checkpoints/<job_id>/ — persistent (not /tmp), so
-    # resume survives worker restart. Workloads write here; cleanup is
-    # workload-side.
+def _ensure_checkpoint_dir(job_id: int) -> Path:
+    """Per-job durable checkpoint directory. Default root puts checkpoints at
+    ~/.local/share/jobd/checkpoints/<job_id>/ — persistent (not /tmp), so
+    resume survives worker restart. Workloads write here; cleanup is
+    workload-side."""
     override_root = os.environ.get("JOBD_WORKER_CHECKPOINT_ROOT", "").strip()
     if override_root:
         default_root = Path(os.path.expanduser(override_root))
@@ -972,48 +965,57 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         )
     ckpt_dir = default_root / str(job_id)
     ckpt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    env["JOBD_CHECKPOINT_DIR"] = str(ckpt_dir)
+    return ckpt_dir
 
-    # Wrap heavy work in a transient systemd user-scope. An earlier shim
-    # did this implicitly via `exec systemd-run --user --scope -- "$@"`,
-    # but that meant Popen's pid pointed at the systemd-run client, not at the
-    # bash inside the scope — SIGTERM-to-pid was a no-op (2026-04-26 cancel-
-    # latency bug). Naming the unit lets us signal the scope directly via
-    # `systemctl --user kill`, which targets every process in the cgroup.
+
+def _wrap_in_scope(cmd: list[str], job: dict, job_id: int) -> tuple[list[str], str | None]:
+    """Wrap heavy work in a transient systemd user-scope; returns
+    (full_cmd, scope_unit) with scope_unit None for fast_path / no systemd-run.
+    An earlier shim did this implicitly via `exec systemd-run --user --scope --
+    "$@"`, but that meant Popen's pid pointed at the systemd-run client, not at
+    the bash inside the scope — SIGTERM-to-pid was a no-op (2026-04-26 cancel-
+    latency bug). Naming the unit lets us signal the scope directly via
+    `systemctl --user kill`, which targets every process in the cgroup."""
     systemd_run = shutil.which("systemd-run")
-    scope_unit: str | None = None
     if job.get("fast_path") or systemd_run is None:
-        full_cmd = cmd
-    else:
-        scope_unit = f"jobd-{job_id}.scope"
-        mem_max = os.environ.get("JOBD_WORKER_MEM_MAX", "14G")
-        swap_max = os.environ.get("JOBD_WORKER_SWAP_MAX", "4G")
-        full_cmd = [
-            systemd_run,
-            "--user",
-            "--scope",
-            "--quiet",
-            "--same-dir",
-            f"--unit={scope_unit}",
-            "-p",
-            f"MemoryMax={mem_max}",
-            "-p",
-            f"MemorySwapMax={swap_max}",
-            "--",
-        ] + cmd
+        return cmd, None
+    scope_unit = f"jobd-{job_id}.scope"
+    mem_max = os.environ.get("JOBD_WORKER_MEM_MAX", "14G")
+    swap_max = os.environ.get("JOBD_WORKER_SWAP_MAX", "4G")
+    full_cmd = [
+        systemd_run,
+        "--user",
+        "--scope",
+        "--quiet",
+        "--same-dir",
+        f"--unit={scope_unit}",
+        "-p",
+        f"MemoryMax={mem_max}",
+        "-p",
+        f"MemorySwapMax={swap_max}",
+        "--",
+    ] + cmd
+    return full_cmd, scope_unit
 
+
+def _spawn_workload(
+    client: httpx.Client, job_id: int, full_cmd: list[str], cwd: str, env: dict[str, str]
+) -> subprocess.Popen | None:
+    """Popen the workload; on failure post the 127/failed terminal and return
+    None (the job is settled)."""
     log.info("starting job %s: %s", job_id, full_cmd)
     try:
-        proc = subprocess.Popen(
+        return subprocess.Popen(
             full_cmd,
             cwd=cwd,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            # Unbuffered: we stream the pipe with explicit read(4096) chunks below.
-            # bufsize=1 (line buffering) is invalid in binary mode (text=False) — it
-            # warns and falls back to a BufferedReader whose read(4096) blocks until
-            # 4096 bytes accumulate, delaying log streaming. 0 = prompt chunk reads.
+            # Unbuffered: the caller streams the pipe with explicit read(4096)
+            # chunks. bufsize=1 (line buffering) is invalid in binary mode
+            # (text=False) — it warns and falls back to a BufferedReader whose
+            # read(4096) blocks until 4096 bytes accumulate, delaying log
+            # streaming. 0 = prompt chunk reads.
             bufsize=0,
             text=False,
         )
@@ -1032,227 +1034,204 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
             )
         except Exception as post_err:
             log.error("complete POST error: %s", post_err)
-        return
-    # `proc.pid` is the job's top-level process (for a scope-wrapped job,
-    # systemd-run --scope exec-replaces into it, so this pid lives in the scope
-    # cgroup — it is NOT a transient client). But a GPU job's CUDA contexts can
-    # live in forked CHILDREN under other pids (DDP/dataloader workers, a
-    # bash -c that spawns the trainer). NVML reports whichever pid holds the
-    # VRAM, so tracking only proc.pid would mis-count the worker's OWN children
-    # as foreign. GPU foreign-VRAM accounting therefore feeds
-    # compute_unregistered_vram / gpu_admission_check `_effective_owned_pids()`,
-    # which unions tracked_pids with the live pids in each in-flight job's scope
-    # cgroup. Without it, a multi-process GPU job inflated unregistered_vram_gb
-    # (spurious contention) and, at max_concurrent>1, made the worker refuse its
-    # own second job. (RTX 5090 verified, 2026-06-01.)
-    _tracked_pids_add(tracked_pids, proc.pid)
-    _register_in_flight_pid(job_id, proc.pid)
-    # Tell the broker the subprocess is live: assigned -> running. Best-effort:
-    # if the POST fails the job still runs and /complete will land the terminal
-    # state. The broker idempotently no-ops if the state isn't ASSIGNED.
-    try:
-        client.post(f"/jobs/{job_id}/started", timeout=10.0)
-    except Exception as e:
-        log.error("/started POST error for job %s: %s", job_id, e)
+        return None
 
-    stop_signal = threading.Event()
-    got_signal: dict[str, str | None] = {"signal": None}
-    termination_reason: dict[str, str | None] = {"reason": None}
-    checkpoint_state = {"complete": False}
-    job_started = time.monotonic()
-    last_log_lock = threading.Lock()
-    last_log_monotonic = [time.monotonic()]
-    # First-output watchdog: distinct from idle_timeout (which arms forever
-    # and resets per chunk). This deadline is "did the workload ever produce
-    # a byte?" — fires once at job-start+threshold if first_output_landed is
-    # still False, then disarms permanently on the first stdout byte. Worker-
-    # wide default via JOBD_WORKER_FIRST_OUTPUT_TIMEOUT_S; no per-job override
-    # in this surface (BACKLOG smoke piece 2; user picked worker-only).
-    first_output_timeout_s = _env_int("JOBD_WORKER_FIRST_OUTPUT_TIMEOUT_S")
-    first_output_landed = [False]
 
-    # SIGKILL-escalation timers scheduled by poll_signals (one per cancel/preempt
-    # signal). Cancelled once the process exits so the timer thread doesn't
-    # linger for up to grace_s holding the proc closure alive.
-    kill_timers: list[threading.Timer] = []
-    kill_timers_lock = threading.Lock()
+class _WorkloadRun:
+    """Everything a live workload's threads share: the signal-poll thread, the
+    SIGKILL-escalation timers, the drain hook, and the stdout-stream loop all
+    mutate this state; run_job orchestrates the phases. Formerly a ~350-line
+    closure web inside run_job — same data, same lock discipline, one name per
+    piece of state instead of one cell-variable per closure."""
 
-    # H-2 (audit 2026-07-10): guarantee the terminal transition. Any raise in
-    # the post-Popen body below (a proc.stdout.read() pipe/closed-file race, a
-    # signal-thread start failure under load, ...) must NOT leave the job
-    # stranded RUNNING with a leaked tracked pid and an un-reaped scope cgroup.
-    # The outer _dispatch_in_thread handler only logs; the finally here always
-    # runs the terminal cleanup + /complete(failed) if the body did not reach
-    # its own terminal post.
-    _terminal_posted = False
-    try:
+    def __init__(
+        self,
+        client: httpx.Client,
+        job: dict,
+        proc: subprocess.Popen,
+        scope_unit: str | None,
+        *,
+        checkpoint_grace_s: int | None,
+        max_wall_s: int | None,
+        idle_timeout_s: int | None,
+    ) -> None:
+        self.client = client
+        self.job = job
+        self.job_id: int = job["id"]
+        self.proc = proc
+        self.scope_unit = scope_unit
+        self.checkpoint_grace_s = checkpoint_grace_s
+        self.max_wall_s = max_wall_s
+        self.idle_timeout_s = idle_timeout_s
 
-        def _signal_workload(sig_name: str) -> None:
-            """SIGTERM/SIGKILL the workload. When wrapped in a systemd scope we
-            must target the scope unit (the cgroup), not proc.pid — that pid is
-            the systemd-run client, which exits as soon as the scope is set up.
-            Signaling a dead pid is a silent no-op (2026-04-26 cancel-latency).
-            """
-            if scope_unit is not None:
-                try:
-                    subprocess.run(
-                        ["systemctl", "--user", "kill", f"--signal={sig_name}", scope_unit],
-                        check=False,
-                        timeout=5,
-                    )
-                    return
-                except Exception as e:
-                    log.error("systemctl kill %s %s error: %s", scope_unit, sig_name, e)
-            # fast_path or systemd-run unavailable: signal the direct child.
+        self.stop_signal = threading.Event()
+        self.got_signal: str | None = None
+        self.termination_reason: str | None = None
+        self.checkpoint_complete = False
+        self.job_started = time.monotonic()
+        self.last_log_lock = threading.Lock()
+        self.last_log_monotonic = time.monotonic()
+        # First-output watchdog: distinct from idle_timeout (which arms forever
+        # and resets per chunk). This deadline is "did the workload ever produce
+        # a byte?" — fires once at job-start+threshold if first_output_landed is
+        # still False, then disarms permanently on the first stdout byte. Worker-
+        # wide default via JOBD_WORKER_FIRST_OUTPUT_TIMEOUT_S; no per-job override
+        # in this surface (BACKLOG smoke piece 2; user picked worker-only).
+        self.first_output_timeout_s = _env_int("JOBD_WORKER_FIRST_OUTPUT_TIMEOUT_S")
+        self.first_output_landed = False
+
+        # SIGKILL-escalation timers scheduled by poll_signals (one per cancel/preempt
+        # signal). Cancelled once the process exits so the timer thread doesn't
+        # linger for up to grace_s holding the proc alive.
+        self.kill_timers: list[threading.Timer] = []
+        self.kill_timers_lock = threading.Lock()
+        self.termination_initiated = threading.Event()
+
+    def signal_workload(self, sig_name: str) -> None:
+        """SIGTERM/SIGKILL the workload. When wrapped in a systemd scope we
+        must target the scope unit (the cgroup), not proc.pid — that pid is
+        the systemd-run client, which exits as soon as the scope is set up.
+        Signaling a dead pid is a silent no-op (2026-04-26 cancel-latency).
+        """
+        if self.scope_unit is not None:
             try:
-                sig = signal.SIGKILL if sig_name == "KILL" else signal.SIGTERM
-                proc.send_signal(sig)
-            except Exception as e:
-                log.error("proc.send_signal %s error: %s", sig_name, e)
-
-        termination_initiated = threading.Event()
-
-        def _initiate_termination(kind: str, reason: str | None, grace_s: float) -> None:
-            """Route the workload into the cancel/preempt kill path: record the
-            signal, SIGTERM, and schedule the SIGKILL escalation. Idempotent —
-            first caller wins (a broker signal and a worker drain can race).
-
-            SIGKILL escalation: if the workload ignores SIGTERM (badly-behaved
-            handler, native code in a critical section), the stdout-read loop
-            blocks forever and the post-loop proc.wait(timeout=grace) never gets
-            a chance to fire. The Timer force-kills so grace_s actually bounds
-            the wait."""
-            if termination_initiated.is_set():
+                subprocess.run(
+                    ["systemctl", "--user", "kill", f"--signal={sig_name}", self.scope_unit],
+                    check=False,
+                    timeout=5,
+                )
                 return
-            termination_initiated.set()
-            got_signal["signal"] = kind
-            if reason is not None:
-                termination_reason["reason"] = reason
-            _signal_workload("TERM")
+            except Exception as e:
+                log.error("systemctl kill %s %s error: %s", self.scope_unit, sig_name, e)
+        # fast_path or systemd-run unavailable: signal the direct child.
+        try:
+            sig = signal.SIGKILL if sig_name == "KILL" else signal.SIGTERM
+            self.proc.send_signal(sig)
+        except Exception as e:
+            log.error("proc.send_signal %s error: %s", sig_name, e)
 
-            def _kill_after_grace():
-                if proc.poll() is None:
+    def initiate_termination(self, kind: str, reason: str | None, grace_s: float) -> None:
+        """Route the workload into the cancel/preempt kill path: record the
+        signal, SIGTERM, and schedule the SIGKILL escalation. Idempotent —
+        first caller wins (a broker signal and a worker drain can race).
+
+        SIGKILL escalation: if the workload ignores SIGTERM (badly-behaved
+        handler, native code in a critical section), the stdout-read loop
+        blocks forever and the post-loop proc.wait(timeout=grace) never gets
+        a chance to fire. The Timer force-kills so grace_s actually bounds
+        the wait."""
+        if self.termination_initiated.is_set():
+            return
+        self.termination_initiated.set()
+        self.got_signal = kind
+        if reason is not None:
+            self.termination_reason = reason
+        self.signal_workload("TERM")
+
+        def _kill_after_grace():
+            if self.proc.poll() is None:
+                log.warning(
+                    "job %s: %s grace %ss expired, sending SIGKILL", self.job_id, kind, grace_s
+                )
+                self.signal_workload("KILL")
+
+        kill_timer = threading.Timer(grace_s, _kill_after_grace)
+        with self.kill_timers_lock:
+            self.kill_timers.append(kill_timer)
+        kill_timer.start()
+
+    def _watchdog_kill(self, reason: str, threshold_s: int) -> None:
+        """Shared tail of the three poll_signals watchdogs: emit the
+        observability event, then route through initiate_termination so the
+        watchdog kill arms the same SIGKILL-escalation timer as broker
+        cancel/preempt. A bare SIGTERM here left SIGTERM-ignoring jobs pinning
+        their slot forever: poll_signals returns, the stdout-read loop blocks
+        on the still-open pipe, and the post-loop proc.wait(timeout=grace)
+        escalation is never reached."""
+        _post_event(
+            self.client,
+            "watchdog_fired",
+            job_id=self.job_id,
+            project=self.job.get("project"),
+            host=hostname(),
+            reason=reason,
+            threshold_s=threshold_s,
+        )
+        self.initiate_termination("cancel", reason, WATCHDOG_KILL_GRACE_S)
+
+    def poll_signals(self) -> None:
+        while not self.stop_signal.is_set():
+            now = time.monotonic()
+            # Wall-clock cap: total runtime exceeded. Trips even when the job
+            # is producing output — useful for runaway training runs.
+            if self.max_wall_s is not None and (now - self.job_started) > self.max_wall_s:
+                log.warning(
+                    "job %s: max_wall_s=%ss exceeded, killing", self.job_id, self.max_wall_s
+                )
+                self._watchdog_kill("wall_timeout", self.max_wall_s)
+                return
+            # First-output watchdog: fires once if the workload hasn't emitted
+            # a single byte within first_output_timeout_s of job start.
+            # Disarms permanently after first byte; idle_timeout takes over
+            # for steady-state silence. Catches the silent-hang-from-start
+            # mode that idle_timeout (typically configured for steady-state
+            # cadence) is too slow to catch.
+            if (
+                self.first_output_timeout_s is not None
+                and not self.first_output_landed
+                and (now - self.job_started) > self.first_output_timeout_s
+            ):
+                log.warning(
+                    "job %s: no output within first_output_timeout_s=%ss of start, killing",
+                    self.job_id,
+                    self.first_output_timeout_s,
+                )
+                self._watchdog_kill("first_output_timeout", self.first_output_timeout_s)
+                return
+            # Idle watchdog: no log bytes for N seconds. Trips on hung jobs
+            # whose process is alive but making no progress (the 2026-04-25
+            # project-c failure mode — heartbeats green, output silent).
+            if self.idle_timeout_s is not None:
+                with self.last_log_lock:
+                    silent_for = now - self.last_log_monotonic
+                if silent_for > self.idle_timeout_s:
                     log.warning(
-                        "job %s: %s grace %ss expired, sending SIGKILL", job_id, kind, grace_s
+                        "job %s: no output for %.0fs (idle_timeout_s=%s), killing",
+                        self.job_id,
+                        silent_for,
+                        self.idle_timeout_s,
                     )
-                    _signal_workload("KILL")
-
-            kill_timer = threading.Timer(grace_s, _kill_after_grace)
-            with kill_timers_lock:
-                kill_timers.append(kill_timer)
-            kill_timer.start()
-
-        def poll_signals():
-            while not stop_signal.is_set():
-                now = time.monotonic()
-                # Wall-clock cap: total runtime exceeded. Trips even when the job
-                # is producing output — useful for runaway training runs.
-                if max_wall_s is not None and (now - job_started) > max_wall_s:
-                    log.warning("job %s: max_wall_s=%ss exceeded, killing", job_id, max_wall_s)
-                    _post_event(
-                        client,
-                        "watchdog_fired",
-                        job_id=job_id,
-                        project=job.get("project"),
-                        host=hostname(),
-                        reason="wall_timeout",
-                        threshold_s=max_wall_s,
-                    )
-                    # Route through _initiate_termination so the watchdog kill arms
-                    # the same SIGKILL-escalation timer as broker cancel/preempt. A
-                    # bare SIGTERM here left SIGTERM-ignoring jobs pinning their slot
-                    # forever: poll_signals returns, the stdout-read loop blocks on
-                    # the still-open pipe, and the post-loop proc.wait(timeout=grace)
-                    # escalation is never reached.
-                    _initiate_termination("cancel", "wall_timeout", WATCHDOG_KILL_GRACE_S)
+                    self._watchdog_kill("idle_timeout", self.idle_timeout_s)
                     return
-                # First-output watchdog: fires once if the workload hasn't emitted
-                # a single byte within first_output_timeout_s of job start.
-                # Disarms permanently after first byte; idle_timeout takes over
-                # for steady-state silence. Catches the silent-hang-from-start
-                # mode that idle_timeout (typically configured for steady-state
-                # cadence) is too slow to catch.
-                if (
-                    first_output_timeout_s is not None
-                    and not first_output_landed[0]
-                    and (now - job_started) > first_output_timeout_s
-                ):
-                    log.warning(
-                        "job %s: no output within first_output_timeout_s=%ss of start, killing",
-                        job_id,
-                        first_output_timeout_s,
-                    )
-                    _post_event(
-                        client,
-                        "watchdog_fired",
-                        job_id=job_id,
-                        project=job.get("project"),
-                        host=hostname(),
-                        reason="first_output_timeout",
-                        threshold_s=first_output_timeout_s,
-                    )
-                    # See wall_timeout branch: arm the SIGKILL escalation timer.
-                    _initiate_termination("cancel", "first_output_timeout", WATCHDOG_KILL_GRACE_S)
-                    return
-                # Idle watchdog: no log bytes for N seconds. Trips on hung jobs
-                # whose process is alive but making no progress (the 2026-04-25
-                # project-c failure mode — heartbeats green, output silent).
-                if idle_timeout_s is not None:
-                    with last_log_lock:
-                        silent_for = now - last_log_monotonic[0]
-                    if silent_for > idle_timeout_s:
-                        log.warning(
-                            "job %s: no output for %.0fs (idle_timeout_s=%s), killing",
-                            job_id,
-                            silent_for,
-                            idle_timeout_s,
-                        )
-                        _post_event(
-                            client,
-                            "watchdog_fired",
-                            job_id=job_id,
-                            project=job.get("project"),
-                            host=hostname(),
-                            reason="idle_timeout",
-                            threshold_s=idle_timeout_s,
-                        )
-                        # See wall_timeout branch: arm the SIGKILL escalation timer.
-                        _initiate_termination("cancel", "idle_timeout", WATCHDOG_KILL_GRACE_S)
+            try:
+                r = self.client.get(f"/jobs/{self.job_id}/signal", timeout=5.0)
+                if r.status_code == 200:
+                    sig = r.json().get("signal")
+                    if sig in ("cancel", "preempt"):
+                        if sig == "preempt":
+                            grace_s = (
+                                self.checkpoint_grace_s
+                                if self.checkpoint_grace_s is not None
+                                else 60
+                            )
+                        else:
+                            grace_s = 60
+                        self.initiate_termination(sig, None, grace_s)
                         return
-                try:
-                    r = client.get(f"/jobs/{job_id}/signal", timeout=5.0)
-                    if r.status_code == 200:
-                        sig = r.json().get("signal")
-                        if sig in ("cancel", "preempt"):
-                            if sig == "preempt":
-                                grace_s = (
-                                    checkpoint_grace_s if checkpoint_grace_s is not None else 60
-                                )
-                            else:
-                                grace_s = 60
-                            _initiate_termination(sig, None, grace_s)
-                            return
-                except Exception:
-                    pass
-                stop_signal.wait(SIGNAL_POLL_INTERVAL_S)
+            except Exception:
+                pass
+            self.stop_signal.wait(SIGNAL_POLL_INTERVAL_S)
 
-        def _drain_hook(reason: str, grace_cap_s: float) -> None:
-            """Drain entry point: preempt this job with the job's own grace capped
-            by the drain budget, so one slow checkpoint can't pin shutdown past
-            the systemd stop timeout."""
-            job_grace = float(checkpoint_grace_s if checkpoint_grace_s is not None else 60)
-            _initiate_termination("preempt", reason, min(job_grace, grace_cap_s))
+    def drain_hook(self, reason: str, grace_cap_s: float) -> None:
+        """Drain entry point: preempt this job with the job's own grace capped
+        by the drain budget, so one slow checkpoint can't pin shutdown past
+        the systemd stop timeout."""
+        job_grace = float(self.checkpoint_grace_s if self.checkpoint_grace_s is not None else 60)
+        self.initiate_termination("preempt", reason, min(job_grace, grace_cap_s))
 
-        _register_drain_hook(job_id, _drain_hook)
-        # Gap race (drain flag flipped between the top-of-run_job check and the
-        # registration above): the drain's hook snapshot may have missed us, so
-        # self-terminate now that the flag is visible.
-        if _drain_event.is_set():
-            _drain_hook("worker_shutdown", _drain_grace_s())
-
-        sig_thread = threading.Thread(target=poll_signals, daemon=True)
-        sig_thread.start()
-
+    def stream_output(self) -> None:
+        """Pump workload stdout to the broker until EOF: stamp the idle clock,
+        disarm the first-output watchdog, and scan for the checkpoint token."""
         # Sentinel the user's preemption handler prints (after their checkpoint
         # function returns) to tell the worker "checkpoint is durable, you can
         # let me exit." Detection is byte-level so it survives chunk boundaries.
@@ -1260,85 +1239,84 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         token_tail_len = len(checkpoint_token) - 1
         token_buf = b""
 
-        # stdout is always a pipe here (Popen above passes stdout=subprocess.PIPE),
+        # stdout is always a pipe here (Popen passes stdout=subprocess.PIPE),
         # so this never trips at runtime; it narrows IO[bytes] | None for the reader.
-        assert proc.stdout is not None
+        assert self.proc.stdout is not None
         try:
             while True:
-                chunk = proc.stdout.read(4096)
+                chunk = self.proc.stdout.read(4096)
                 if not chunk:
                     break
-                with last_log_lock:
-                    last_log_monotonic[0] = time.monotonic()
-                # Disarm the first-output watchdog permanently. Done under the
-                # last_log_lock so the watchdog thread can't observe a torn
-                # state on hosts where bool writes aren't atomic.
-                if not first_output_landed[0]:
-                    first_output_landed[0] = True
+                with self.last_log_lock:
+                    self.last_log_monotonic = time.monotonic()
+                    # Disarm the first-output watchdog permanently. Done under
+                    # the last_log_lock so the watchdog thread can't observe a
+                    # torn state on hosts where bool writes aren't atomic.
+                    if not self.first_output_landed:
+                        self.first_output_landed = True
                 # Only watch for the token once we've signaled preempt — any
                 # other appearance is the workload echoing it for some other
                 # reason and we don't want to fire the observability event.
-                if got_signal["signal"] == "preempt" and not checkpoint_state["complete"]:
+                if self.got_signal == "preempt" and not self.checkpoint_complete:
                     scan = token_buf + chunk
                     if checkpoint_token in scan:
-                        checkpoint_state["complete"] = True
+                        self.checkpoint_complete = True
                     token_buf = scan[-token_tail_len:]
                 try:
-                    client.post(f"/jobs/{job_id}/log", content=chunk, timeout=10.0)
+                    self.client.post(f"/jobs/{self.job_id}/log", content=chunk, timeout=10.0)
                 except Exception as e:
                     log.error("log POST error: %s", e)
         finally:
-            proc.stdout.close()
-            stop_signal.set()
+            self.proc.stdout.close()
+            self.stop_signal.set()
 
-        if got_signal["signal"] == "preempt":
-            grace = checkpoint_grace_s if checkpoint_grace_s is not None else 60
-        elif got_signal["signal"]:
+    def wait_with_grace(self) -> int:
+        """Wait for the workload to exit; a signaled job gets its grace window
+        and is then SIGKILLed. Pending escalation timers are cancelled once the
+        process is gone so their threads don't linger holding the proc."""
+        if self.got_signal == "preempt":
+            grace = self.checkpoint_grace_s if self.checkpoint_grace_s is not None else 60
+        elif self.got_signal:
             grace = 60
         else:
             grace = None
         try:
-            rc = proc.wait(timeout=grace)
+            rc = self.proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
-            _signal_workload("KILL")
-            rc = _wait_after_kill(proc, job_id)
+            self.signal_workload("KILL")
+            rc = _wait_after_kill(self.proc, self.job_id)
+        self.cancel_kill_timers()
+        return rc
 
-        # Process has exited (or been abandoned): cancel any pending SIGKILL-
-        # escalation timers so their threads don't linger holding the proc closure.
-        _cancel_kill_timers(kill_timers, kill_timers_lock)
+    def cancel_kill_timers(self) -> None:
+        _cancel_kill_timers(self.kill_timers, self.kill_timers_lock)
 
-        if got_signal["signal"] == "preempt" and checkpoint_state["complete"]:
+    def reap_stragglers(self, tracked_pids: set[int]) -> None:
+        """Post-exit reaping of anything the workload left behind.
+
+        Audit 2026-05-18 (runtime-zombies S4): cgroup-walk reap. Anything
+        still alive in the per-job scope cgroup after the workload exits is
+        a zombie candidate (child detached, double-forked past subreaper, or
+        spawned children that outlived the parent). SIGKILL them so they
+        don't accumulate as PPID=1 orphans holding GPU/RAM. The desktop
+        inference_server orphan (21h51m, 16 GB VRAM held) is the canonical
+        case this defends against.
+        """
+        if _REAPER_OK and self.scope_unit is not None:
             try:
-                client.post(f"/jobs/{job_id}/checkpoint-complete", timeout=10.0)
-            except Exception as e:
-                log.error("/checkpoint-complete POST error: %s", e)
-
-        _unregister_drain_hook(job_id)
-        _unregister_in_flight_pid(job_id)
-        _tracked_pids_discard(tracked_pids, proc.pid)
-
-        # Audit 2026-05-18 (runtime-zombies S4): cgroup-walk reap. Anything
-        # still alive in the per-job scope cgroup after the workload exits is
-        # a zombie candidate (child detached, double-forked past subreaper, or
-        # spawned children that outlived the parent). SIGKILL them so they
-        # don't accumulate as PPID=1 orphans holding GPU/RAM. The desktop
-        # inference_server orphan (21h51m, 16 GB VRAM held) is the canonical
-        # case this defends against.
-        if _REAPER_OK and scope_unit is not None:
-            try:
-                scope_path = _cgroup_walk.resolve_user_scope_path(scope_unit)
+                scope_path = _cgroup_walk.resolve_user_scope_path(self.scope_unit)
                 if scope_path is not None:
                     reaped = _cgroup_walk.kill_scope(scope_path)
                     if reaped:
                         log.info(
                             "job %s: cgroup-walk reaped %s surviving PID(s) in %s: %s",
-                            job_id,
+                            self.job_id,
                             len(reaped),
-                            scope_unit,
+                            self.scope_unit,
                             reaped,
                         )
             except Exception as e:
-                log.error("job %s: cgroup-walk error for %s: %s", job_id, scope_unit, e)
+                log.error("job %s: cgroup-walk error for %s: %s", self.job_id, self.scope_unit, e)
 
         # Audit 2026-05-18 spec-review (S4 missing-bullet): /proc reparented-
         # orphan sweep. Anything whose ppid is this worker but isn't in the
@@ -1362,50 +1340,152 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
                 if killed:
                     log.info(
                         "job %s: subreaper /proc-sweep reaped %s reparented orphan PID(s): %s",
-                        job_id,
+                        self.job_id,
                         len(killed),
                         killed,
                     )
             except Exception as e:
-                log.error("job %s: subreaper /proc-sweep error: %s", job_id, e)
+                log.error("job %s: subreaper /proc-sweep error: %s", self.job_id, e)
 
-        final_state = "completed"
-        if got_signal["signal"] == "cancel":
+    def final_state(self, rc: int) -> str:
+        if self.got_signal == "cancel":
             # Watchdog-triggered cancels surface as "failed" (not "cancelled") so
             # depends_on cascades fail children — a wall/idle timeout means the
             # job did NOT do its job, and downstream consumers should treat it
             # like any other failure. User-initiated cancels still land in
             # "cancelled" to keep the manual-abort surface clean.
-            if termination_reason["reason"] in (
+            if self.termination_reason in (
                 "wall_timeout",
                 "idle_timeout",
                 "first_output_timeout",
             ):
-                final_state = "failed"
-            else:
-                final_state = "cancelled"
-        elif got_signal["signal"] == "preempt":
-            final_state = "preempted"
-        elif rc != 0:
-            final_state = "failed"
+                return "failed"
+            return "cancelled"
+        if self.got_signal == "preempt":
+            return "preempted"
+        if rc != 0:
+            return "failed"
+        return "completed"
 
-        complete_payload = {"exit_code": rc, "final_state": final_state}
-        if termination_reason["reason"] is not None:
-            complete_payload["termination_reason"] = termination_reason["reason"]
+
+def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
+    job_id = job["id"]
+    cmd = job["cmd"]
+    cwd = job["cwd"]
+
+    if _drain_refuse(client, job_id):
+        return
+    env = _initial_workload_env(job)
+    if not _cwd_admission(client, job_id, cwd):
+        return
+    if not _launcher_admission(client, job_id, cmd, cwd):
+        return
+
+    # Per-job timeouts — submit-time value wins; otherwise worker-wide default
+    # via env var; otherwise unbounded (None). Idle watchdog kills jobs that
+    # produce zero new log bytes for N seconds; wall timeout kills jobs that
+    # exceed N seconds of total runtime regardless of liveness.
+    idle_timeout_s = job.get("idle_timeout_s") or _env_int("JOBD_WORKER_IDLE_TIMEOUT_S")
+    max_wall_s = job.get("max_wall_s") or _env_int("JOBD_WORKER_MAX_WALL_S")
+    # Per-job preemption grace window. None = use the worker default below
+    # (60s); an explicit value overrides. Capped server-side at 300s so a
+    # stuck checkpoint can't pin a slot.
+    checkpoint_grace_s = job.get("checkpoint_grace_s")
+    # Surface to the workload so jobd.client.install_preemption_handler
+    # can compute time_remaining() inside the user's checkpoint_fn.
+    env["JOBD_CHECKPOINT_GRACE_S"] = str(
+        checkpoint_grace_s if checkpoint_grace_s is not None else 60
+    )
+    env["JOBD_CHECKPOINT_DIR"] = str(_ensure_checkpoint_dir(job_id))
+
+    full_cmd, scope_unit = _wrap_in_scope(cmd, job, job_id)
+
+    proc = _spawn_workload(client, job_id, full_cmd, cwd, env)
+    if proc is None:
+        return
+    # `proc.pid` is the job's top-level process (for a scope-wrapped job,
+    # systemd-run --scope exec-replaces into it, so this pid lives in the scope
+    # cgroup — it is NOT a transient client). But a GPU job's CUDA contexts can
+    # live in forked CHILDREN under other pids (DDP/dataloader workers, a
+    # bash -c that spawns the trainer). NVML reports whichever pid holds the
+    # VRAM, so tracking only proc.pid would mis-count the worker's OWN children
+    # as foreign. GPU foreign-VRAM accounting therefore feeds
+    # compute_unregistered_vram / gpu_admission_check `_effective_owned_pids()`,
+    # which unions tracked_pids with the live pids in each in-flight job's scope
+    # cgroup. Without it, a multi-process GPU job inflated unregistered_vram_gb
+    # (spurious contention) and, at max_concurrent>1, made the worker refuse its
+    # own second job. (RTX 5090 verified, 2026-06-01.)
+    _tracked_pids_add(tracked_pids, proc.pid)
+    _register_in_flight_pid(job_id, proc.pid)
+    # Tell the broker the subprocess is live: assigned -> running. Best-effort:
+    # if the POST fails the job still runs and /complete will land the terminal
+    # state. The broker idempotently no-ops if the state isn't ASSIGNED.
+    try:
+        client.post(f"/jobs/{job_id}/started", timeout=10.0)
+    except Exception as e:
+        log.error("/started POST error for job %s: %s", job_id, e)
+
+    run = _WorkloadRun(
+        client,
+        job,
+        proc,
+        scope_unit,
+        checkpoint_grace_s=checkpoint_grace_s,
+        max_wall_s=max_wall_s,
+        idle_timeout_s=idle_timeout_s,
+    )
+
+    # H-2 (audit 2026-07-10): guarantee the terminal transition. Any raise in
+    # the post-Popen body below (a proc.stdout.read() pipe/closed-file race, a
+    # signal-thread start failure under load, ...) must NOT leave the job
+    # stranded RUNNING with a leaked tracked pid and an un-reaped scope cgroup.
+    # The outer _dispatch_in_thread handler only logs; the finally here always
+    # runs the terminal cleanup + /complete(failed) if the body did not reach
+    # its own terminal post.
+    _terminal_posted = False
+    try:
+        _register_drain_hook(job_id, run.drain_hook)
+        # Gap race (drain flag flipped between the top-of-run_job check and the
+        # registration above): the drain's hook snapshot may have missed us, so
+        # self-terminate now that the flag is visible.
+        if _drain_event.is_set():
+            run.drain_hook("worker_shutdown", _drain_grace_s())
+
+        sig_thread = threading.Thread(target=run.poll_signals, daemon=True)
+        sig_thread.start()
+
+        run.stream_output()
+        rc = run.wait_with_grace()
+
+        if run.got_signal == "preempt" and run.checkpoint_complete:
+            try:
+                client.post(f"/jobs/{job_id}/checkpoint-complete", timeout=10.0)
+            except Exception as e:
+                log.error("/checkpoint-complete POST error: %s", e)
+
+        _unregister_drain_hook(job_id)
+        _unregister_in_flight_pid(job_id)
+        _tracked_pids_discard(tracked_pids, proc.pid)
+
+        run.reap_stragglers(tracked_pids)
+
+        complete_payload = {"exit_code": rc, "final_state": run.final_state(rc)}
+        if run.termination_reason is not None:
+            complete_payload["termination_reason"] = run.termination_reason
         _terminal_posted = True
         _post_complete_with_retry(client, job_id, complete_payload)
     except Exception as _exc:
         log.error("job %s: run_job raised after dispatch: %r", job_id, _exc)
     finally:
         # F2 (audit 2026-07-12): stop the signal-poll thread. The normal path
-        # sets this in the inner read-loop finally, but a raise BEFORE that loop
+        # sets this in stream_output's finally, but a raise BEFORE that loop
         # (e.g. sig_thread.start() under thread exhaustion) would leave
         # poll_signals spinning on GET /signal forever for an already-terminal
         # job. Idempotent, so harmless on the success path.
-        stop_signal.set()
+        run.stop_signal.set()
         if not _terminal_posted:
             with contextlib.suppress(Exception):
-                _cancel_kill_timers(kill_timers, kill_timers_lock)
+                run.cancel_kill_timers()
             if _REAPER_OK and scope_unit is not None:
                 with contextlib.suppress(Exception):
                     _sp = _cgroup_walk.resolve_user_scope_path(scope_unit)
