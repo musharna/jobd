@@ -66,7 +66,12 @@ from jobd.broker.state import (
     _reject_stale_worker,
 )
 from jobd.broker.submit import submit_job
-from jobd.broker.sweeper import prune_old_jobs, scrub_terminal_env, sweep_once
+from jobd.broker.sweeper import (
+    prune_old_jobs,
+    scrub_terminal_env,
+    sweep_once,
+    warn_version_drift,
+)
 from jobd.config import (
     ProjectEntry,
     load_classifier_rules,
@@ -1418,6 +1423,9 @@ def build_app(
     def _scrub_terminal_env(now: datetime | None = None) -> int:
         return scrub_terminal_env(SessionLocal, logs_dir, now)
 
+    def _warn_version_drift(now: datetime | None = None) -> int:
+        return warn_version_drift(SessionLocal, logs_dir, now)
+
     def _sweep_once() -> None:
         sweep_once(SessionLocal, logs_dir, _wake_dispatchers)
 
@@ -1429,6 +1437,7 @@ def build_app(
     app.state.sweep_once = _sweep_once
     app.state.prune_old_jobs = _prune_old_jobs
     app.state.scrub_terminal_env = _scrub_terminal_env
+    app.state.warn_version_drift = _warn_version_drift
     app.state.engine = engine
 
     return app

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
+from jobd import __version__ as _jobd_version
 from jobd.broker.constants import (
     _AUTO_PREEMPT_WARNING_PREFIX,
     _BLOCKED_WARNING_PREFIX,
@@ -32,6 +33,7 @@ from jobd.broker.constants import (
     QUEUE_BLOCKED_THRESHOLD_SECONDS,
     STALE_WORKER_THRESHOLD_S_DEFAULT,
     UNMATCHEABLE_THRESHOLD_SECONDS,
+    VERSION_DRIFT_WARN_HOURS_DEFAULT,
     WALL_CLOCK_BACKSTOP_GRACE_SECONDS,
 )
 from jobd.broker.events import _emit_event
@@ -258,6 +260,61 @@ def scrub_terminal_env(session_local, logs_dir: Path, now: datetime | None = Non
             scrub_hours=scrub_hours,
         )
     return scrubbed
+
+
+def warn_version_drift(session_local, logs_dir: Path, now: datetime | None = None) -> int:
+    """Emit one ``version_drift`` event per episode for each ONLINE worker whose
+    self-reported version has mismatched the broker's continuously for more
+    than ``JOBD_VERSION_DRIFT_WARN_HOURS``. Returns the number warned.
+
+    The metric half already exists (``jobd_worker_version_info`` vs
+    ``jobd_build_info``) but only helps someone watching a dashboard. A
+    mismatch is NORMAL for a while — the worker CD defers while a job runs —
+    so this warns only when the episode outlives the threshold: the case that
+    never self-heals (a worker busy or wedged for days, silently running code
+    from several releases ago; the 12-day cwd_missing incident is the
+    canonical cost of not noticing). A worker too old to report a version
+    mismatches by definition. Episode state lives on the worker row:
+    ``version_mismatch_since`` stamps first observation, ``warned_at`` dedups
+    to one event; both clear when versions align, so a future episode warns
+    afresh."""
+    raw = os.environ.get("JOBD_VERSION_DRIFT_WARN_HOURS", "").strip()
+    try:
+        warn_hours = float(raw) if raw else VERSION_DRIFT_WARN_HOURS_DEFAULT
+    except ValueError:
+        warn_hours = VERSION_DRIFT_WARN_HOURS_DEFAULT
+    if warn_hours < 0:
+        return 0
+    if now is None:
+        now = datetime.now(UTC).replace(tzinfo=None)
+    warned: list[tuple[str, str | None, float]] = []
+    with session_local() as session:
+        workers = session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
+        for w in workers:
+            if w.version == _jobd_version:
+                if w.version_mismatch_since is not None or w.version_drift_warned_at is not None:
+                    w.version_mismatch_since = None
+                    w.version_drift_warned_at = None
+                continue
+            if w.version_mismatch_since is None:
+                w.version_mismatch_since = now
+                continue
+            drift = now - w.version_mismatch_since
+            if w.version_drift_warned_at is None and drift > timedelta(hours=warn_hours):
+                w.version_drift_warned_at = now
+                warned.append((w.host, w.version, drift.total_seconds() / 3600))
+        session.commit()
+    for host, worker_version, hours in warned:
+        _emit_event(
+            logs_dir,
+            "version_drift",
+            source="broker",
+            host=host,
+            worker_version=worker_version,
+            broker_version=_jobd_version,
+            mismatch_hours=round(hours, 1),
+        )
+    return len(warned)
 
 
 def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], None]) -> None:
@@ -764,3 +821,4 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
     prune_old_jobs(session_local, logs_dir, now)
     prune_old_logs(session_local, logs_dir, now)
     scrub_terminal_env(session_local, logs_dir, now)
+    warn_version_drift(session_local, logs_dir, now)

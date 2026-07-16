@@ -154,6 +154,13 @@ class Worker(Base):
     # The worker's self-reported jobd version (improvement audit 2026-07-12).
     # NULL for a worker old enough not to send it — which is itself the signal.
     version: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Version-drift episode tracking (backlog 2026-07-15). A mismatch is
+    # NORMAL for a while — the worker CD defers while a job runs — so the
+    # sweeper warns only after the mismatch has persisted past the threshold:
+    # `since` stamps when the current mismatch was first observed, `warned_at`
+    # dedups the event to once per episode. Both clear when versions align.
+    version_mismatch_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    version_drift_warned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class BypassLog(Base):
@@ -207,6 +214,8 @@ _WORKER_ADDS = [
     ("running", "INTEGER DEFAULT 0"),
     ("in_flight_pids_json", "TEXT DEFAULT '{}'"),
     ("version", "VARCHAR(30)"),
+    ("version_mismatch_since", "DATETIME"),
+    ("version_drift_warned_at", "DATETIME"),
 ]
 
 
