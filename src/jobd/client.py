@@ -47,6 +47,9 @@ class JobdClient:
             "/"
         )
         _token = os.environ.get("JOBD_API_TOKEN", "").strip()
+        # Exposed for callers that must forward the credential somewhere the
+        # header can't go (e.g. `job fleet add` writing a worker's env file).
+        self.token = _token
         _headers = {"Authorization": f"Bearer {_token}"} if _token else {}
         self._client = httpx.Client(
             timeout=httpx.Timeout(
