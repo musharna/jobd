@@ -4,6 +4,16 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.28] — 2026-07-15
+
+### Changed
+
+- **Stage 3 of the app.py split landed — the endpoint closures moved onto APIRouters.** Parked twice as "all-downside" back when it meant a ~90-reference rewrite; the intervening service-layer extractions shrank what endpoints actually capture to five names, so the move became mechanical: `build_app` is now ~250 lines of wiring (engine, config, auth, sweep loop, long-poll plumbing, test seams) and the 30 endpoints live in `jobd.broker.routes.{probes,jobs,workers,events,config}`, each module's `build_router(deps)` unpacking `BrokerDeps` into the exact local names the bodies always captured — the bodies moved verbatim, and the route table (paths, methods, response models) is proven byte-identical against the pre-split tree. Test seams that were patched on `jobd.app` (`_cas_state`, `WAIT_STREAM_CHUNK_BYTES`) are patched on the routes module that resolves them now, the same precedent as the submit-service split; the names are gone from `jobd.app`, so a stale patch fails loudly instead of silently no-opping.
+
+### Added
+
+- **Every `JOBD_*` variable is now documented in one place — enforced, not aspired.** ~35 env vars were read ad-hoc across broker, worker, CLI, and MCP with no way to discover them short of grepping. `docs/configuration.md` catalogs them all (defaults, purpose, component), and `tests/test_config_catalog.py` keeps it honest in **both directions** via an AST literal sweep: a variable added to the source without a catalog row fails CI, and a catalog row whose variable no longer exists anywhere fails CI (the 07-01 audit once chased a documented `--env` flag that had never existed — stale docs are worse than none). Deliberately *not* a frozen settings object: knobs are read at the point of use on purpose (sweep passes re-read per tick, keeping them runtime-tunable), and centralizing the reads would trade that away for nothing.
+- **A worker silently stuck on an old release now announces itself.** The metric half existed (`jobd_worker_version_info` vs `jobd_build_info`), but only helped someone watching a dashboard — and the fleet's history says nobody is: the cwd_missing fix shipped in v0.5.10 and did nothing for twelve days because the workers were still on 0.5.3. The sweeper now emits one `version_drift` event per episode when an **online** worker's version has mismatched the broker's continuously for `JOBD_VERSION_DRIFT_WARN_HOURS` (default 24; negative disables). Short-lived mismatch stays silent on purpose — the worker CD defers while a job runs and self-heals on the next idle tick; the event is for the episode that never self-heals. Episode state lives on the worker row (`version_mismatch_since` / `version_drift_warned_at`, additive migration), clears when versions align, and re-warns on the next release's episode. A versionless worker counts as drifted by definition; offline workers are excluded (the offline warning covers them).
 ## [0.5.27] — 2026-07-15
 
 ### Security
