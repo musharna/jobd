@@ -4,6 +4,29 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.32] — 2026-07-25
+
+### Fixed
+
+- **`job submit`'s worker-health banner reports the broker's verdict instead of re-deriving it.** The CLI carried its own `STALE_HEARTBEAT_SECONDS = 60`, duplicating the _default_ of the broker's `JOBD_STALE_WORKER_THRESHOLD_S` — so an operator who tuned that threshold got a banner contradicting `job workers`. (Same defect as the MCP server's `STALE_AFTER_S`, removed in 0.5.26; this was the second call site.)
+- **`job submit --stdin` reports a mid-batch refusal instead of raising `KeyError`.** An admission block, an unknown project, or a broker restart used to abort the batch with a bare traceback and no account of what had already been submitted. The broker's own reason is now printed against the offending line, along with how many lines went unsubmitted, and the exit code is 1. The summary also stops claiming an `a..b` id range when the ids are not contiguous.
+- **`job logs -f` on an unknown job id fails instead of exiting 0.** It previously streamed nothing and succeeded, so a typo looked like a job with no output.
+- **Worker: no lingering SIGKILL-escalation timer when a job exits in the same instant a cancel/preempt lands.** `wait_with_grace` now closes the timer list when it drains it, and a racing `initiate_termination` declines to start a timer against a closed list. The leak was benign (the timer's callback found the process already gone) but left a timer thread alive for up to the grace window after `run_job` returned — and made `test_run_job_cancels_kill_timer_on_exit` flaky (CI red on the v0.5.31 main push). New deterministic regression test forces the losing ordering.
+- **Worker: a cancel arriving as the workload exits no longer relabels a clean run `cancelled`.** v0.5.31 stopped the late signal from leaking a kill timer but still let it write `got_signal`, and `run_job` does not read `final_state()` until after straggler reaping and the `/checkpoint-complete` POST — so a `poll_signals` thread parked in its 5s `GET /signal` for that window could report a job that exited 0 as `cancelled` with `exit_code: 0`. `initiate_termination` now declines outright once the timer list is closed, which is precisely the moment `wait_with_grace` has the exit code; a signal that lands while the workload is genuinely still running is unaffected.
+
+### Security
+
+- **`job fleet add` no longer lets the broker's reported version reach the remote shell unquoted.** The install arguments are spliced into a script piped to `ssh <target> bash -s`, and `--version` defaults to whatever `GET /health` returns — so a compromised broker, or a MITM on a plain-http `JOBD_URL`, could run arbitrary commands as the ssh user on every host an operator bootstrapped. `install-worker.sh`'s own `X.Y.Z` check was no defense: it runs downstream of the splice. Every interpolated value is now `shlex.quote`d, and the resolved version is validated against `X.Y.Z` client-side before any ssh happens. `--dry-run` additionally stages under `mktemp -d` instead of a fixed `/tmp/.jobd-fleet-preflight.sh`, closing a symlink-plant that turned the preflight write into an arbitrary file write on the target. Both are covered by tests that execute the composed script for real.
+
+### Changed
+
+- **Dependency refresh (17 minor/patch bumps), done at the source.** fastapi 0.136.1→0.140.0, sqlalchemy 2.0.49→2.0.51, uvicorn 0.46.0→0.51.0, pydantic 2.13.3→2.13.4, typer 0.24.2→0.27.0 and twelve more. Bumped in `uv.lock` with `requirements-docker.txt` regenerated from it, rather than editing the generated export directly — the export is derived, and editing it in place ships versions no test ran against.
+- **Route enumeration in the test guards survives FastAPI 0.140.** `include_router` no longer flattens a sub-router's endpoints into `app.routes`; it leaves an opaque `_IncludedRouter` whose `path`, `methods` and `routes` are all absent. Every broker endpoint has lived behind a router since the Stage-3 split, so the guards that walked `app.routes` saw _nothing_. One failed loudly; two — including the auth wall's "every route except the probes must 401" check — compare `live - expected` and so kept passing while verifying nothing at all. Enumeration now reads the OpenAPI schema (prefix-resolved, and a documented API) from one shared helper, both guards assert a non-trivial route count so an empty enumeration can never be silent again, and `tests/test_route_table.py` pins the helper itself.
+- **The image build no longer downloads an unpinned pip.** `pip install -U pip` ran before the `--require-hashes` dependency install — the one unverified fetch in a build whose premise is hash pinning, and the most privileged code in it. The digest-pinned base image pins pip too; bump the digest to move it.
+- **The env-at-rest scrub is batched (500 rows per sweep).** It is the only sweeper query that reads terminal rows, and those are retained forever by default, so an unbounded `SELECT` loaded the whole eligible backlog as ORM objects in one transaction on the first sweep after an upgrade. `env_scrubbed_at` already makes the scan monotonic, so a backlog simply drains over consecutive passes.
+- **`profiles.yaml` / `classifier.yaml` that exist but cannot be read no longer crash the broker at startup.** 0.5.31 made a _missing_ file optional; a permission error or a directory in the file's place still aborted boot — the same failure class. The reason is logged rather than swallowed.
+- **MCP `jobd_list` reports zero counts.** States with no matching jobs were omitted from `counts`, leaving an agent unable to distinguish "nothing queued" from "queued was never queried".
+- **The release workflow's test leg waits on the tag/pyproject check** rather than spending a full run discovering a mismatch it was going to refuse anyway.
 ## [0.5.31] — 2026-07-16
 
 ### Fixed
