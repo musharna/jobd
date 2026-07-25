@@ -1630,6 +1630,16 @@ def main():
             run_in_thread=_dispatch_in_thread,
         )
 
+    # A rejected claim must not look like an idle queue (audit 2026-07-25 V-1).
+    # The no-job branch below lumps every non-200 in with "nothing to run", so a
+    # worker the broker is REFUSING — most plausibly a 422 because this worker
+    # predates a field the broker now requires, and mixed versions are a
+    # designed state here — polled forever in total silence. Log the first one
+    # and then at most once a minute, with the suppressed count, so a permanent
+    # lockout is obvious in the journal without flooding it during an outage.
+    last_reject_log = 0.0
+    rejects_since_log = 0
+
     while not stop_event.is_set():
         try:
             # #42 capacity gate — when MAX_CONCURRENT_JOBS=1 this preserves
@@ -1696,6 +1706,26 @@ def main():
                     continue
                 _dispatch(job)
             else:
+                # V-1: a REFUSED claim is not an idle queue. 422 here means the
+                # broker rejected this worker's payload — the mixed-version case
+                # (this worker predates a field the broker now requires), which
+                # otherwise leaves it polling forever while `job fleet status`
+                # still shows it online and healthy at running=0/N.
+                if r.status_code != 200:
+                    rejects_since_log += 1
+                    now_m = time.monotonic()
+                    if now_m - last_reject_log > 60:
+                        log.warning(
+                            "/next-job refused this worker: HTTP %s %s "
+                            "(%d since last report) — this worker is registered but "
+                            "CANNOT CLAIM JOBS; a 422 here usually means it is older "
+                            "than the broker's request schema",
+                            r.status_code,
+                            r.text[:200].replace("\n", " "),
+                            rejects_since_log,
+                        )
+                        last_reject_log = now_m
+                        rejects_since_log = 0
                 # No job. A long-polling broker already held us ~POLL_TIMEOUT_S,
                 # so re-poll immediately; a fast null (wait_s=0 path, a non-200,
                 # or an old broker ignoring wait_s) gets the 2s backoff so we
