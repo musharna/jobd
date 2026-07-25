@@ -1134,13 +1134,27 @@ class _WorkloadRun:
         handler, native code in a critical section), the stdout-read loop
         blocks forever and the post-loop proc.wait(timeout=grace) never gets
         a chance to fire. The Timer force-kills so grace_s actually bounds
-        the wait."""
-        if self.termination_initiated.is_set():
-            return
-        self.termination_initiated.set()
-        self.got_signal = kind
-        if reason is not None:
-            self.termination_reason = reason
+        the wait.
+
+        Declines outright once the timer list is CLOSED (audit 2026-07-24 C1).
+        Closing happens in cancel_kill_timers — i.e. exactly when the process
+        is gone and wait_with_grace already has its exit code — so a signal
+        arriving after that point has nothing left to terminate. #81 already
+        refused to START A TIMER there; refusing the whole call also stops the
+        late signal from rewriting `got_signal` out from under final_state():
+        poll_signals can sit inside a 5s GET /signal, and run_job does not read
+        final_state until after reap_stragglers and the /checkpoint-complete
+        POST, so a workload that exited 0 was reported `cancelled` with
+        exit_code 0."""
+        with self.kill_timers_lock:
+            if self.kill_timers_closed or self.termination_initiated.is_set():
+                return
+            self.termination_initiated.set()
+            self.got_signal = kind
+            if reason is not None:
+                self.termination_reason = reason
+        # Outside the lock: signal_workload shells out to systemctl with a 5s
+        # timeout and must never hold up cancel_kill_timers.
         self.signal_workload("TERM")
 
         def _kill_after_grace():
@@ -1308,7 +1322,12 @@ class _WorkloadRun:
     def cancel_kill_timers(self) -> None:
         # Close before draining: any timer appended before the flag flips is
         # in the list and gets cancelled; any initiate_termination that sees
-        # the flag never starts one. No window either way.
+        # the flag declines entirely. No window either way.
+        #
+        # The flag is therefore also the SIGNAL FREEZE POINT (audit 2026-07-24
+        # C1): after it, `got_signal` / `termination_reason` are stable, so the
+        # final_state(rc) that run_job reads several steps later describes the
+        # run that actually happened.
         with self.kill_timers_lock:
             self.kill_timers_closed = True
         _cancel_kill_timers(self.kill_timers, self.kill_timers_lock)

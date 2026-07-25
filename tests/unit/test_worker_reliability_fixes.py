@@ -257,3 +257,59 @@ def test_initiate_termination_after_timer_drain_starts_no_timer():
 
     with run.kill_timers_lock:
         assert run.kill_timers == []
+
+
+def test_late_signal_does_not_rewrite_the_final_state():
+    """Audit 2026-07-24 C1 — the OTHER half of the same photo-finish. #81 kept
+    the late cancel from leaking a timer but still let it set `got_signal`,
+    and run_job reads final_state() several steps after wait_with_grace
+    returns (reap_stragglers, then a 10s /checkpoint-complete POST). A
+    poll_signals thread parked in its 5s GET /signal for that whole window
+    therefore relabelled a clean exit as `cancelled` with exit_code 0.
+
+    Once the timer list is closed the run is decided: the signal is a no-op.
+    """
+    proc = MagicMock()
+    proc.poll.return_value = 0  # already exited, cleanly
+    run = job_worker._WorkloadRun(
+        MagicMock(),
+        {"id": 778},
+        proc,
+        None,
+        checkpoint_grace_s=None,
+        max_wall_s=None,
+        idle_timeout_s=None,
+    )
+
+    run.cancel_kill_timers()  # == the moment wait_with_grace has rc
+    run.initiate_termination("cancel", "user_cancel", 60)
+
+    assert run.got_signal is None
+    assert run.termination_reason is None
+    assert run.final_state(0) == "completed"
+    # ...and no pointless SIGTERM aimed at an already-dead process.
+    proc.send_signal.assert_not_called()
+
+
+def test_signal_landing_before_the_close_still_wins():
+    """The complementary ordering: a cancel that arrives while the workload is
+    genuinely still running must be recorded and reported, closed-flag or not.
+    Without this the C1 fix would be indistinguishable from ignoring cancels."""
+    proc = MagicMock()
+    proc.poll.return_value = None  # still running
+    run = job_worker._WorkloadRun(
+        MagicMock(),
+        {"id": 779},
+        proc,
+        None,
+        checkpoint_grace_s=None,
+        max_wall_s=None,
+        idle_timeout_s=None,
+    )
+
+    run.initiate_termination("cancel", "user_cancel", 0.01)
+    run.cancel_kill_timers()
+
+    assert run.got_signal == "cancel"
+    assert run.termination_reason == "user_cancel"
+    assert run.final_state(143) == "cancelled"
