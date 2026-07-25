@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from jobd.app import build_app
 from jobd.auth import _UNAUTHENTICATED_PATHS
+from tests.route_table import iter_leaf_routes
 
 _EXPECTED_EXEMPT = {"/livez", "/readyz"}
 
@@ -68,18 +69,32 @@ def test_probes_leak_nothing(authed_app):
 def test_every_other_route_still_requires_a_token(authed_app):
     """The derived guard. Nothing but the probes may answer without auth."""
     unprotected: list[str] = []
+    # iter_leaf_routes, not `for route in authed_app.routes`: FastAPI 0.140
+    # stopped flattening include_router, so the shallow form saw only
+    # _IncludedRouter wrappers (path=None) and this guard — which compares
+    # routes MINUS the exempt set — passed while checking nothing at all.
+    checked = 0
     with TestClient(authed_app) as client:
-        for route in authed_app.routes:
-            path = getattr(route, "path", "")
-            methods = getattr(route, "methods", None) or set()
-            if "GET" not in methods or not path or path in _EXPECTED_EXEMPT:
+        for entry in iter_leaf_routes(authed_app):
+            method, path = entry.split(" ", 1)
+            if method != "GET" or path in _EXPECTED_EXEMPT:
                 continue
-            if "{" in path or path.startswith("/metrics"):
+            if "{" in path or path.startswith("/metrics") or path.startswith("/openapi"):
                 continue  # parameterised routes and the metrics mount are covered below
+            if path in ("/docs", "/redoc", "/docs/oauth2-redirect"):
+                continue
+            checked += 1
             r = client.get(path)
             if r.status_code != 401:
                 unprotected.append(f"{path} -> {r.status_code}")
 
+    # A derived guard that derives nothing is decoration. Pin the floor so an
+    # enumeration that silently returns empty fails here instead of passing.
+    assert checked >= 5, (
+        f"only {checked} routes were actually probed — the route enumeration is "
+        "returning (almost) nothing, so this guard is vacuous. Fix "
+        "tests/route_table.py rather than lowering this floor."
+    )
     assert not unprotected, (
         f"these routes answered WITHOUT a bearer token: {unprotected}. Every route except "
         f"{sorted(_EXPECTED_EXEMPT)} must 401. If one of these is meant to be public, add "

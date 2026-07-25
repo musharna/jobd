@@ -22,6 +22,7 @@ import pytest
 
 from jobd.app import build_app
 from jobd.mcp.server import _TOOLS
+from tests.route_table import broker_route_set
 
 # Broker routes deliberately absent from MCP, and why. A route here is a decision;
 # a route missing from BOTH this map and the tool list is a bug.
@@ -75,17 +76,11 @@ def _broker_routes(tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_
         classifier_path=sample_classifier_yaml,
         logs_path=tmp_path / "logs",
     )
-    out = set()
-    for r in app.routes:
-        path = getattr(r, "path", None)
-        methods = getattr(r, "methods", None) or set()
-        if not path or path.startswith("/openapi") or path in ("/docs", "/redoc"):
-            continue
-        for m in methods:
-            if m in ("HEAD", "OPTIONS"):
-                continue
-            out.add(f"{m} {path}")
-    return out
+    # Recursive: since FastAPI 0.140, include_router leaves an _IncludedRouter
+    # wrapper in app.routes instead of flattening its endpoints, and every
+    # broker endpoint has lived behind a router since the Stage-3 split (#69).
+    # A shallow loop here yielded the empty set. See tests/route_table.py.
+    return broker_route_set(app)
 
 
 @pytest.fixture
