@@ -503,7 +503,12 @@ def test_every_shell_script_actually_parses():
 # --- release/supply-chain (audit 2026-07-15 T-2 / Sec-B / Sec-C) -------------
 
 _WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
-_REQ_DOCKER = _REPO_ROOT / "requirements-docker.txt"
+# Under docker/, NOT the repo root: Dependabot's pip ecosystem is configured at
+# directory: "/" and would otherwise discover this generated export as a
+# manifest and edit it in place, desyncing it from the uv.lock it derives from
+# (audit 2026-07-25). The placement itself is pinned by
+# test_the_generated_export_stays_out_of_dependabots_reach below.
+_REQ_DOCKER = _REPO_ROOT / "docker" / "requirements-docker.txt"
 
 
 def _req_lines(text: str) -> list[str]:
@@ -537,9 +542,43 @@ def test_requirements_docker_in_sync_with_uv_lock(tmp_path):
     )
     assert result.returncode == 0, f"uv export failed:\n{result.stderr}"
     assert _req_lines(out.read_text()) == _req_lines(_REQ_DOCKER.read_text()), (
-        "requirements-docker.txt is stale vs uv.lock — regenerate with:\n"
+        "docker/requirements-docker.txt is stale vs uv.lock — regenerate with:\n"
         "  uv export --frozen --no-dev --no-emit-project --format requirements-txt "
-        "-o requirements-docker.txt"
+        "-o docker/requirements-docker.txt"
+    )
+
+
+def test_the_generated_export_stays_out_of_dependabots_reach():
+    """docker/requirements-docker.txt must NOT sit in a directory Dependabot
+    scans for pip manifests (audit 2026-07-25).
+
+    It is a generated `uv export` of uv.lock. When it sat at the repo root,
+    Dependabot's pip ecosystem — configured at `directory: "/"` — discovered it
+    as a manifest and opened PRs editing it directly. Every one of those failed
+    `test_requirements_docker_in_sync_with_uv_lock` by construction, because the
+    edit desyncs the export from the source it is generated from; and merging
+    one would have shipped 17 dependency versions CI never ran, since uv.lock —
+    what the test job installs from — was left untouched. Dependabot offers no
+    per-file exclude (dependabot/dependabot-core#1657), so moving the file out
+    of the scanned directory is the supported fix.
+
+    Guards both halves: the file is not at the root, and no dependabot entry
+    scans the directory it moved to.
+    """
+    assert not (_REPO_ROOT / "requirements-docker.txt").exists(), (
+        "requirements-docker.txt is back at the repo root, where Dependabot's "
+        'pip ecosystem (directory: "/") will discover the generated export as a '
+        "manifest and reopen the born-red PR loop. Keep it under docker/."
+    )
+    assert _REQ_DOCKER.exists(), f"the hashed export is missing from {_REQ_DOCKER}"
+
+    cfg = yaml.safe_load((_REPO_ROOT / ".github" / "dependabot.yml").read_text())
+    pip_dirs = {
+        u.get("directory") for u in cfg.get("updates", []) if u.get("package-ecosystem") == "pip"
+    }
+    assert "/docker" not in pip_dirs and "docker" not in pip_dirs, (
+        f"a dependabot pip entry now scans {pip_dirs} — which includes the directory "
+        "holding the generated export. That reopens exactly the loop this move closed."
     )
 
 
