@@ -8,9 +8,23 @@ jobd is **remote-code-execution-as-a-service by design**: clients POST `{cmd, cw
 
    **Why host networking, not port-publish:** Docker's default userland-proxy NATs all cross-host inbound traffic to the bridge gateway IP before it reaches the container, which would defeat the source-IP ACL. Host networking sidesteps the proxy entirely.
 
-2. **Shared bearer token** — every request needs `Authorization: Bearer <JOBD_API_TOKEN>`. The broker fails-loud at startup if neither `JOBD_API_TOKEN` nor `JOBD_ALLOW_NO_AUTH=1` is set.
+2. **Shared bearer token** — every request needs `Authorization: Bearer <JOBD_API_TOKEN>`, **except the three endpoints listed under [Unauthenticated surface](#unauthenticated-surface) below**. The broker fails-loud at startup if neither `JOBD_API_TOKEN` nor `JOBD_ALLOW_NO_AUTH=1` is set.
 
 Both layers must be in place. Either alone is insufficient: a `JOBD_HOST=0.0.0.0` or public-interface bind defeats (1); a leaked token over a tailnet you don't fully trust defeats (2).
+
+## Unauthenticated surface
+
+Three endpoints are exempt from **both** walls — no bearer token _and_ no source-IP check. They exist because a generic HTTP monitor cannot send a token, and opening only one wall would leave them just as unreachable. `tests/test_security_doc_parity.py` fails CI if this list ever drifts from the code.
+
+| Endpoint   | Why exempt                          | What a caller who reaches the port learns                                                                      |
+| ---------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `/livez`   | liveness for a generic HTTP monitor | Whether the process is up. Nothing else.                                                                       |
+| `/readyz`  | readiness for the same              | Whether the DB round-trip works, and on failure the fixed string `database_unavailable` — never the exception. |
+| `/metrics` | Prometheus scrape from the bridge   | **Broker version, job counts by state, and every worker's hostname + version.**                                |
+
+`/metrics` is the one that matters: it is strictly more revealing than the probes beside it, and it is exactly the fleet inventory an attacker would want for targeting. It is not a leak of job data — no commands, no cwd, no env, no project names — but it does fingerprint the fleet.
+
+**This is why the `JOBD_HOST` bind is load-bearing rather than merely defence-in-depth.** The source-IP ACL is what stops a non-tailnet caller reaching these three, and these three are precisely what survives if that ACL is ever bypassed. If you port-forward or publish the broker's port, you are publishing the table above. `/health` deliberately keeps both its token and its version, so it is not in this list.
 
 ## Environment variables
 
@@ -36,4 +50,4 @@ Token rotation is a coordinated push: update the broker's `.env` first, then pus
 - A flood-DoS by a holder of the token. (Tier 3: per-IP rate limit.)
 - An attacker who has both a tailnet node AND the token — equivalent to having shell on the worker user.
 
-> **Note on `env` visibility:** env **values** are masked on every job-info read surface — `GET /jobs`, `GET /jobs/{id}`, the submit/cancel/preempt responses, and `jobd_status`/`jobd_job_get` all return `{"KEY": "***"}` (keys stay visible so you can see which vars a job sets, values do not). The real values are delivered only to the claiming worker via `/next-job`, so the job still runs with them. This keeps a submitted token from leaking to other token-holders or into an agent's context via a status read. Two caveats remain: (1) env is stored plaintext at rest in the `jobs.env_json` column only while the job can still be dispatched — once a job is terminal for more than `JOBD_ENV_SCRUB_HOURS` (default 1; negative disables), the sweeper masks the stored values to `{"KEY": "***"}` too, so a secret does not sit in the SQLite file (and every backup of it) forever. Until that scrub lands, anyone with read access to the DB file sees the values; (2) the worker applies it to the workload, so a malicious submitter's `env` is still an RCE vector on a trusted tailnet (above). For long-lived secrets, prefer worker-side env or a secrets file the workload reads itself.
+> **Note on `env` visibility:** env **values** are masked on every job-info read surface — `GET /jobs`, `GET /jobs/{id}`, the submit/cancel/preempt responses, and `jobd_status` all return `{"KEY": "***"}` (keys stay visible so you can see which vars a job sets, values do not). The real values are delivered only to the claiming worker via `/next-job`, so the job still runs with them. This keeps a submitted token from leaking to other token-holders or into an agent's context via a status read. Two caveats remain: (1) env is stored plaintext at rest in the `jobs.env_json` column only while the job can still be dispatched — once a job is terminal for more than `JOBD_ENV_SCRUB_HOURS` (default 1; negative disables), the sweeper masks the stored values to `{"KEY": "***"}` too, so a secret does not sit in the SQLite file (and every backup of it) forever. Until that scrub lands, anyone with read access to the DB file sees the values; (2) the worker applies it to the workload, so a malicious submitter's `env` is still an RCE vector on a trusted tailnet (above). For long-lived secrets, prefer worker-side env or a secrets file the workload reads itself.

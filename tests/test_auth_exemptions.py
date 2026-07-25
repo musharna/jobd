@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+import jobd.broker.routes.probes as probes_mod
 from jobd.app import build_app
 from jobd.auth import _UNAUTHENTICATED_PATHS
 from tests.route_table import iter_leaf_routes
@@ -39,6 +40,100 @@ def authed_app(
         logs_path=tmp_path / "logs",
     )
     return app
+
+
+def test_readyz_never_publishes_the_exception_text(
+    tmp_path, sample_projects_yaml, sample_profiles_yaml, sample_classifier_yaml, monkeypatch
+):
+    """Audit 2026-07-25 S-1. /readyz is the one endpoint exempt from BOTH walls
+    that does real work, so its body is readable by anyone who can reach the
+    port — no token, no source-IP check. It used to return
+    `f"{type(exc).__name__}: {exc}"`; JOBD_DB_URL accepts any SQLAlchemy URL,
+    and a network driver puts host/port/username in that message.
+
+    Simulated with a session factory that raises an exception carrying exactly
+    the shape we must never emit.
+    """
+    monkeypatch.delenv("JOBD_ALLOW_NO_AUTH", raising=False)
+    monkeypatch.setenv("JOBD_API_TOKEN", "test-token-not-a-real-secret")
+    monkeypatch.setenv("JOBD_DISABLE_TAILNET_ACL", "1")
+    app = build_app(
+        db_url=f"sqlite:///{tmp_path}/readyz.db",
+        projects_path=sample_projects_yaml,
+        profiles_path=sample_profiles_yaml,
+        classifier_path=sample_classifier_yaml,
+        logs_path=tmp_path / "logs",
+    )
+
+    secretish = (
+        'connection to server at "db.internal.example" (10.4.2.7), port 5432 failed: '
+        'FATAL: password authentication failed for user "jobd_prod"'
+    )
+
+    def _boom(_sql):
+        raise RuntimeError(secretish)
+
+    # Drive the failure branch by making the probe's own `SELECT 1` raise —
+    # cheaper and more deterministic than standing up an unreachable database.
+    monkeypatch.setattr(probes_mod, "text", _boom)
+
+    with TestClient(app) as client:
+        r = client.get("/readyz")
+
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["status"] == "not_ready"
+    assert body["reason"] == "database_unavailable"
+    # The decisive assertions: nothing from the exception reaches the caller.
+    for leaked in ("db.internal.example", "10.4.2.7", "5432", "jobd_prod", "RuntimeError"):
+        assert leaked not in r.text, f"/readyz leaked {leaked!r}: {r.text}"
+
+
+def test_a_non_ascii_token_is_401_not_a_crash(monkeypatch):
+    """Audit 2026-07-25 S-5: hmac.compare_digest raises TypeError on a str
+    holding non-ASCII, so the caller's own bytes decided whether they got a 401
+    or a 500. A wrong token is a wrong token.
+
+    Exercised at `_check_token` rather than through TestClient on purpose: HTTP
+    headers are latin-1 on the wire, so httpx refuses to encode these
+    characters and the request never leaves the client. A raw request CAN carry
+    high bytes, and Starlette latin-1-decodes them into exactly the `str` this
+    function receives — so this is the real reachable input, not a synthetic one.
+    """
+    from fastapi import HTTPException
+
+    from jobd.auth import _check_token
+
+    monkeypatch.delenv("JOBD_ALLOW_NO_AUTH", raising=False)
+    monkeypatch.setenv("JOBD_API_TOKEN", "test-token-not-a-real-secret")
+
+    with pytest.raises(HTTPException) as excinfo:
+        _check_token("Bearer t\xf6k\xe9n-with-\xfcmlauts")
+    assert excinfo.value.status_code == 401
+
+
+def test_a_token_with_surrounding_whitespace_still_authenticates(authed_app):
+    """Audit 2026-07-25 S-6: the EXPECTED value is .strip()ed (env files and
+    systemd Environment= lines carry trailing newlines), so leaving the
+    presented side unstripped made the two asymmetric — a client echoing the
+    operator's own trailing byte was rejected."""
+    with TestClient(authed_app) as client:
+        r = client.get(
+            "/workers", headers={"Authorization": "Bearer test-token-not-a-real-secret\n"}
+        )
+    assert r.status_code == 200, f"expected 200, got {r.status_code}: {r.text}"
+
+
+def test_a_wrong_token_is_still_rejected(authed_app):
+    """The control for the two above: loosening whitespace and byte handling
+    must not loosen the actual comparison."""
+    with TestClient(authed_app) as client:
+        assert client.get("/workers", headers={"Authorization": "Bearer wrong"}).status_code == 401
+        # A prefix of the real token must not pass.
+        assert (
+            client.get("/workers", headers={"Authorization": "Bearer test-token"}).status_code
+            == 401
+        )
 
 
 def test_the_exemption_list_is_exactly_the_two_probes():
