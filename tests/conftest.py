@@ -1,5 +1,8 @@
 """Shared pytest fixtures for jobd tests."""
 
+import time
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,6 +15,31 @@ def _bypass_auth_for_tests(monkeypatch):
     auth layer override these via their own monkeypatch."""
     monkeypatch.setenv("JOBD_ALLOW_NO_AUTH", "1")
     monkeypatch.setenv("JOBD_DISABLE_TAILNET_ACL", "1")
+
+
+@pytest.fixture(autouse=True)
+def _steady_state_broker():
+    """Present the sweeper with a broker that has been up and observing.
+
+    `sweep_once` refuses to run its time-based terminal phases when it cannot
+    show that it watched the interval it would reason about — a fresh start, or
+    a suspend/stall gap (audit 2026-07-25 H-1). Every sweeper test builds an app
+    and sweeps in the same millisecond, which is precisely the "just started"
+    shape the guard exists to catch, so without this they would all be
+    asserting against a suppressed sweep.
+
+    Declaring steady state here keeps the guard honest in production while
+    letting the other tests mean what they always meant. Tests ABOUT the guard
+    (tests/unit/test_observation_gap_guard.py) reset this themselves; their own
+    autouse fixture runs after this one.
+    """
+    from jobd.broker import sweeper
+
+    sweeper.reset_observation_state()
+    sweeper._process_start_monotonic = time.monotonic() - 86_400
+    sweeper._last_sweep_wall = datetime.now(UTC).replace(tzinfo=None)
+    yield
+    sweeper.reset_observation_state()
 
 
 @pytest.fixture
