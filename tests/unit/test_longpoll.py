@@ -43,13 +43,23 @@ def _submit_cpu_job(client, project="project-b"):
 
 
 def test_wait_zero_returns_immediately(client):
-    """Default wait_s=0 → instant None when nothing is queued (legacy path)."""
+    """Default wait_s=0 → instant None when nothing is queued (legacy path).
+
+    The bound is 2s, not 0.5s. What this test detects is `wait_s=0` wrongly
+    engaging the long-poll, and a wrongly-engaged hold lasts
+    `_LONGPOLL_RECHECK_S` (10s) or the client's POLL_TIMEOUT_S (30s) — so 2s
+    still catches the defect five times over while surviving ordinary runner
+    jitter. The old 0.5s bound was 20× tighter than the failure it guards
+    against, and it duly failed a RELEASE on a 0.59s measurement (v0.5.34,
+    2026-07-25) without detecting anything extra. The sibling assertions in
+    this file already use 2.0/3.0; 0.5 was the outlier.
+    """
     t0 = time.monotonic()
     r = client.post("/next-job", json=_next_job_payload())  # no wait_s key → 0
     elapsed = time.monotonic() - t0
     assert r.status_code == 200
     assert r.json() is None
-    assert elapsed < 0.5, f"wait_s=0 must not block; took {elapsed:.2f}s"
+    assert elapsed < 2.0, f"wait_s=0 must not block; took {elapsed:.2f}s"
 
 
 def test_blocks_until_deadline_when_no_job(client):
