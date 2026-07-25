@@ -312,8 +312,10 @@ def jobd_list(client: JobdClient, args: dict) -> dict:
         for s in states:
             page, total = client.list_jobs_with_total(state=s, project=project, limit=limit)
             rows.extend(page)
-            if total:
-                counts[s] = total
+            # Record zeroes too (audit 2026-07-24): omitting them left an agent
+            # unable to tell "nothing is queued" from "queued was never asked
+            # about" — and `counts` is the field agents reason over.
+            counts[s] = total or 0
         rows.sort(key=lambda j: j.get("id") or 0, reverse=True)  # newest-first across states
         total_all = sum(counts.values())
     else:

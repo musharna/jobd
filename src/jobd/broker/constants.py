@@ -68,6 +68,14 @@ LOG_RETENTION_DAYS_DEFAULT = 60
 # safety margin, not observability: reads were always masked. Override via
 # JOBD_ENV_SCRUB_HOURS; negative disables.
 ENV_SCRUB_HOURS_DEFAULT = 1.0
+# Rows scrubbed per sweep pass. The scrub is the only sweeper query that reads
+# TERMINAL rows, and those are retained forever by default, so an unbounded
+# SELECT loaded the entire eligible backlog as ORM objects in a single
+# transaction on the first sweep after upgrading (audit 2026-07-24). Batching
+# costs nothing: `env_scrubbed_at` makes the scan monotonic, so a backlog just
+# drains over consecutive 30s passes. Not env-tunable — it is a pacing detail,
+# not a policy.
+ENV_SCRUB_BATCH = 500
 # Version-drift warning: an ONLINE worker whose self-reported version has
 # mismatched the broker's continuously for this many hours gets one
 # `version_drift` event per episode. Short-lived mismatch is NORMAL (the

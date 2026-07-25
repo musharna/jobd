@@ -25,6 +25,7 @@ from jobd.broker.constants import (
     _PARENT_FAILED_WARNING_PREFIX,
     _UNMATCHEABLE_WARNING_PREFIX,
     DEAD_WORKER_SECONDS,
+    ENV_SCRUB_BATCH,
     ENV_SCRUB_HOURS_DEFAULT,
     IDEMPOTENT_RECLAIM_SECONDS,
     JOB_RETENTION_DAYS_DEFAULT,
@@ -209,6 +210,13 @@ def scrub_terminal_env(session_local, logs_dir: Path, now: datetime | None = Non
     re-examined). Unparseable ``env_json`` is replaced with ``{}`` — for a
     write whose whole point is removing secrets at rest, dropping malformed
     ciphertext-of-nothing beats retrying it every 30s forever.
+
+    Bounded to ``ENV_SCRUB_BATCH`` rows per pass (audit 2026-07-24): this is
+    the one sweeper query that reads TERMINAL rows, and terminal rows are kept
+    forever by default — so it was the only pass whose per-sweep cost grew
+    without a ceiling, with the whole backlog loaded as ORM objects in one
+    transaction on the first sweep after an upgrade. The monotonic marker
+    means a backlog simply drains over consecutive sweeps.
     """
     raw = os.environ.get("JOBD_ENV_SCRUB_HOURS", "").strip()
     try:
@@ -225,7 +233,8 @@ def scrub_terminal_env(session_local, logs_dir: Path, now: datetime | None = Non
     with session_local() as session:
         rows = (
             session.execute(
-                select(Job).where(
+                select(Job)
+                .where(
                     Job.state.in_(terminal),
                     Job.finished_at.is_not(None),
                     Job.finished_at < cutoff,
@@ -237,6 +246,8 @@ def scrub_terminal_env(session_local, logs_dir: Path, now: datetime | None = Non
                         | ~Job.warning.like(f"{_PARENT_FAILED_WARNING_PREFIX}%")
                     ),
                 )
+                .order_by(Job.id)
+                .limit(ENV_SCRUB_BATCH)
             )
             .scalars()
             .all()
@@ -277,7 +288,16 @@ def warn_version_drift(session_local, logs_dir: Path, now: datetime | None = Non
     mismatches by definition. Episode state lives on the worker row:
     ``version_mismatch_since`` stamps first observation, ``warned_at`` dedups
     to one event; both clear when versions align, so a future episode warns
-    afresh."""
+    afresh.
+
+    "Continuously" spans OFFLINE gaps, deliberately (audit 2026-07-24). Only
+    online workers are examined, but a worker that goes away and returns still
+    carries its original ``version_mismatch_since``, so a host absent for three
+    days and back on an old build warns on the first sweep that sees it. That
+    is the intent: the elapsed time being measured is "how long this host has
+    been running stale code", which an offline stretch does not undo. Clearing
+    the stamp on absence would instead let a flapping host reset the clock
+    forever and never warn."""
     raw = os.environ.get("JOBD_VERSION_DRIFT_WARN_HOURS", "").strip()
     try:
         warn_hours = float(raw) if raw else VERSION_DRIFT_WARN_HOURS_DEFAULT

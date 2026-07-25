@@ -46,6 +46,10 @@ jobs:
   test:
     name: Test the tagged commit
     runs-on: ubuntu-latest
+    # Gate on the cheap check first (audit 2026-07-24): a tag that disagrees
+    # with pyproject will be refused anyway, so don't spend a full test leg
+    # discovering that minutes later.
+    needs: verify
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install uv

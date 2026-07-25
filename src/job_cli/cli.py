@@ -267,16 +267,48 @@ def submit(
         if not lines:
             typer.secho("--stdin: no commands on stdin", fg="red", err=True)
             raise typer.Exit(2)
+        # A refusal mid-batch stops the batch and says so (audit 2026-07-24
+        # Q2). The previous `r.json()["id"]` raised a bare KeyError on any 4xx
+        # — an admission block, a bad project, a broker restart — killing the
+        # remaining lines with a traceback and no account of what had landed.
+        # Stopping rather than continuing: a refusal here is nearly always
+        # systemic (broker down, project rejected), so pressing on would just
+        # print the same error once per line.
         ids: list[int] = []
+        failed_line: str | None = None
         with _client() as c:
             for line in lines:
                 b = dict(body)
                 b["cmd"] = ["bash", "-c", line]
                 r = c.post("/submit", json=b)
-                jid = r.json()["id"]
-                ids.append(jid)
-                typer.echo(f"{jid}\t{line}")
-        typer.secho(f"Submitted {len(ids)} jobs from stdin (ids {ids[0]}..{ids[-1]})", err=True)
+                payload = (
+                    r.json()
+                    if r.headers.get("content-type", "").startswith("application/json")
+                    else {}
+                )
+                if r.status_code >= 400 or "id" not in payload:
+                    detail = payload.get("detail", r.text.strip()[:300]) or f"HTTP {r.status_code}"
+                    typer.secho(f"submit failed for {line!r}: {detail}", fg="red", err=True)
+                    failed_line = line
+                    break
+                ids.append(payload["id"])
+                typer.echo(f"{payload['id']}\t{line}")
+        if ids:
+            # Only claim a RANGE when the ids really are contiguous — a
+            # concurrent submitter interleaves and makes `a..b` a lie.
+            if len(ids) > 1 and ids[-1] - ids[0] == len(ids) - 1:
+                span = f"ids {ids[0]}..{ids[-1]}"
+            else:
+                span = f"ids {', '.join(str(i) for i in ids)}"
+            typer.secho(f"Submitted {len(ids)} jobs from stdin ({span})", err=True)
+        if failed_line is not None:
+            remaining = len(lines) - len(ids) - 1
+            typer.secho(
+                f"Stopped at a failing line; {remaining} later line(s) not submitted.",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(1)
         return
     if not cmd:
         typer.secho("Command required (or use --stdin)", fg="red", err=True)
@@ -501,6 +533,14 @@ def _print_resolved(resolved: dict) -> None:
 
 def _stream_wait(job_id: int) -> None:
     with _client() as c, c.stream("GET", f"/wait/{job_id}", timeout=None) as s:
+        # An unknown job id used to stream nothing and exit 0 — `job logs -f 99`
+        # looked like a job with no output rather than a typo (audit
+        # 2026-07-24). Reading the body is safe here: an error response is
+        # small and un-streamed.
+        if s.status_code >= 400:
+            s.read()
+            typer.secho(f"job {job_id}: {s.text.strip()[:300]}", fg="red", err=True)
+            raise typer.Exit(1)
         exit_code = 0
         for line in s.iter_lines():
             if not line:
@@ -520,12 +560,17 @@ def _stream_wait(job_id: int) -> None:
         sys.exit(exit_code)
 
 
-STALE_HEARTBEAT_SECONDS = 60
-
-
 def _worker_health_banner(client: JobdClient) -> None:
-    """Emit a one-line banner if any worker is offline or stale. Silent when healthy."""
+    """Emit a one-line banner if any worker is offline or stale. Silent when healthy.
 
+    Reports the broker's OWN verdict (`WorkerInfo.state`) rather than
+    re-deriving staleness from last_heartbeat here (audit 2026-07-24 Q1). The
+    local `STALE_HEARTBEAT_SECONDS = 60` this replaces duplicated the DEFAULT
+    of the broker's `JOBD_STALE_WORKER_THRESHOLD_S`, so an operator who tuned
+    that threshold got one answer from `job workers` and a contradictory one
+    from this banner. Identical defect to the MCP server's `STALE_AFTER_S`,
+    deleted in #60 — this was the second call site.
+    """
     try:
         r = client.get("/workers")
     except (BrokerUnreachable, BrokerServerError, BrokerRefusal):
@@ -534,21 +579,11 @@ def _worker_health_banner(client: JobdClient) -> None:
     if not workers:
         typer.secho("⚠ no workers registered — nothing will dispatch", fg="yellow")
         return
-    now = datetime.now(UTC)
     bad: list[str] = []
     for w in workers:
-        hb = w.get("last_heartbeat")
-        if w.get("state") == "offline":
-            bad.append(f"{w['host']} (offline)")
-            continue
-        if not hb:
-            continue
-        try:
-            age = (now - datetime.fromisoformat(hb)).total_seconds()
-        except ValueError:
-            continue
-        if age > STALE_HEARTBEAT_SECONDS:
-            bad.append(f"{w['host']} (stale {int(age)}s)")
+        state = w.get("state")
+        if state and state != "online":
+            bad.append(f"{w['host']} ({state})")
     if bad:
         typer.secho(f"⚠ worker health: {', '.join(bad)}", fg="yellow")
 

