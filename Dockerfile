@@ -15,17 +15,25 @@ ENV PYTHONUNBUFFERED=1 \
 # (audit 2026-07-15 Sec-B). `pip install .` used to re-resolve everything fresh
 # from PyPI at build time, so the shipped image carried dependency versions no
 # test had ever seen — and was open to a dependency hijack at every release
-# build. requirements-docker.txt is exported from uv.lock (hashes included) and
-# kept in lockstep by a deploy-lint check; --require-hashes makes substitution
-# fail closed. The layer keys on the requirements file alone, so editing
-# application source still does not re-download dependencies.
+# build. docker/requirements-docker.txt is exported from uv.lock (hashes
+# included) and kept in lockstep by a deploy-lint check; --require-hashes makes
+# substitution fail closed. The layer keys on the requirements file alone, so
+# editing application source still does not re-download dependencies.
+#
+# It lives under docker/ rather than the repo root so Dependabot's pip
+# ecosystem (configured at directory: "/") does not discover it as a manifest
+# (audit 2026-07-25). It is a GENERATED export of uv.lock, so a bot editing it
+# directly desyncs it from its own source: every such PR failed the lockstep
+# lint by construction, and merging one would have shipped dependency versions
+# CI never ran, since uv.lock — what the test job installs from — was untouched.
+# Dependabot has no per-file exclude, so relocation is the supported fix.
 #
 # No `pip install -U pip` (audit 2026-07-24): pulling an unpinned, unhashed pip
 # from PyPI on every build is the one un-verified download left in an image
 # whose whole premise is --require-hashes, and it runs BEFORE the hashed
 # install — so it is the most privileged code in the build. The base image is
 # digest-pinned, which pins its pip too; bump the digest to move pip.
-COPY requirements-docker.txt ./
+COPY docker/requirements-docker.txt ./
 RUN pip install --no-deps --require-hashes -r requirements-docker.txt
 
 # Phase 2 — the application itself. `--no-deps` because phase 1 installed the
