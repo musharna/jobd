@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from jobd.broker.constants import (
+    _AUTO_PREEMPT_WARNING_PREFIX,
+    _PARENT_FAILED_WARNING_PREFIX,
+)
 from jobd.ctest_eta import predict_ctest
 from jobd.db import Job
 from jobd.estimator import (
@@ -16,7 +20,10 @@ from jobd.estimator import (
     queue_start_eta,
     remaining_for_running,
 )
-from jobd.models import JobInfo, JobRequires, JobState
+from jobd.models import TERMINAL_STATES, JobInfo, JobRequires, JobState
+
+# TERMINAL_STATES holds JobState members; `Job.state` is the stored str.
+_TERMINAL_STATE_VALUES = frozenset(s.value for s in TERMINAL_STATES)
 
 # Placeholder that replaces env VALUES on observability read surfaces. Keys are
 # preserved (operators can still see WHICH vars a job sets) but values are hidden.
@@ -32,6 +39,46 @@ def _redact_env(env: dict[str, str]) -> dict[str, str]:
     worker-claim `/next-job` path passes ``redact_env=False`` so the job still
     runs with the real values (audit 2026-07-01, LOW-Sec `--env`)."""
     return {k: ENV_REDACTED_PLACEHOLDER for k in env}
+
+
+# Warnings that still MEAN something once a job is terminal, because they
+# explain the terminal state itself: why it is CANCELLED, why it was PREEMPTED.
+# Everything else in the `warning` column describes a QUEUE condition —
+# "will queue behind job N", "blocked: ...", "no matching worker —", the
+# submit-time projects.yaml advisory — and those all describe a situation that
+# has since resolved, by definition, because the job left the queue.
+_TERMINAL_DURABLE_WARNING_PREFIXES = (
+    _PARENT_FAILED_WARNING_PREFIX,
+    _AUTO_PREEMPT_WARNING_PREFIX,
+)
+
+
+def _presentable_warning(job: Job) -> str | None:
+    """The warning as a READER should see it (audit 2026-07-25 O-1).
+
+    `warning` is one column serving two purposes: durable explanations of a
+    terminal state, and transient advisories about a queue the job is sitting
+    in. Rendering both unconditionally meant `job list` showed
+    "⚠ will queue behind job 3037 on laptop" on a job that had finished eleven
+    hours earlier — a resolved prediction, stated in the present tense.
+
+    Suppressed HERE rather than cleared at each terminal transition, or hidden
+    in the CLI, because every read surface converges on `_to_info` — GET /jobs,
+    GET /jobs/{id}, the submit/cancel/preempt responses and the MCP tools that
+    read through them. Fixing one renderer would leave the others wrong, which
+    is exactly today's symptom: `job status` already omits the warning while
+    `job list` shows it, so the two disagree about the same row.
+
+    The row keeps its history; only the presentation stops asserting a stale
+    prediction as current.
+    """
+    if not job.warning:
+        return None
+    if job.state not in _TERMINAL_STATE_VALUES:
+        return job.warning
+    if job.warning.startswith(_TERMINAL_DURABLE_WARNING_PREFIXES):
+        return job.warning
+    return None
 
 
 def _to_info(job: Job, eta_ctx: dict | None = None, *, redact_env: bool = True) -> JobInfo:
@@ -62,7 +109,7 @@ def _to_info(job: Job, eta_ctx: dict | None = None, *, redact_env: bool = True) 
         cpus=job.cpus,
         env=_redact_env(env_dict) if redact_env else env_dict,
         requires=req,
-        warning=job.warning,
+        warning=_presentable_warning(job),
         depends_on=json.loads(job.depends_on_json or "[]"),
         depends_on_any_exit=job.depends_on_any_exit,
         session_id=job.session_id,
