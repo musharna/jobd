@@ -495,7 +495,10 @@ def test_jobd_list_defaults_to_active_states():
     client = JobdClient(base_url="http://broker.test")
     out = jobd_list(client, {})
     assert {j["state"] for j in out["jobs"]} == {"running", "queued"}
-    assert out["counts"] == {"running": 1, "queued": 1}
+    # Every queried state is reported, zeroes included (audit 2026-07-24):
+    # `counts` is what an agent reasons over, and omitting `assigned: 0` left
+    # it unable to tell "nothing assigned" from "assigned wasn't asked about".
+    assert out["counts"] == {"queued": 1, "assigned": 0, "running": 1}
 
     # Explicit [] opts into all states.
     out_all = jobd_list(client, {"state": []})

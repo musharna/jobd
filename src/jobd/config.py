@@ -253,15 +253,17 @@ def load_profiles(path: Path | str) -> dict[str, ProfileSpec]:
     Found by the launch-prep quickstart dry-run in a pristine container;
     invisible before because CI exports JOBD_CONFIG_DIR and the production
     broker runs in Docker where the path exists.
-    """
-    import logging
 
+    Catches OSError, not just FileNotFoundError (audit 2026-07-24): an
+    unreadable file or a directory in the file's place (PermissionError,
+    IsADirectoryError) crashed the broker at startup just as absolutely, which
+    is the very failure class this fallback exists to end. The reason is
+    logged, so an unreadable-but-present config is not silent.
+    """
     try:
         text = Path(path).read_text()
-    except FileNotFoundError:
-        logging.getLogger("jobd.config").info(
-            "no profiles.yaml found at %s; no profiles defined", path
-        )
+    except OSError as e:
+        log.info("no usable profiles.yaml at %s (%s); no profiles defined", path, e)
         return {}
     data = yaml.safe_load(text) or {}
     profiles = data.get("profiles", {})
@@ -274,16 +276,13 @@ def load_profiles(path: Path | str) -> dict[str, ProfileSpec]:
 def load_classifier_rules(path: Path | str) -> list[ClassifierRule]:
     """Load classifier.yaml into list of ClassifierRule.
 
-    Missing file → [] — see load_profiles: the config files are optional by
-    documented contract, and a missing one must not stop the broker."""
-    import logging
-
+    Missing or unreadable file → [] — see load_profiles: the config files are
+    optional by documented contract, and one that cannot be read must not stop
+    the broker."""
     try:
         text = Path(path).read_text()
-    except FileNotFoundError:
-        logging.getLogger("jobd.config").info(
-            "no classifier.yaml found at %s; no classifier rules", path
-        )
+    except OSError as e:
+        log.info("no usable classifier.yaml at %s (%s); no classifier rules", path, e)
         return []
     data = yaml.safe_load(text) or {}
     rules = data.get("rules", [])

@@ -19,9 +19,14 @@ ENV PYTHONUNBUFFERED=1 \
 # kept in lockstep by a deploy-lint check; --require-hashes makes substitution
 # fail closed. The layer keys on the requirements file alone, so editing
 # application source still does not re-download dependencies.
+#
+# No `pip install -U pip` (audit 2026-07-24): pulling an unpinned, unhashed pip
+# from PyPI on every build is the one un-verified download left in an image
+# whose whole premise is --require-hashes, and it runs BEFORE the hashed
+# install — so it is the most privileged code in the build. The base image is
+# digest-pinned, which pins its pip too; bump the digest to move pip.
 COPY requirements-docker.txt ./
-RUN pip install -U pip \
-    && pip install --no-deps --require-hashes -r requirements-docker.txt
+RUN pip install --no-deps --require-hashes -r requirements-docker.txt
 
 # Phase 2 — the application itself. `--no-deps` because phase 1 installed the
 # complete transitive set; the project wheel carries no third-party code.
