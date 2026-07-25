@@ -161,13 +161,22 @@ def test_list_banner_silent_when_all_fresh(monkeypatch):
 
 
 def test_list_banner_warns_on_stale_worker(monkeypatch):
-    """`job list` with a 120s-stale heartbeat → banner."""
+    """`job list` against a worker the BROKER calls stale → banner.
+
+    The fixture used to pair `state: "online"` with a 120s-old heartbeat and
+    still expect a warning — a combination the broker never emits, and one
+    that only meant anything while the CLI re-derived staleness from its own
+    60s constant. That constant duplicated JOBD_STALE_WORKER_THRESHOLD_S's
+    default, so tuning the broker made this banner contradict `job workers`
+    (audit 2026-07-24 Q1). The verdict is the broker's now, and the fixture
+    says what the broker would actually send.
+    """
     from datetime import datetime, timedelta
 
     import job_cli.cli as cli_mod
 
     stale = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
-    workers = [{"host": "laptop", "last_heartbeat": stale, "state": "online"}]
+    workers = [{"host": "laptop", "last_heartbeat": stale, "state": "stale"}]
 
     class FakeClient:
         def __enter__(self):

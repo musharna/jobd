@@ -91,6 +91,65 @@ def test_stdin_mode_guards(batch_client, args, stdin, expect):
     assert batch_client == []  # nothing submitted on a refused invocation
 
 
+class _RefusingClient:
+    """Submits the first line, then refuses — the broker-restart / admission-
+    block / bad-project shape."""
+
+    def __init__(self, captured: list):
+        self._captured = captured
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def post(self, path, *, json=None, params=None):
+        self._captured.append((path, json))
+        if len(self._captured) == 1:
+            return httpx.Response(200, json={"id": 101})
+        return httpx.Response(400, json={"detail": "project 'proj' is not registered"})
+
+
+def test_stdin_reports_a_mid_batch_refusal_instead_of_a_traceback(monkeypatch):
+    """Audit 2026-07-24 Q2: the old code did `r.json()["id"]` unconditionally,
+    so any 4xx blew up with a bare KeyError and no account of what had already
+    been submitted."""
+    captured: list = []
+    monkeypatch.setattr(cli_mod, "_client", lambda: _RefusingClient(captured))
+
+    r = runner.invoke(app, ["submit", "-p", "proj", "--stdin"], input="echo a\necho b\necho c\n")
+
+    assert r.exit_code == 1, r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit), r.exception
+    # The broker's own reason is surfaced, tied to the offending line.
+    assert "submit failed for 'echo b'" in r.output
+    assert "project 'proj' is not registered" in r.output
+    # And the operator is told exactly where the batch stood.
+    assert "Submitted 1 jobs from stdin (ids 101)" in r.output
+    assert "1 later line(s) not submitted" in r.output
+    # It really stopped: the third line was never posted.
+    assert len(captured) == 2
+
+
+class _GappyClient(_BatchClient):
+    """Ids that are not contiguous — what a concurrent submitter produces."""
+
+    def post(self, path, *, json=None, params=None):
+        self._captured.append((path, json))
+        return httpx.Response(200, json={"id": 100 + 7 * len(self._captured)})
+
+
+def test_stdin_summary_does_not_claim_a_range_it_does_not_have(monkeypatch):
+    captured: list = []
+    monkeypatch.setattr(cli_mod, "_client", lambda: _GappyClient(captured))
+
+    r = runner.invoke(app, ["submit", "-p", "proj", "--stdin"], input="echo a\necho b\n")
+    assert r.exit_code == 0, r.output
+    assert "ids 107, 114" in r.output
+    assert "107..114" not in r.output
+
+
 def test_logs_follow_streams_via_wait(monkeypatch):
     called: list[int] = []
     monkeypatch.setattr(cli_mod, "_stream_wait", lambda jid: called.append(jid))
