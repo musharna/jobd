@@ -20,6 +20,8 @@ prove the force-include never silently drops.
 
 from __future__ import annotations
 
+import re
+import shlex
 import subprocess
 import time
 from importlib import resources
@@ -28,6 +30,12 @@ from pathlib import Path
 import typer
 
 _ASSET_NAMES = ("install-worker.sh", "update-worker.sh")
+
+# The same shape install-worker.sh enforces. Checked HERE as well because the
+# value reaches a remote shell through this module first (audit 2026-07-24 S1);
+# quoting alone would make an injected version a harmless-but-baffling pip
+# argument, and failing closed on a malformed version is the honest outcome.
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 fleet_app = typer.Typer(no_args_is_help=True, help="Bootstrap and inspect fleet workers.")
 
@@ -132,14 +140,26 @@ def _bootstrap_script(
     """The single script piped to `ssh <target> bash -s`. Secrets appear only
     inside heredoc bodies on stdin — never on an argv on either side."""
     env_file = f"JOBD_URL={broker_url}\nJOBD_API_TOKEN={token}\nJOBD_WORKER_HOST={host_name}\n"
-    installer_args = f"--broker {broker_url} --host {host_name} --version {version}"
+    # shlex.quote every value spliced into the remote command line (audit
+    # 2026-07-24 S1). `version` is the one that matters: it defaults to a
+    # string the BROKER hands us over /health, so an unquoted splice let a
+    # compromised broker — or a MITM on a plain-http JOBD_URL — run arbitrary
+    # commands as the ssh user on every host an operator bootstrapped.
+    # install-worker.sh's own X.Y.Z regex is no defense: it lives downstream of
+    # this splice and never runs. `_resolve_version` re-checks it here too.
+    installer_args = (
+        f"--broker {shlex.quote(broker_url)} --host {shlex.quote(host_name)} "
+        f"--version {shlex.quote(version)}"
+    )
     if tags:
-        installer_args += f" --tags {tags}"
+        installer_args += f" --tags {shlex.quote(tags)}"
 
     parts = [
         "set -euo pipefail",
-        "mkdir -p ~/jobd-worker ~/.config/jobd ~/.config/systemd/user",
+        # umask BEFORE mkdir so ~/.config/jobd is 0700, not the login umask's
+        # 0755 (the env file inside it is chmod 600 either way).
         "umask 077",
+        "mkdir -p ~/jobd-worker ~/.config/jobd ~/.config/systemd/user",
         _heredoc("~/jobd-worker/.fleet-install.sh", _asset("install-worker.sh")),
         f"bash ~/jobd-worker/.fleet-install.sh {installer_args}",
         _heredoc("~/jobd-worker/update-worker.sh", _asset("update-worker.sh"), mode="755"),
@@ -165,7 +185,30 @@ def _bootstrap_script(
 def _broker_version(client) -> str:
     r = client.get("/health")
     r.raise_for_status()
-    return r.json()["version"]
+    version = r.json().get("version")
+    if not version:
+        raise typer.BadParameter(
+            "broker /health returned no version; pass --version X.Y.Z explicitly"
+        )
+    return str(version)
+
+
+def _resolve_version(client, explicit: str) -> str:
+    """The version to install: an explicit --version, else the broker's own.
+
+    Validated against X.Y.Z either way (audit 2026-07-24 S1). The broker-supplied
+    branch is the security-relevant one — this value is spliced into a script
+    that runs on the remote host — but an explicit one gets the same treatment
+    so the failure message is identical wherever the bad value came from.
+    """
+    version = explicit or _broker_version(client)
+    if not _VERSION_RE.match(version):
+        raise typer.BadParameter(
+            f"refusing to install version {version!r}: not a plain X.Y.Z. "
+            "A version is pushed to the remote host as an install argument; "
+            "anything else is rejected rather than passed along."
+        )
+    return version
 
 
 @fleet_app.command("add")
@@ -195,7 +238,7 @@ def fleet_add(
     from job_cli.cli import _client
 
     with _client() as c:
-        broker_version = version or _broker_version(c)
+        broker_version = _resolve_version(c, version)
         broker_url = c.base_url
         token = c.token
 
@@ -207,14 +250,23 @@ def fleet_add(
 
     if dry_run:
         # Preflight only: push the installer and run its own --dry-run
-        # detection on the remote; nothing is written.
+        # detection on the remote; nothing persistent is written.
+        #
+        # The staging path is an mktemp -d, not a fixed /tmp name (audit
+        # 2026-07-24 S2). A predictable path in a world-writable directory is
+        # a symlink-plant away from turning this `cat >` into an arbitrary
+        # file write as the ssh user — and then executing it. mktemp -d gives
+        # an unguessable 0700 directory; the trap removes it on any exit.
         script = "\n".join(
             [
                 "set -euo pipefail",
-                _heredoc("/tmp/.jobd-fleet-preflight.sh", _asset("install-worker.sh")),
-                f"bash /tmp/.jobd-fleet-preflight.sh --broker {broker_url} "
-                f"--host {host_name} --version {broker_version} --dry-run",
-                "rm -f /tmp/.jobd-fleet-preflight.sh",
+                "umask 077",
+                "d=$(mktemp -d)",
+                "trap 'rm -rf \"$d\"' EXIT",
+                _heredoc('"$d/preflight.sh"', _asset("install-worker.sh")),
+                f'bash "$d/preflight.sh" --broker {shlex.quote(broker_url)} '
+                f"--host {shlex.quote(host_name)} --version {shlex.quote(broker_version)} "
+                "--dry-run",
             ]
         )
     else:
