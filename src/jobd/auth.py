@@ -135,9 +135,19 @@ def _check_token(authorization: str | None) -> None:
             status_code=401,
             detail="Authorization header must be 'Bearer <token>'",
         )
-    presented = authorization[len("Bearer ") :]
-    # constant-time compare avoids a timing side-channel on the token byte.
-    if not hmac.compare_digest(presented, expected):
+    # Strip BOTH sides, not just the expected one (audit 2026-07-25 S-6). The
+    # env value was already stripped — .env files and systemd Environment=
+    # lines routinely carry a trailing newline — so the two were asymmetric: a
+    # client echoing the very byte the operator's file contains got rejected.
+    # Whitespace is not a meaningful distinction between high-entropy tokens.
+    presented = authorization[len("Bearer ") :].strip()
+    # Constant-time compare avoids a timing side-channel on the token byte.
+    # Compare BYTES (audit 2026-07-25 S-5): hmac.compare_digest raises
+    # TypeError on a str holding non-ASCII, which surfaced as a 500 rather than
+    # a 401 — an error-shape difference driven purely by what the caller sent.
+    # No token material leaked either way; 401 is simply the honest answer to a
+    # token that does not match, whatever bytes it is made of.
+    if not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="bad token")
 
 
