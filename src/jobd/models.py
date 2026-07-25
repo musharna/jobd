@@ -422,6 +422,10 @@ KNOWN_EVENTS = frozenset(
         "cwd_refused",
         "submit_warning",
         "sweep_warning",
+        # The sweep declined to run its time-based terminal phases because the
+        # broker had not been observing the interval it would otherwise have
+        # reasoned about (fresh start, or a suspend/stall gap). Audit H-1.
+        "reclaim_suppressed",
         # retention (broker)
         "jobs_pruned",
         "logs_pruned",

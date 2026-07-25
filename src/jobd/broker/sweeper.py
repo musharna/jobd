@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from jobd.broker.constants import (
     OFFLINE_AFTER_SECONDS,
     QUEUE_BLOCKED_THRESHOLD_SECONDS,
     STALE_WORKER_THRESHOLD_S_DEFAULT,
+    SWEEP_INTERVAL_SECONDS,
     UNMATCHEABLE_THRESHOLD_SECONDS,
     VERSION_DRIFT_WARN_HOURS_DEFAULT,
     WALL_CLOCK_BACKSTOP_GRACE_SECONDS,
@@ -337,6 +339,70 @@ def warn_version_drift(session_local, logs_dir: Path, now: datetime | None = Non
     return len(warned)
 
 
+# --- observation-gap guard (audit 2026-07-25 H-1) ----------------------------
+# Every reclaim decision below is a wall-clock delta against a stored timestamp:
+# "this worker last heartbeat 400s ago, so it is dead." That inference is only
+# valid if the broker was WATCHING for those 400s. It has two ways not to be:
+#
+#   1. it just started — the first sweep runs immediately at boot, before any
+#      worker has had a chance to re-heartbeat, so every stored last_heartbeat
+#      still reads from before the downtime;
+#   2. it was frozen — the host suspended, or the loop stalled, and `now`
+#      jumped forward while nothing was observed. This fleet is laptops and
+#      desktops that sleep.
+#
+# Either way the first post-gap sweep sees the whole fleet as dead and every
+# in-flight job as reclaimable, and acts on all of it at once — including the
+# `wall_clock_exceeded` branch, which is a DELIBERATE terminal that resurrect
+# does not undo, so healthy long jobs die permanently.
+#
+# The guard suppresses only the time-based TERMINAL phases (scheduling-timeout
+# expiry, ASSIGNED reclaim, RUNNING wall-clock backstop + dead-worker
+# reclaim/orphan) for one pass. Worker offline/stale marking, retention, env
+# scrub, version drift and the queue warnings keep running: none of them ends a
+# job, and all self-correct on the next heartbeat.
+_RECLAIM_GAP_FACTOR = 3
+_last_sweep_wall: datetime | None = None
+_process_start_monotonic: float | None = None
+
+
+def reset_observation_state() -> None:
+    """Forget that any sweep has run. Test seam, and the honest reset for a
+    fresh process."""
+    global _last_sweep_wall, _process_start_monotonic
+    _last_sweep_wall = None
+    _process_start_monotonic = None
+
+
+def _note_sweep_and_suppression(now: datetime) -> str | None:
+    """Record this sweep and report why reclaim must be skipped, or None.
+
+    Uses WALL time for the gap (a suspend or a clock jump both show up there —
+    and it is wall time the reclaim decisions are made in) and MONOTONIC for
+    uptime (which must not be fooled by the same clock jump).
+    """
+    global _last_sweep_wall, _process_start_monotonic
+    if _process_start_monotonic is None:
+        _process_start_monotonic = time.monotonic()
+    uptime_s = time.monotonic() - _process_start_monotonic
+    previous = _last_sweep_wall
+    _last_sweep_wall = now
+
+    if uptime_s < DEAD_WORKER_SECONDS:
+        return (
+            f"broker uptime {uptime_s:.0f}s is under the {DEAD_WORKER_SECONDS}s reclaim "
+            "window — workers have not had a full window to re-register since start"
+        )
+    if previous is not None:
+        gap_s = (now - previous).total_seconds()
+        if gap_s > _RECLAIM_GAP_FACTOR * SWEEP_INTERVAL_SECONDS:
+            return (
+                f"{gap_s:.0f}s since the previous sweep (expected ~{SWEEP_INTERVAL_SECONDS}s) "
+                "— the broker was not observing, so elapsed time proves nothing about workers"
+            )
+    return None
+
+
 def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], None]) -> None:
     """One full sweep pass. In order: expire queued jobs past their
     scheduling_timeout_s (with dependency cascade); mark silent workers
@@ -348,6 +414,18 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
     commit."""
     # SQLite stores datetimes as naive UTC; compare naive-to-naive.
     now = datetime.now(UTC).replace(tzinfo=None)
+    # H-1: did we actually watch the interval we are about to reason about?
+    reclaim_suppressed = _note_sweep_and_suppression(now)
+    if reclaim_suppressed:
+        # Loud, and an event — a sweep that declines to reclaim must never look
+        # like a sweep that found nothing to reclaim.
+        log.warning("sweep: reclaim phases suppressed — %s", reclaim_suppressed)
+        _emit_event(
+            logs_dir,
+            "reclaim_suppressed",
+            source="broker",
+            reason=reclaim_suppressed,
+        )
     going_offline_records: list[tuple[str, datetime | None]] = []
     scheduling_timeout_records: list[tuple[int, str, int]] = []
     # Declared up here (not at the running-reclaim loop) so the
@@ -369,8 +447,12 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
         # motivated by jobs 577/578 on server. Done FIRST so subsequent
         # sweeper passes (unmatcheable warning, blocker probe) don't
         # waste work on already-terminal rows.
+        # H-1: an unobserved gap makes every queued job look starved, exactly as
+        # it makes every worker look dead. Same suppression.
         timeout_candidates = (
-            session.execute(
+            []
+            if reclaim_suppressed
+            else session.execute(
                 select(Job).where(
                     Job.state == JobState.QUEUED,
                     Job.scheduling_timeout_s.is_not(None),
@@ -496,9 +578,13 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 continue
             going_stale_records.append((w.host, w.last_heartbeat))
 
-        # Reclaim assigned jobs whose worker is stale
+        # Reclaim assigned jobs whose worker is stale (H-1: not while suppressed —
+        # "stale" here means "silent for N seconds", which we cannot assert
+        # about seconds we did not watch).
         assigned = (
-            session.execute(select(Job).where(Job.state == JobState.ASSIGNED)).scalars().all()
+            []
+            if reclaim_suppressed
+            else session.execute(select(Job).where(Job.state == JobState.ASSIGNED)).scalars().all()
         )
         for j in assigned:
             reclaim_seconds = (
@@ -542,7 +628,14 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
         # than silently re-running a job that may not be re-runnable.
         # (orphan_records / cascade_records declared at the top of the sweep
         # so the scheduling_timeout cascade shares them.)
-        running = session.execute(select(Job).where(Job.state == JobState.RUNNING)).scalars().all()
+        # H-1: suppressed after an unobserved gap. This loop holds the
+        # wall_clock_exceeded branch, whose terminal resurrect will NOT undo —
+        # the one place a false positive here is permanent.
+        running = (
+            []
+            if reclaim_suppressed
+            else session.execute(select(Job).where(Job.state == JobState.RUNNING)).scalars().all()
+        )
         for j in running:
             # Wall-clock backstop (independent of worker liveness). Worker-
             # side enforcement (job_worker.poll_signals SIGTERMs at
