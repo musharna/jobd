@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import json
+import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
@@ -48,6 +49,8 @@ from jobd.models import (
     JobState,
     JobSubmit,
 )
+
+log = logging.getLogger("jobd")
 
 
 def build_router(deps: BrokerDeps) -> APIRouter:
@@ -165,8 +168,21 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 raise HTTPException(status_code=413, detail="log chunk too large")
         body = bytes(received)
         log_file = job_log_path(logs_dir, job_id)
-        with log_file.open("ab") as f:
-            f.write(body)
+        # A full disk must not turn every log chunk into a 500 (audit 2026-07-25
+        # M-1). It used to: ENOSPC propagated, FastAPI returned 500, the
+        # worker's stream_output swallowed it and kept going — so the job
+        # survived but its output vanished silently, while the broker wrote a
+        # stack trace per chunk to the same full disk. `_emit_event` already
+        # holds the right principle one module over ("observability never breaks
+        # broker liveness"); a log append is the same class of write. Report the
+        # drop in the body rather than raising, so the worker does not retry a
+        # write that cannot succeed and the loss is visible, not silent.
+        try:
+            with log_file.open("ab") as f:
+                f.write(body)
+        except OSError as e:
+            log.warning("job %s: log append failed (%s) — dropped %d bytes", job_id, e, len(body))
+            return {"bytes": 0, "dropped": len(body), "reason": type(e).__name__}
         return {"bytes": len(body)}
 
     @router.post("/jobs/{job_id}/started", response_model=JobInfo)
