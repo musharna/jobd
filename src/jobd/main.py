@@ -56,7 +56,24 @@ def run() -> None:
         classifier_path=f"{config_dir}/classifier.yaml",
     )
     host = os.environ.get("JOBD_HOST", "127.0.0.1")
-    uvicorn.run(app, host=host, port=int(os.environ.get("JOBD_PORT", "8765")))
+    # proxy_headers=False, explicitly (audit 2026-07-25 S-3). uvicorn defaults
+    # it to True, which lets a request from a trusted peer REWRITE
+    # request.client.host out of X-Forwarded-For — and that is the exact value
+    # jobd's tailnet source-IP ACL makes its decision on (auth.py
+    # TailnetACLMiddleware). Today this is inert: uvicorn only trusts the
+    # header from a 127.0.0.1 peer, and the shipped deployment binds directly
+    # to a tailscale IP under network_mode: host, so a remote peer is never
+    # loopback. It stops being inert the moment anyone puts a TLS-terminating
+    # reverse proxy on localhost in front of the broker — a normal thing to do
+    # — at which point the ACL silently degrades from "who connected" to
+    # "what header did they send". Turning it off keeps the ACL's input the
+    # real socket peer, always.
+    uvicorn.run(
+        app,
+        host=host,
+        port=int(os.environ.get("JOBD_PORT", "8765")),
+        proxy_headers=False,
+    )
 
 
 if __name__ == "__main__":
