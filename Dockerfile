@@ -20,13 +20,14 @@ ENV PYTHONUNBUFFERED=1 \
 # substitution fail closed. The layer keys on the requirements file alone, so
 # editing application source still does not re-download dependencies.
 #
-# It lives under docker/ rather than the repo root so Dependabot's pip
-# ecosystem (configured at directory: "/") does not discover it as a manifest
-# (audit 2026-07-25). It is a GENERATED export of uv.lock, so a bot editing it
-# directly desyncs it from its own source: every such PR failed the lockstep
-# lint by construction, and merging one would have shipped dependency versions
-# CI never ran, since uv.lock — what the test job installs from — was untouched.
-# Dependabot has no per-file exclude, so relocation is the supported fix.
+# It is a GENERATED export of uv.lock, so a bot editing it directly desyncs it
+# from its own source: every such PR fails the lockstep lint by construction,
+# and merging one would ship dependency versions CI never ran, since uv.lock —
+# what the test job installs from — is left untouched. Dependabot is kept off
+# it by `exclude-paths` in .github/dependabot.yml. Moving it under docker/ was
+# the earlier attempt (2026-07-25) on the belief that a pip entry at
+# directory: "/" scans only the root; #104 disproved that, so the path here is
+# no longer load-bearing for the exclusion — the config is.
 #
 # No `pip install -U pip` (audit 2026-07-24): pulling an unpinned, unhashed pip
 # from PyPI on every build is the one un-verified download left in an image

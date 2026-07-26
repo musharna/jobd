@@ -3,6 +3,23 @@ updates:
   # Python dependencies (pyproject.toml + uv.lock)
   - package-ecosystem: "pip"
     directory: "/"
+    # docker/requirements-docker.txt is a GENERATED `uv export` of uv.lock, not
+    # a manifest. Dependabot's pip ecosystem discovers it anyway and opens PRs
+    # editing it directly, which desyncs the export from the source it is
+    # generated from — and leaves uv.lock, which CI actually installs from,
+    # untouched. Such a PR is red by construction (the lockstep lint compares
+    # the committed file against a live export of the PR's own uv.lock, so a
+    # rebase cannot fix it) and merging one would ship dependency versions no
+    # test has ever run, into an image whose --require-hashes premise exists to
+    # prevent exactly that. It produced #84 and, after the relocation below was
+    # believed to have closed it, #104.
+    #
+    # Relocating the file under docker/ did NOT put it out of reach — that was
+    # the assumption in #90, and #104 disproved it. `exclude-paths` (shipped
+    # 2025-08-26) is the supported fix: Dependabot will not list, parse, or
+    # open pull requests for a path matched here.
+    exclude-paths:
+      - "docker/requirements-docker.txt"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
