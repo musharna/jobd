@@ -50,6 +50,21 @@ Ruff is configured in `pyproject.toml` (`line-length = 100`, `target-version = p
 
 `uv run mypy src/jobd src/job_cli` runs in CI but is **non-blocking** (the codebase is mid-typing-adoption). Don't regress it — prefer adding annotations to new/changed code so we can tighten it to a hard gate later.
 
+### The quickstart dry-run (run this before and after every release)
+
+Nothing in CI installs jobd the way a new user does, so run it yourself:
+
+```bash
+scripts/quickstart-dry-run.sh                  # against what PyPI is serving now
+scripts/quickstart-dry-run.sh dist/jobd-*.whl  # against a local build, pre-release
+```
+
+It executes the README quickstart **verbatim** in a pristine `python:3.11-slim` container — the documented floor — with **zero `JOBD_*` variables set, from a plain `pip install`**.
+
+That last clause is the entire point. On 2026-07-26 this check found that `pip install jobd && jobd` had crashed on boot on **every released version since the first commit**: `JOBD_DB_URL` defaulted to the Docker container's `/app/data` path, which SQLite will not create. It went unseen for eight weeks because every existing check supplied the value a real user does not have — the Dockerfile sets `JOBD_DB_URL` and mkdirs the directory, CI sets it, and even `test_broker_boots_and_runs_a_job_with_no_config_at_all` passed `db_url=` straight to `build_app`. The prior launch dry-run missed it too, because it ran the Docker **image** while the README documents **pip**.
+
+The generalisable rule, worth applying beyond this script: **a real-execution check must consume the same inputs the documented path consumes.** Supplying one "to make the test work" silently deletes the coverage you thought you bought.
+
 ## Running jobd locally for manual testing
 
 Single-host loop, all from a checkout:
