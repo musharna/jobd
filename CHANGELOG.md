@@ -4,6 +4,16 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.35] — 2026-07-26
+
+### Fixed
+
+- **`pip install jobd && jobd` now actually boots.** `JOBD_DB_URL` defaulted to `sqlite:////app/data/jobd.db` — the _Docker container's_ path — so the broker died on startup with SQLite's opaque "unable to open database file" on any machine that was not the image. That default had been present since the first commit, meaning the README quickstart's very first command had never worked for a bare pip install on any released version. It now defaults to `$XDG_DATA_HOME/jobd/jobd.db` (falling back to `~/.local/share/jobd/jobd.db`) and creates the directory on boot; if it cannot, the error names the path and the environment variable instead of surfacing a SQLAlchemy traceback. Deployments are unaffected: the Dockerfile sets `JOBD_DB_URL` explicitly, and nobody running from pip could have been relying on a default that could not work. Found by re-running the launch dry-run against a real `pip install` rather than the Docker image — the previous dry-runs, CI, and `test_broker_boots_and_runs_a_job_with_no_config_at_all` all supplied the DB path themselves, which is precisely why none of them saw it.
+- **The pueue/task-spooler migration table renders correctly again.** The `simple_gpu_scheduler` row carried an unescaped `|` inside a code span, and GitHub-flavoured Markdown splits table cells on pipes even inside backticks — so the renderer dropped the entire right-hand cell and showed a dangling `` `... `` where the migration command should have been. The source looks fine and every local previewer renders it fine, which is why it survived on the front page; it was caught by pushing the table through GitHub's own `/markdown` API. `tests/test_markdown_tables.py` now sweeps every tracked Markdown file for the same mistake rather than just the file that happened to be wrong.
+
+### Security
+
+- **The README now discloses the unauthenticated surface, not just the two walls.** Its Security section listed interface binding and the bearer token and stopped there, without saying that `/livez`, `/readyz` and `/metrics` answer with neither — and that `/metrics` publishes the broker version, job counts and every worker's hostname and version. `docs/security.md` already documented this; the README, which is what most readers judge the security posture by, did not. `tests/test_security_doc_parity.py` was added to prevent exactly this drift but covered only `docs/security.md`, so it now derives the same assertions against the README in both directions.
 ## [0.5.34] — 2026-07-25
 
 ### Fixed
