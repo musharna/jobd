@@ -271,6 +271,8 @@ The broker has **no TCP-layer auth beyond a shared bearer token**, so it is mean
 1. **Interface binding** — `JOBD_HOST` must be `127.0.0.1` or a Tailscale CGNAT address (`100.64.0.0/10`), never `0.0.0.0`. A CI lint (`tests/test_deploy_lint.py`) enforces this on the Docker deployment.
 2. **Bearer token** — set `JOBD_API_TOKEN` (≥32 random bytes) on every broker/worker/CLI/MCP host. The broker refuses to start without it unless you explicitly set `JOBD_ALLOW_NO_AUTH=1`. **`JOBD_ALLOW_NO_AUTH=1` is for a loopback-only broker (`JOBD_HOST=127.0.0.1`) — for local dev/tests.** Combined with a non-loopback `JOBD_HOST` it exposes an unauthenticated RCE endpoint to your whole tailnet; the broker logs a startup warning if you do this. Don't.
 
+**Three endpoints are exempt from both controls** — `/livez`, `/readyz` and `/metrics` answer with no bearer token *and* no source-IP check, because a generic HTTP monitor cannot send a token. `/metrics` is the one that matters: it publishes the broker version, job counts by state, and **every worker's hostname and version**. No commands, cwd, env or project names — but it does fingerprint the fleet. That is why the `JOBD_HOST` bind above is load-bearing rather than defence-in-depth: port-forward the broker and you publish that inventory. Full table: [Unauthenticated surface](https://github.com/musharna/jobd/blob/main/docs/security.md#unauthenticated-surface).
+
 Full threat model, env-var reference, and token rotation: **[docs/security.md](https://github.com/musharna/jobd/blob/main/docs/security.md)**.
 
 ## License
