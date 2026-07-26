@@ -186,7 +186,7 @@ The verbs map directly — what changes is that the queue spans every machine yo
 | `tsp -w` / `pueue follow <id>`    | `job logs -f <id>` (or `job wait <id>`) — streams, exits with the job's own exit code |
 | `tsp` / `pueue status`            | `job list`                                                                  |
 | `pueue log <id>`                  | `job logs <id>`                                                             |
-| commands piped to `simple_gpu_scheduler` | `... | job submit -p <project> --stdin` — one job per line, fleet-wide |
+| commands piped to `simple_gpu_scheduler` | `... \| job submit -p <project> --stdin` — one job per line, fleet-wide |
 | `pueue kill <id>`                 | `job cancel <id>`                                                           |
 | `pueue group` / parallelism limits| projects + priorities (`projects.yaml`); per-worker slots via `JOBD_WORKER_MAX_CONCURRENT_JOBS` |
 
