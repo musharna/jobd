@@ -519,6 +519,33 @@ def _req_lines(text: str) -> list[str]:
     ]
 
 
+def _glob_covers(pattern: str, path: str) -> bool:
+    """Does a dependabot `exclude-paths` glob match `path`?
+
+    Dependabot evaluates these relative to the repo root and documents `*` and
+    `**`. Implemented rather than delegated because `fnmatch` lets `*` cross a
+    `/` (so `docker/*.txt` would wrongly appear to cover `docker/a/b.txt`) and
+    `PurePath.match` did not handle a leading `**/` until 3.13, while this repo
+    supports 3.11. A leading `./` or `/` is tolerated on either side.
+    """
+    pattern, path = pattern.lstrip("./"), path.lstrip("./")
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            if pattern.startswith("/", i):  # `**/x` must also match a bare `x`
+                out.append("/?")
+                i += 1
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
 def test_requirements_docker_in_sync_with_uv_lock(tmp_path):
     """The image installs requirements-docker.txt (hashed, exported from
     uv.lock). If it drifts from the lock, the shipped image again carries
@@ -548,38 +575,78 @@ def test_requirements_docker_in_sync_with_uv_lock(tmp_path):
     )
 
 
-def test_the_generated_export_stays_out_of_dependabots_reach():
-    """docker/requirements-docker.txt must NOT sit in a directory Dependabot
-    scans for pip manifests (audit 2026-07-25).
+def test_the_generated_export_is_excluded_from_dependabot():
+    """Every dependabot pip entry must `exclude-paths` the generated export.
 
-    It is a generated `uv export` of uv.lock. When it sat at the repo root,
-    Dependabot's pip ecosystem — configured at `directory: "/"` — discovered it
-    as a manifest and opened PRs editing it directly. Every one of those failed
-    `test_requirements_docker_in_sync_with_uv_lock` by construction, because the
-    edit desyncs the export from the source it is generated from; and merging
-    one would have shipped 17 dependency versions CI never ran, since uv.lock —
-    what the test job installs from — was left untouched. Dependabot offers no
-    per-file exclude (dependabot/dependabot-core#1657), so moving the file out
-    of the scanned directory is the supported fix.
+    docker/requirements-docker.txt is a generated `uv export` of uv.lock, not a
+    manifest. Dependabot's pip ecosystem discovers it anyway and opens PRs
+    editing it directly. Those are red by construction — the lockstep lint above
+    compares the committed file against a live export of the PR's own uv.lock,
+    so a rebase can never fix it — and merging one is worse than leaving it red:
+    uv.lock is what the test job installs from, and the bot leaves it untouched,
+    so CI green on such a PR means CI ran the OLD versions. That is precisely
+    the hole the hashed export exists to close.
 
-    Guards both halves: the file is not at the root, and no dependabot entry
-    scans the directory it moved to.
+    History, because it is the whole point of this test's shape. #84 was this
+    loop. #90 responded by moving the file from the repo root to docker/, on the
+    premise that Dependabot's pip ecosystem at `directory: "/"` scans only the
+    root — and guarded it by asserting the file was not at the root and that no
+    pip entry named /docker. Both assertions were true, the test was green, and
+    on 2026-07-26 Dependabot opened #104 editing the file anyway. The premise
+    was simply wrong; the guard could not see that, because it asserted the
+    workaround was IN PLACE rather than that it WORKED.
+
+    So this test now pins the mechanism that actually does the excluding —
+    `exclude-paths`, supported since 2025-08-26 — rather than a proxy for it.
+    The failure signal to watch for in the wild is unchanged and is what caught
+    this: a Dependabot PR whose diff touches the generated export.
     """
-    assert not (_REPO_ROOT / "requirements-docker.txt").exists(), (
-        "requirements-docker.txt is back at the repo root, where Dependabot's "
-        'pip ecosystem (directory: "/") will discover the generated export as a '
-        "manifest and reopen the born-red PR loop. Keep it under docker/."
-    )
     assert _REQ_DOCKER.exists(), f"the hashed export is missing from {_REQ_DOCKER}"
 
+    rel = _REQ_DOCKER.relative_to(_REPO_ROOT).as_posix()
     cfg = yaml.safe_load((_REPO_ROOT / ".github" / "dependabot.yml").read_text())
-    pip_dirs = {
-        u.get("directory") for u in cfg.get("updates", []) if u.get("package-ecosystem") == "pip"
-    }
-    assert "/docker" not in pip_dirs and "docker" not in pip_dirs, (
-        f"a dependabot pip entry now scans {pip_dirs} — which includes the directory "
-        "holding the generated export. That reopens exactly the loop this move closed."
-    )
+    pip_entries = [u for u in cfg.get("updates", []) if u.get("package-ecosystem") == "pip"]
+    assert pip_entries, "no dependabot pip entry — did the ecosystem name change?"
+
+    for entry in pip_entries:
+        excluded = entry.get("exclude-paths") or []
+        assert any(_glob_covers(pattern, rel) for pattern in excluded), (
+            f"the dependabot pip entry at directory={entry.get('directory')!r} does not "
+            f"exclude-paths the generated export ({rel}); its exclude-paths are {excluded}. "
+            "Dependabot will discover the export as a manifest and reopen the born-red "
+            "PR loop that produced #84 and #104."
+        )
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "covered"),
+    [
+        # the literal form the config uses
+        ("docker/requirements-docker.txt", "docker/requirements-docker.txt", True),
+        # glob forms that would also legitimately cover it
+        ("docker/*.txt", "docker/requirements-docker.txt", True),
+        ("**/requirements-docker.txt", "docker/requirements-docker.txt", True),
+        ("**", "docker/requirements-docker.txt", True),
+        ("docker/**", "docker/requirements-docker.txt", True),
+        # `**/x` must match a bare `x` at the root too
+        ("**/requirements-docker.txt", "requirements-docker.txt", True),
+        # near-misses that must NOT count as coverage
+        ("docker/requirements-docker.tx", "docker/requirements-docker.txt", False),
+        ("requirements-docker.txt", "docker/requirements-docker.txt", False),
+        ("docker/other.txt", "docker/requirements-docker.txt", False),
+        # a single `*` must not cross a directory separator
+        ("*/requirements-docker.txt", "docker/nested/requirements-docker.txt", False),
+        ("docker/*.txt", "docker/nested/requirements-docker.txt", False),
+    ],
+)
+def test_glob_covers_matches_dependabot_semantics(pattern, path, covered):
+    """Guard the guard: the exclusion test is only as good as this matcher.
+
+    If `_glob_covers` were permissive, the exclusion test would pass on a config
+    that excludes nothing — a green guard over a reopened loop, which is the
+    exact failure mode being corrected here.
+    """
+    assert _glob_covers(pattern, path) is covered
 
 
 def test_dockerfile_installs_only_hashed_pretested_dependencies():
