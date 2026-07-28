@@ -1,0 +1,36 @@
+{
+  "upload_type": "software",
+  "title": "jobd: a self-hostable, GPU-aware job broker with native agent (MCP) integration",
+  "description": "A self-hostable, GPU-aware job broker for personal and lab-scale compute. jobd queues long-running batch work across heterogeneous machines, matching jobs to workers by capability tags (CUDA, VRAM capacity, installed tooling), and exposes the queue natively to language-model agents through the Model Context Protocol (MCP) in addition to a CLI and HTTP API. Designed for research workflows where compute outlives any single interactive session.",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Arnold, Jaret",
+      "orcid": "0009-0003-4055-5238"
+    }
+  ],
+  "keywords": [
+    "job-scheduler",
+    "job-queue",
+    "gpu",
+    "distributed-systems",
+    "self-hosted",
+    "homelab",
+    "model-context-protocol",
+    "mcp",
+    "research-computing"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/musharna/jobd",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://pypi.org/project/jobd/",
+      "relation": "isIdenticalTo",
+      "scheme": "url"
+    }
+  ],
+  "access_right": "open"
+}
