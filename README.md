@@ -8,6 +8,7 @@
 [![Glama](https://glama.ai/mcp/servers/musharna/jobd/badges/score.svg)](https://glama.ai/mcp/servers/musharna/jobd)
 [![GHCR](https://img.shields.io/badge/ghcr.io-musharna%2Fjobd-2496ED?logo=docker&logoColor=white)](https://github.com/musharna/jobd/pkgs/container/jobd)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/musharna/jobd/blob/main/LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21636369.svg)](https://doi.org/10.5281/zenodo.21636369)
 
 **A self-hostable, GPU-aware job broker for your own machines — with native MCP/agent integration.**
 
