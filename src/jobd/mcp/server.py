@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp import types
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
 
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
@@ -152,14 +152,13 @@ Use submitted_via="mcp" (auto-set) so observability can distinguish MCP-driven s
 
 
 def build_server(client: JobdClient | None = None) -> Server:
-    server = Server("jobd", instructions=_INSTRUCTIONS)
     client = client or JobdClient()
 
     def _dispatch(name: str, arguments: dict) -> dict:
         """Synchronous tool dispatch. Maps BrokerRefusal → structured error.
 
         Transport errors (BrokerUnreachable / BrokerServerError) propagate so the
-        MCP layer can surface them as isError=true.
+        caller can surface them as is_error=True.
         """
         for tname, _, _, fn in _TOOLS:
             if tname == name:
@@ -169,17 +168,26 @@ def build_server(client: JobdClient | None = None) -> Server:
                     return {"error": map_broker_refusal(e)}
         raise ValueError(f"unknown tool: {name}")
 
-    server._jobd_dispatch = _dispatch  # type: ignore[attr-defined]
+    # mcp 2.x removed the @server.list_tools() / @server.call_tool() decorators.
+    # Handlers are constructor arguments now, take (ctx, params), and must return
+    # a Result object — a bare list is rejected.
+    async def _list(
+        ctx: ServerRequestContext,
+        params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(name=name, description=desc, input_schema=schema)
+                for name, desc, schema, _ in _TOOLS
+            ]
+        )
 
-    @server.list_tools()
-    async def _list() -> list[types.Tool]:
-        return [
-            types.Tool(name=name, description=desc, inputSchema=schema)
-            for name, desc, schema, _ in _TOOLS
-        ]
-
-    @server.call_tool()
-    async def _call(name: str, arguments: dict) -> list[types.TextContent]:
+    async def _call(
+        ctx: ServerRequestContext,
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
         t0 = time.monotonic()
         error_kind: str | None = None
         try:
@@ -190,12 +198,37 @@ def build_server(client: JobdClient | None = None) -> Server:
                 and isinstance(payload["error"], dict)
             ):
                 error_kind = payload["error"].get("kind")
-            return [types.TextContent(type="text", text=json.dumps(payload))]
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=json.dumps(payload))]
+            )
         except (BrokerUnreachable, BrokerServerError) as e:
+            # Under 1.x an exception raised here was converted by the MCP layer
+            # into isError=true. 2.x removed that conversion, so the result has
+            # to be built explicitly — otherwise a broker outage propagates as a
+            # protocol-level crash instead of the documented is_error response
+            # (tests/mcp/walkthrough.md step 11).
             error_kind = "transport"
-            raise RuntimeError(f"jobd transport error: {e}") from e
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=f"jobd transport error: {e}")],
+                is_error=True,
+            )
+        except ValueError as e:
+            # Unknown tool name — same story, 1.x turned this into isError=true.
+            error_kind = "unknown_tool"
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(e))],
+                is_error=True,
+            )
         finally:
             _log_call(name, arguments, error_kind, (time.monotonic() - t0) * 1000)
+
+    server = Server(
+        "jobd",
+        instructions=_INSTRUCTIONS,
+        on_list_tools=_list,
+        on_call_tool=_call,
+    )
+    server._jobd_dispatch = _dispatch  # type: ignore[attr-defined]
 
     return server
 
