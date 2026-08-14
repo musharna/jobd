@@ -28,7 +28,10 @@
 
 set -euo pipefail
 
-JOBD_DIR="${JOBD_DIR:-/home/mjarnold/jobd}"
+# Site-specific: set this in deployment config, not here. The install notes in
+# scripts/jobd-deploy.service show the systemd drop-in. $HOME is NOT a usable
+# fallback -- the unit runs as root with HOME unset, so it would resolve to "/jobd".
+JOBD_DIR="${JOBD_DIR:-/srv/jobd}"
 ENV_FILE="$JOBD_DIR/.env"
 IMAGE="ghcr.io/musharna/jobd"
 METRICS_FILE="${METRICS_FILE:-/var/lib/prometheus/node-exporter/jobd_deploy.prom}"
