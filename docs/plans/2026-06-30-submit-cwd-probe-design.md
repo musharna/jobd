@@ -13,7 +13,7 @@ broker filters jobs whose `cwd` doesn't `startswith` any of the polling worker's
 `mount_roots` (`app.py:1172`).
 
 This is **necessary but insufficient**: a path like
-`/home/mjarnold/jepagame/.claude/worktrees/embodiment-v8` (a git worktree, which
+`~/jepagame/.claude/worktrees/embodiment-v8` (a git worktree, which
 is never cloned to other hosts) is under `/home`, and **every** worker advertises
 `/home`. So the prefix filter passes the job to a remote worker whose `/home`
 does not contain that worktree → the worker `cd`s, fails, and reports
@@ -193,7 +193,7 @@ than the old silent 127). This is the boundary the synthetic tests can't cover
 Broker (A + the refuse-admission/next-job/schema change) runs on **gt76**
 (docker). Worker change (B's cwd check) runs on **all four** workers (laptop,
 desktop, gt76, msi-4080), each with its own checkout. Editable install on the
-laptop (`/home/mjarnold/jobd/src`) picks up `src/` changes on
+laptop (`~/jobd/src`) picks up `src/` changes on
 `job-worker.service` restart; other hosts need their checkout updated + worker
 restart; the broker container needs a rebuild/restart. Schema column must land
 on the broker's DB. Sequence + per-host recipe → plan / a deploy checklist. Code
