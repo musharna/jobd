@@ -10,8 +10,8 @@
 
 ## Global Constraints
 
-- **Base branch:** `feat/submit-cwd-probe` off `public` (v0.5.5) — the deployed line. Worktree: `/home/mjarnold/jobd-worktrees/cwd-probe`.
-- **Test invocation (run from the worktree):** `cd /home/mjarnold/jobd-worktrees/cwd-probe && PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest <args>`.
+- **Base branch:** `feat/submit-cwd-probe` off `public` (v0.5.5) — the deployed line. Worktree: `~/jobd-worktrees/cwd-probe`.
+- **Test invocation (run from the worktree):** `cd ~/jobd-worktrees/cwd-probe && PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest <args>`.
 - **Back-compat is mandatory.** New model fields default to current behavior (`AdmissionRefusal.reason="gpu_contention"`, `cwd=None`; `WorkerSnapshot.mount_roots=[]`; `Job.excluded_workers_json` NULL→`[]`). Existing tests must stay green. Old workers (empty mount_roots, no cwd-check) must keep working.
 - **A never false-rejects on missing data:** a worker with empty `mount_roots` is "unknown" and is excluded from any deny decision.
 - **No hot loop:** each worker refuses a given job at most once (then excluded); when all eligible workers are excluded the job goes terminal `cwd_unreachable`, never stuck QUEUED.
@@ -60,7 +60,7 @@ def test_worker_snapshot_mount_roots_defaults_empty():
 
 - [ ] **Step 2: Run, expect fail**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_matcher.py -k mount_roots -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_matcher.py -k mount_roots -q`
 Expected: FAIL — `TypeError: __init__() got an unexpected keyword argument 'mount_roots'`.
 
 - [ ] **Step 3: Add the field** — in `src/jobd/matcher.py`, in the `WorkerSnapshot` dataclass after `tags: list[str] = field(default_factory=list)`:
@@ -77,7 +77,7 @@ Expected: FAIL — `TypeError: __init__() got an unexpected keyword argument 'mo
 
 - [ ] **Step 5: Run, expect pass + no regressions**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_matcher.py -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_matcher.py -q`
 Expected: PASS (44 + 2 new).
 
 - [ ] **Step 6: Commit**
@@ -165,7 +165,7 @@ def test_cwd_routability_worktree_under_home_NOT_caught_by_A():
 
 - [ ] **Step 2: Run, expect fail** (`ImportError: cannot import name 'cwd_routability'`)
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_matcher.py -k cwd_routability -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_matcher.py -k cwd_routability -q`
 
 - [ ] **Step 3: Implement** — add to `src/jobd/matcher.py` after `submit_preflight` (it ends ~line 274):
 
@@ -229,7 +229,7 @@ def cwd_routability(
 
 - [ ] **Step 4: Run, expect pass**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_matcher.py -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_matcher.py -q`
 Expected: PASS (all, incl. 5 new).
 
 - [ ] **Step 5: Commit**
@@ -291,7 +291,7 @@ def test_submit_warns_any_pin_uncovered_cwd_but_accepts(client):
 
 - [ ] **Step 2: Run, expect fail** (no 400 / no warning yet)
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -k "cwd" -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -k "cwd" -q`
 
 - [ ] **Step 3: Implement** — in `src/jobd/app.py submit()`, right after the existing `preflight_warn = submit_preflight(...)` line (`~:447`), before the `warnings = [...]` list is built:
 
@@ -319,7 +319,7 @@ Add the import at the top of `app.py` where `submit_preflight` is imported (sear
 
 - [ ] **Step 4: Run, expect pass + full suite green**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
 Expected: PASS incl. the 2 new; the existing `/mnt/c` test still passes (untouched fast-path).
 
 - [ ] **Step 5: Commit**
@@ -379,7 +379,7 @@ def test_job_orm_has_excluded_workers_column():
 
 - [ ] **Step 2: Run, expect fail** (`AttributeError` on the ORM attr)
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -k excluded -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -k excluded -q`
 
 - [ ] **Step 3: Add the column** — in `src/jobd/models.py`, in the `Job` ORM class, mirror an existing nullable-TEXT JSON column (find `requires_json` or another `Mapped[str | None] = mapped_column(...)` in `Job`) and add:
 
@@ -399,7 +399,7 @@ def _excluded_workers(job: Job) -> list[str]:
 
 - [ ] **Step 6: Run, expect pass + suite green**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
 
 - [ ] **Step 7: Commit**
 
@@ -477,7 +477,7 @@ def test_refuse_admission_gpu_contention_unchanged(client):
 
 - [ ] **Step 2: Run, expect fail**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -k "refuse_admission" -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -k "refuse_admission" -q`
 
 - [ ] **Step 3: Extend the model** — in `src/jobd/models.py`, `AdmissionRefusal` (`:301`): make the GPU fields optional and add the reason/cwd. Read the current fields first; change to:
 
@@ -561,7 +561,7 @@ Verify the imports `eligible_workers`, `JobRequires`, `select`, `Worker`, `JobSt
 
 - [ ] **Step 5: Run, expect pass + suite green**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
 Expected: PASS incl. 3 new; the existing GPU-contention refuse-admission test still green.
 
 - [ ] **Step 6: Commit**
@@ -609,7 +609,7 @@ def test_next_job_skips_excluded_worker(client):
 
 - [ ] **Step 2: Run, expect fail** (desktop still gets re-offered the job)
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -k next_job_skips_excluded -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -k next_job_skips_excluded -q`
 
 - [ ] **Step 3: Implement** — in `src/jobd/app.py`, in the `/next-job` handler right after the existing mount_roots filter (`:1172`):
 
@@ -622,7 +622,7 @@ Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_a
 
 - [ ] **Step 4: Run, expect pass + suite green**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/test_api.py -q`
 
 - [ ] **Step 5: Commit**
 
@@ -675,7 +675,7 @@ def test_run_job_refuses_admission_when_cwd_missing(monkeypatch):
 
 - [ ] **Step 2: Run, expect fail**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/ -k "cwd_missing and run_job" -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/ -k "cwd_missing and run_job" -q`
 
 - [ ] **Step 3: Implement** — in `src/jobd/worker/job_worker.py run_job`, immediately before the launcher check (`missing = _missing_launcher_path(cmd, cwd)`, `:819`), after the env setup:
 
@@ -703,7 +703,7 @@ Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/ -k "c
 
 - [ ] **Step 4: Run, expect pass + worker suite green**
 
-Run: `PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/ -q`
+Run: `PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/ -q`
 
 - [ ] **Step 5: Commit**
 
@@ -733,9 +733,9 @@ EOF
 - [ ] **Step 1: Full suite green + lint**
 
 ```bash
-cd /home/mjarnold/jobd-worktrees/cwd-probe
-PYTHONPATH=src /home/mjarnold/jobd/.venv/bin/python -m pytest tests/ -q
-/home/mjarnold/jobd/.venv/bin/python -m ruff check src/ tests/   # if ruff configured (pyproject [tool.ruff])
+cd ~/jobd-worktrees/cwd-probe
+PYTHONPATH=src ~/jobd/.venv/bin/python -m pytest tests/ -q
+~/jobd/.venv/bin/python -m ruff check src/ tests/   # if ruff configured (pyproject [tool.ruff])
 ```
 
 Expected: all green; ruff clean (the repo configures ruff at `pyproject.toml:86`).
