@@ -37,7 +37,7 @@ excluded_workers_json TEXT DEFAULT '[]'`). **No manual SQL needed.**
    shows `excluded_workers_json`.
 2. **Workers (laptop, desktop, gt76, msi-4080).** Update each host's checkout and
    restart its worker. The **laptop** is an editable install
-   (`/home/mjarnold/jobd/src` via `_editable_impl_jobd.pth`) — merging to the
+   (`~/jobd/src` via `_editable_impl_jobd.pth`) — merging to the
    deployed branch + `systemctl --user restart job-worker.service` picks up
    `src/` directly. Desktop/gt76/msi: update their `~/jobd-worker/` (or
    equivalent) checkout, restart the worker.
@@ -47,7 +47,7 @@ excluded_workers_json TEXT DEFAULT '[]'`). **No manual SQL needed.**
 From the laptop, in a git worktree (a host-local path under `/home`):
 
 ```bash
-cd /home/mjarnold/jepagame/.claude/worktrees/<some-worktree>
+cd ~/jepagame/.claude/worktrees/<some-worktree>
 job submit --project jepagame --cwd $(pwd) --gpu --needs cuda-24gb --wait -- \
   bash -lc 'echo HOST=$(hostname); pwd'
 ```
