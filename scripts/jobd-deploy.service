@@ -4,6 +4,13 @@
 #   sudo cp scripts/deploy-broker.sh /usr/local/bin/jobd-deploy
 #   sudo chmod +x /usr/local/bin/jobd-deploy
 #   sudo cp scripts/jobd-deploy.{service,timer} /etc/systemd/system/
+#
+#   # Point it at your checkout. deploy-broker.sh defaults to /srv/jobd; anything
+#   # else belongs here rather than in the script, which is published publicly.
+#   sudo mkdir -p /etc/systemd/system/jobd-deploy.service.d
+#   printf '[Service]\nEnvironment=JOBD_DIR=%s\n' "$PWD" \
+#     | sudo tee /etc/systemd/system/jobd-deploy.service.d/10-jobd-dir.conf
+#
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now jobd-deploy.timer
 #
