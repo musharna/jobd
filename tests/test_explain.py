@@ -15,7 +15,7 @@ from jobd.db import Job
 
 
 @pytest.fixture
-def projects_with_agrigen(tmp_path):
+def projects_with_project_z(tmp_path):
     path = tmp_path / "projects.yaml"
     path.write_text(
         """projects:
@@ -39,13 +39,13 @@ def projects_with_agrigen(tmp_path):
 @pytest.fixture
 def client_with_defaults(
     tmp_path,
-    projects_with_agrigen,
+    projects_with_project_z,
     sample_profiles_yaml,
     sample_classifier_yaml,
 ):
     app = build_app(
         db_url=f"sqlite:///{tmp_path}/jobd.db",
-        projects_path=projects_with_agrigen,
+        projects_path=projects_with_project_z,
         profiles_path=sample_profiles_yaml,
         classifier_path=sample_classifier_yaml,
         logs_path=tmp_path / "logs",
