@@ -78,6 +78,10 @@ def submit_job(
     # /resolve can't drift. /submit reads only `.value`; /resolve surfaces
     # the (value, source) verbatim.
     eff = resolve_effective_config(req, state["projects"], profile_spec)
+    # The RESOLVED name, not what the caller typed: a submit that matched a
+    # registered project by case or -/_ is stored and reported under that
+    # project, so it cannot be priced as one project and recorded as another.
+    project = eff.project
     priority = eff.priority.value
     host_pin = eff.host_pin.value
     preemptible = eff.preemptible.value
@@ -244,7 +248,7 @@ def submit_job(
             member_cmd = render_cmd(req.cmd, subs) if is_array else req.cmd
             member_env = render_env(req.env, subs) if is_array else req.env
             job = Job(
-                project=req.project,
+                project=project,
                 profile=req.profile,
                 host_pin=host_pin,
                 priority=priority,
@@ -336,7 +340,7 @@ def submit_job(
                 "job_submitted",
                 source="broker",
                 job_id=jid,
-                project=req.project,
+                project=project,
                 priority=priority,
                 host_pin=host_pin,
                 preemptible=preemptible,
@@ -348,7 +352,7 @@ def submit_job(
                     "submit_warning",
                     source="broker",
                     job_id=jid,
-                    project=req.project,
+                    project=project,
                     warning_text=warning_text,
                 )
                 # ...and one event per kind, so a rate alert can name a cause.
@@ -361,7 +365,7 @@ def submit_job(
                         kind,
                         source="broker",
                         job_id=jid,
-                        project=req.project,
+                        project=project,
                         warning_text=text,
                     )
 

@@ -240,7 +240,18 @@ def load_effective_projects(
     baseline = load_projects(projects_path)
     baseline_priorities = {name: entry.priority for name, entry in baseline.items()}
     overrides = load_project_overrides(overrides_path)
-    return apply_project_overrides(baseline, overrides), baseline_priorities
+    effective = apply_project_overrides(baseline, overrides)
+    # Report a table that defeats spelling-insensitive matching. The overlay can
+    # mint a project name at runtime (`job projects set <new-name>`), so a clash
+    # can appear long after the git baseline was reviewed.
+    for key, names in project_key_collisions(effective).items():
+        log.warning(
+            "projects %s differ only by case or -/_ (fold %r) — submits naming any "
+            "other spelling fall back to exact matching; rename or merge them",
+            ", ".join(names),
+            key,
+        )
+    return effective, baseline_priorities
 
 
 def load_profiles(path: Path | str) -> dict[str, ProfileSpec]:
@@ -306,6 +317,69 @@ def load_classifier_rules(path: Path | str) -> list[ClassifierRule]:
             )
         )
     return out
+
+
+def project_key(name: str) -> str:
+    """Fold a project name to the key used for spelling-insensitive matching.
+
+    Case and `-`/`_` only. Deliberately NOT fuzzy: `phelipanche` is not folded
+    onto `phelipanche-fm`, nor `arf-promoter` onto `arf_promoter_analysis`.
+    Those differ by a SUFFIX, and treating them as the same project would be a
+    guess that silently routes work at another project's priority — the exact
+    failure this matching is meant to end, inverted. If two such names really
+    are one project, that is a registration decision, not a string operation.
+    """
+    return name.casefold().replace("-", "_")
+
+
+def canonical_project_name(projects: dict[str, ProjectEntry], name: str) -> str:
+    """Return the registered spelling of `name`, else `name` unchanged.
+
+    Project names are free text typed at submit time and were matched with a
+    bare `name in projects`, so a REGISTERED project silently lost its priority
+    whenever the submitter typed it differently: measured 2026-08-30, jobs
+    submitted as `ARFDSynInt` ran at `_default` 40 while `arfdsynint` was
+    deliberately registered at 65 — a difference of case alone, with no error
+    and no way to see it except by reading the warning nothing consumed.
+
+    An exact hit always wins, so a project that genuinely wants a distinct
+    name keeps it. A name matching nothing is returned untouched: a brand-new
+    project must still be able to submit under the name its owner chose.
+    """
+    if name in projects:
+        return name
+    key = project_key(name)
+    matches = [r for r in projects if r != "_default" and project_key(r) == key]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        # Two registered projects fold together, so there is no single right
+        # answer. Say so and route as before rather than pick one — guessing
+        # here would run someone's jobs at a neighbour's priority, which is a
+        # worse version of the bug this matching exists to fix.
+        log.warning(
+            "project %r folds onto more than one registered project (%s) — "
+            "matching it exactly instead; rename or merge them",
+            name,
+            ", ".join(sorted(matches)),
+        )
+    return name
+
+
+def project_key_collisions(projects: dict[str, ProjectEntry]) -> dict[str, list[str]]:
+    """Registered names that differ only by case or `-`/`_`, keyed by their fold.
+
+    Reported at load so a table that defeats spelling-insensitive matching is
+    visible, without raising: a broker that refuses to start over a config typo
+    strands every queued job, and `canonical_project_name` already degrades to
+    exact matching for the affected names.
+    """
+    by_key: dict[str, list[str]] = {}
+    for name in projects:
+        if name == "_default":
+            continue
+        by_key.setdefault(project_key(name), []).append(name)
+    return {k: sorted(v) for k, v in by_key.items() if len(v) > 1}
 
 
 def resolve_priority(projects: dict[str, ProjectEntry], name: str, delta: int) -> int:
@@ -391,6 +465,11 @@ class EffectiveConfig:
     requires: FieldResolution  # value: JobRequires | None
     escalate_to_arc: FieldResolution
     unknown_project_warning: str | None
+    # The registered spelling of req.project, or req.project when nothing
+    # matched. Both /submit (which STORES it on the Job row) and /resolve read
+    # this rather than req.project, so a name that resolved to a registered
+    # project cannot be recorded under one spelling and priced under another.
+    project: str
 
 
 def resolve_effective_config(
@@ -405,12 +484,17 @@ def resolve_effective_config(
     The returned FieldResolution objects are what /resolve surfaces verbatim;
     /submit reads only `.value`. This is the single source of truth for the
     precedence cascade both endpoints used to hand-encode separately."""
-    proj_defaults = resolve_project_defaults(projects, req.project)
-    known_project = req.project in projects
+    # Resolve the name ONCE, here, before anything reads it. Every field below
+    # and the Job row /submit writes then agree by construction; matching in
+    # each consumer instead is how `ARFDSynInt` got priced as an unknown
+    # project while `arfdsynint` sat registered at 65.
+    project = canonical_project_name(projects, req.project)
+    proj_defaults = resolve_project_defaults(projects, project)
+    known_project = project in projects
 
     # priority: value from resolve_priority; source mirrors /resolve's rule
     # (unknown project always attributes to global, even with a CLI delta).
-    priority_value = resolve_priority(projects, req.project, req.priority_delta)
+    priority_value = resolve_priority(projects, project, req.priority_delta)
     priority_source: ResolutionSource
     if not known_project:
         priority_source = "global"
@@ -515,7 +599,7 @@ def resolve_effective_config(
     unknown_project_warning: str | None = None
     if not known_project and "_default" in projects:
         unknown_project_warning = (
-            f"project {req.project!r} has no entry in projects.yaml; using global defaults"
+            f"project {project!r} has no entry in projects.yaml; using global defaults"
         )
 
     return EffectiveConfig(
@@ -528,4 +612,5 @@ def resolve_effective_config(
         requires=FieldResolution(value=req_value, source=req_source),
         escalate_to_arc=FieldResolution(value=arc_value, source=arc_source),
         unknown_project_warning=unknown_project_warning,
+        project=project,
     )

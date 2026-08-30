@@ -115,3 +115,93 @@ def test_submit_matches_resolve(client, project, profile, extra, expected_host_p
     # the same object as a JSON string ("{}" when unset).
     resolved_requires = resolved["effective_requires"]["value"] or {}
     assert json.loads(job.requires_json) == resolved_requires
+
+
+# --- spelling-insensitive project identity ------------------------------------
+#
+# Project names are free text typed at submit time and were matched with a bare
+# `name in projects`, so a REGISTERED project silently lost its priority to a
+# differently-typed name. Measured on the live broker 2026-08-30: jobs submitted
+# as `ARFDSynInt` ran at _default 40 while `arfdsynint` sat deliberately
+# registered at 65 — a difference of case alone, with no error raised and no way
+# to notice except by reading a warning nothing consumed.
+
+
+def _submit(client, project: str, **extra):
+    r = client.post(
+        "/submit",
+        json={"project": project, "cmd": ["true"], "cwd": "/tmp", "host_pin": "any", **extra},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _row(client):
+    with Session(client.app.state.engine) as sess:
+        rows = sess.execute(select(Job)).scalars().all()
+    assert len(rows) == 1, f"expected exactly one job row, got {len(rows)}"
+    return rows[0]
+
+
+@pytest.mark.parametrize("typed", ["PINNED-PROJ", "Pinned-Proj", "pinned_proj", "PINNED_PROJ"])
+def test_a_differently_spelled_registered_project_keeps_its_priority(client, typed):
+    """Case and -/_ variants resolve to the registered project, so the job is
+    priced at 55 rather than falling through to _default 40."""
+    _submit(client, typed)
+    job = _row(client)
+    assert job.priority == 55, (
+        f"{typed!r} was priced at {job.priority}, not the registered project's 55 — "
+        "it fell through to _default"
+    )
+    # ...and is STORED under the registered spelling, so per-project reporting
+    # cannot fragment into one row per spelling.
+    assert job.project == "pinned-proj", f"stored as {job.project!r}"
+
+
+def test_resolve_previews_the_same_resolved_name_submit_stores(client):
+    """/resolve is documented as dry-run submit, so it must report the name the
+    job will actually run under, not echo back what the caller typed."""
+    r = client.post(
+        "/resolve",
+        json={"project": "PINNED-PROJ", "cmd": ["true"], "cwd": "/tmp", "host_pin": "any"},
+    )
+    assert r.status_code == 200, r.text
+    resolved = r.json()
+    assert resolved["project"] == "pinned-proj"
+    assert resolved["effective_priority"]["value"] == 55
+    assert resolved["submit_warning"] is None
+
+    _submit(client, "PINNED-PROJ")
+    assert _row(client).project == resolved["project"]
+
+
+def test_an_exactly_named_project_is_untouched(client):
+    """Positive control. Without it, a resolver that mangled every name into the
+    same project would satisfy the assertions above just as well."""
+    _submit(client, "pinned-proj")
+    job = _row(client)
+    assert job.project == "pinned-proj"
+    assert job.priority == 55
+
+
+def test_a_genuinely_new_project_keeps_the_name_its_owner_chose(client):
+    """The other positive control: matching nothing must stay untouched. A new
+    project has to be able to submit under its own name, still warn, and still
+    take _default — folding must not invent a match."""
+    body = _submit(client, "Brand-New-Thing")
+    job = _row(client)
+    assert job.project == "Brand-New-Thing", f"rewrote an unmatched name to {job.project!r}"
+    assert job.priority == 40
+    assert body["warning"] is not None
+    assert "no entry in projects.yaml" in body["warning"]
+
+
+def test_a_suffix_difference_is_not_treated_as_the_same_project(client):
+    """Folding is case and -/_ ONLY, deliberately. `phelipanche` must not be
+    folded onto `phelipanche-fm` — that differs by a suffix, and equating them
+    would run work at another project's priority, which is the bug this matching
+    exists to end, inverted."""
+    _submit(client, "pinned")
+    job = _row(client)
+    assert job.project == "pinned", f"a suffix difference was folded: {job.project!r}"
+    assert job.priority == 40
