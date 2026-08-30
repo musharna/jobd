@@ -18,6 +18,7 @@ from jobd.broker.projects import (
 )
 from jobd.config import (
     ProjectEntry,
+    canonical_project_name,
     load_classifier_rules,
     load_effective_projects,
     load_profiles,
@@ -55,6 +56,11 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         # the shared projects dict; unsynchronized, a concurrent set/nudge can
         # blow up mid-iteration or last-write-win the overlay (F7).
         with projects_mutation_lock:
+            # Resolve the spelling first, so `job projects set ARFDSynInt 65`
+            # RE-PRICES the registered `arfdsynint` instead of minting a second
+            # entry that folds onto it. Without this the write path could still
+            # create the very collision the read path has to warn about.
+            name = canonical_project_name(state["projects"], name)
             priority = max(0, min(100, payload.priority))
             existing = state["projects"].get(name)
             if existing is None:
@@ -67,6 +73,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
     @router.post("/projects/{name}/nudge")
     def nudge_project_priority(name: str, payload: NudgePriorityRequest):
         with projects_mutation_lock:
+            name = canonical_project_name(state["projects"], name)
             delta = payload.delta
             existing = state["projects"].get(name)
             if existing is None:
@@ -111,7 +118,10 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         # is the shared FieldResolution verbatim — same precedence /submit runs.
         requires_value = eff.requires.value
         return ResolvedConfig(
-            project=req.project,
+            # The resolved name, so a caller previewing `ARFDSynInt` is told it
+            # will run as the registered `arfdsynint` rather than being handed
+            # its own spelling back beside that project's priority.
+            project=eff.project,
             effective_priority=eff.priority,
             effective_host_pin=eff.host_pin,
             effective_max_wall_s=eff.max_wall_s,

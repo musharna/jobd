@@ -547,6 +547,33 @@ def test_nudge_project_priority(client):
     assert r.json()["project-b"]["priority"] == 85
 
 
+def test_setting_a_priority_by_a_differently_spelled_name_reprices_the_same_project(client):
+    """Otherwise the write path mints a SECOND entry that folds onto the first,
+    creating exactly the ambiguity the read path then has to warn about and
+    refuse to resolve — so the fix would leave its own mechanism reachable."""
+    r = client.post("/projects/PROJECT-B", json={"priority": 90})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["project-b"]["priority"] == 90
+    assert "PROJECT-B" not in body, f"minted a second colliding entry: {sorted(body)}"
+
+
+def test_nudging_by_a_differently_spelled_name_moves_the_same_project(client):
+    r = client.post("/projects/Project_B/nudge", json={"delta": 5})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["project-b"]["priority"] == 85
+    assert "Project_B" not in body, f"minted a second colliding entry: {sorted(body)}"
+
+
+def test_an_unmatched_name_still_creates_a_new_project(client):
+    """Positive control: folding must not stop a genuinely new project from
+    being registered under the name its owner chose."""
+    r = client.post("/projects/a-brand-new-project", json={"priority": 70})
+    assert r.status_code == 200
+    assert r.json()["a-brand-new-project"]["priority"] == 70
+
+
 def test_set_project_priority_malformed_payload_is_422_not_500(client):
     """A missing or non-integer `priority` is a client error: pydantic validation
     returns 422, not a handler KeyError/ValueError -> 500 (audit LOW)."""
