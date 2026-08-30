@@ -117,7 +117,11 @@ def main(argv: list[str] | None = None) -> int:
         # There is stray content under [Unreleased]; refuse rather than eat it.
         die("the [Unreleased] section is not empty — move its entries into changelog.d/ first")
     # Keep [Unreleased] as a standing (empty) heading above the new section.
-    changelog.write_text(f"{head}{_UNRELEASED}\n\n{section}{tail.lstrip()}")
+    # `section` ends in exactly one newline and `tail.lstrip()` drops the blank
+    # line that used to separate it from the previous release heading, so the
+    # new section butted straight up against `## [<prev>]` while every older
+    # boundary in the file had a blank line. Re-add the separator here.
+    changelog.write_text(f"{head}{_UNRELEASED}\n\n{section}\n{tail.lstrip()}")
 
     consumed = [name for entries in by_cat.values() for name, _ in entries]
     for name in consumed:

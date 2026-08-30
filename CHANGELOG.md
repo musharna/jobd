@@ -4,6 +4,21 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.39] — 2026-08-30
+
+### Added
+
+- **Each submit warning now emits its own event, so a rate alert can name a cause.**
+  `submit_warning` fires once per job whatever warned, and five independent causes —
+  unknown project, preflight, cwd route, serialization, gpu contention — were joined into
+  one string before emission, so the event stream could say THAT something warned and never
+  WHICH. `unknown_project`, `preflight_warning`, `cwd_route_warning`,
+  `serialization_warning` and `gpu_contention_warning` are now emitted alongside it and are
+  all in `KNOWN_EVENTS`, so each gets its own `jobd_events_total` label rather than the
+  `other` bucket. `submit_warning` itself is unchanged — still one per job, whatever warned —
+  so its calibrated baselines stay comparable, and the `warnings` list published by dry-run
+  and array submit is byte-identical.
+
 ## [0.5.38] — 2026-08-06
 
 ### Changed

@@ -120,6 +120,14 @@ def test_roll_happy_path(repo: Path):
     # Prior releases untouched, consumed fragments deleted, README kept.
     assert "## [0.5.26] — 2026-07-15" in text
     assert sorted(p.name for p in frag.iterdir()) == ["README.md"]
+    # A blank line separates the new section from the heading below it. The
+    # assertion above only pins the [Unreleased] side of the new section, so the
+    # bottom edge went unchecked and `tail.lstrip()` silently ate the separator:
+    # 0.5.39 landed butted straight against `## [0.5.38]` while every older
+    # boundary in the shipped CHANGELOG had a blank line.
+    assert "\n\n## [0.5.26] — 2026-07-15" in text, (
+        "new section must not butt against the previous release heading"
+    )
 
 
 def test_roll_refuses_empty_fragment_dir(repo: Path):
