@@ -157,17 +157,28 @@ def submit_job(
             if is_hard:
                 raise HTTPException(status_code=400, detail=cwd_msg)
             cwd_route_warn = cwd_msg
-        warnings = [
-            w
-            for w in (
-                unknown_project_warning,
-                preflight_warn,
-                cwd_route_warn,
-                ser_warn,
-                gpu_warn,
+        # Each warning carries its KIND to the event stream. Joining them into
+        # one string is right for a human reading `job submit`, but it was also
+        # the only thing emitted, so `submit_warning` reported merely THAT
+        # something warned — five independent causes sharing one counter, which
+        # no alert predicate can separate. That is how the 2026-07-13 priority
+        # drift recurred unseen: 77 of 350 submits in 19 days fell through to
+        # `_default` and the broker said so every single time, into a bucket
+        # nothing could read. Order is unchanged, so warning_text is identical.
+        typed_warnings: list[tuple[str, str]] = [
+            (kind, w)
+            for kind, w in (
+                ("unknown_project", unknown_project_warning),
+                ("preflight_warning", preflight_warn),
+                ("cwd_route_warning", cwd_route_warn),
+                ("serialization_warning", ser_warn),
+                ("gpu_contention_warning", gpu_warn),
             )
             if w is not None
         ]
+        # The dry-run and array-submit responses publish this list; it stays a
+        # plain list of strings, in the same order, so the API is unchanged.
+        warnings = [w for _, w in typed_warnings]
         warning_text = "; ".join(warnings) if warnings else None
 
         # Resolve the per-member substitutions up front so dry-run reports
@@ -340,6 +351,19 @@ def submit_job(
                     project=req.project,
                     warning_text=warning_text,
                 )
+                # ...and one event per kind, so a rate alert can name a cause.
+                # `submit_warning` above is deliberately unchanged — still one
+                # per job, whatever warned — so its calibrated 7-day baselines
+                # stay comparable across this change.
+                for kind, text in typed_warnings:
+                    _emit_event(
+                        logs_dir,
+                        kind,
+                        source="broker",
+                        job_id=jid,
+                        project=req.project,
+                        warning_text=text,
+                    )
 
         # H-1: emit job_cancelled (by='cascade') for any child the TOCTOU
         # sweep cancelled, AFTER the commit above (so a failed commit can't

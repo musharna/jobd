@@ -421,6 +421,16 @@ KNOWN_EVENTS = frozenset(
         "checkpoint_complete",
         "cwd_refused",
         "submit_warning",
+        # `submit_warning` fires once per job whatever warned, so it cannot say
+        # WHICH of the five independent causes did. These name them. Every one
+        # must be listed here: an unlisted name still reaches events.jsonl but
+        # its metric collapses into the "other" bucket, so an alert written
+        # against it would never fire and would look healthy doing it.
+        "unknown_project",
+        "preflight_warning",
+        "cwd_route_warning",
+        "serialization_warning",
+        "gpu_contention_warning",
         "sweep_warning",
         # The sweep declined to run its time-based terminal phases because the
         # broker had not been observing the interval it would otherwise have
