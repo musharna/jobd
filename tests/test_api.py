@@ -538,13 +538,15 @@ def test_list_projects(client):
 def test_set_project_priority(client):
     r = client.post("/projects/project-b", json={"priority": 90})
     assert r.status_code == 200
-    assert r.json()["project-b"]["priority"] == 90
+    assert r.json()["projects"]["project-b"]["priority"] == 90
+    assert r.json()["project"] == "project-b"
 
 
 def test_nudge_project_priority(client):
     r = client.post("/projects/project-b/nudge", json={"delta": 5})
     assert r.status_code == 200
-    assert r.json()["project-b"]["priority"] == 85
+    assert r.json()["projects"]["project-b"]["priority"] == 85
+    assert r.json()["project"] == "project-b"
 
 
 def test_setting_a_priority_by_a_differently_spelled_name_reprices_the_same_project(client):
@@ -554,16 +556,25 @@ def test_setting_a_priority_by_a_differently_spelled_name_reprices_the_same_proj
     r = client.post("/projects/PROJECT-B", json={"priority": 90})
     assert r.status_code == 200
     body = r.json()
-    assert body["project-b"]["priority"] == 90
-    assert "PROJECT-B" not in body, f"minted a second colliding entry: {sorted(body)}"
+    assert body["projects"]["project-b"]["priority"] == 90
+    assert "PROJECT-B" not in body["projects"], (
+        f"minted a second colliding entry: {sorted(body['projects'])}"
+    )
+    # The typed name is absent from the table, so the response has to NAME the
+    # key it wrote or no caller can find it. Asserting only the absence above is
+    # what let the CLI ship indexing by the typed name (KeyError, post-write).
+    assert body["project"] == "project-b"
 
 
 def test_nudging_by_a_differently_spelled_name_moves_the_same_project(client):
     r = client.post("/projects/Project_B/nudge", json={"delta": 5})
     assert r.status_code == 200
     body = r.json()
-    assert body["project-b"]["priority"] == 85
-    assert "Project_B" not in body, f"minted a second colliding entry: {sorted(body)}"
+    assert body["projects"]["project-b"]["priority"] == 85
+    assert "Project_B" not in body["projects"], (
+        f"minted a second colliding entry: {sorted(body['projects'])}"
+    )
+    assert body["project"] == "project-b"
 
 
 def test_an_unmatched_name_still_creates_a_new_project(client):
@@ -571,7 +582,8 @@ def test_an_unmatched_name_still_creates_a_new_project(client):
     being registered under the name its owner chose."""
     r = client.post("/projects/a-brand-new-project", json={"priority": 70})
     assert r.status_code == 200
-    assert r.json()["a-brand-new-project"]["priority"] == 70
+    assert r.json()["projects"]["a-brand-new-project"]["priority"] == 70
+    assert r.json()["project"] == "a-brand-new-project"
 
 
 def test_set_project_priority_malformed_payload_is_422_not_500(client):

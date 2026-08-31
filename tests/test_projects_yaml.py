@@ -250,11 +250,11 @@ def test_priority_endpoints_work_against_a_read_only_config_dir(tmp_path):
     try:
         r = client.post("/projects/project-a/nudge", json={"delta": -10})
         assert r.status_code == 200, r.text  # was 500
-        assert r.json()["project-a"]["priority"] == 70
+        assert r.json()["projects"]["project-a"]["priority"] == 70
 
         r = client.post("/projects/project-d", json={"priority": 55})
         assert r.status_code == 200, r.text
-        assert r.json()["project-d"]["priority"] == 55
+        assert r.json()["projects"]["project-d"]["priority"] == 55
 
         # Overrides survive a config reload (and the baseline is still readable).
         assert client.post("/reload").status_code == 200
