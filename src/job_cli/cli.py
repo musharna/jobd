@@ -1034,6 +1034,40 @@ def _entry_priority(v) -> int:
     return int(v)
 
 
+def _echo_project_write(typed: str, body: dict) -> None:
+    """Echo the project the server ACTUALLY wrote, not the one that was typed.
+
+    The server folds a spelling onto the registered project, so `job projects
+    set arf_promoter 65` re-prices `arf-promoter` and the typed name is absent
+    from the returned table. This used to index that table by the typed name and
+    die with KeyError after the write had already landed -- the write succeeded
+    and the CLI reported a crash. Reading the resolved name the server reports
+    is what makes the fold visible instead of fatal: say when the name moved,
+    rather than printing the typed spelling beside another project's priority.
+    """
+    if "project" in body and "projects" in body:
+        resolved, table = body["project"], body["projects"]
+    else:
+        # A broker older than 0.5.41 answers with the bare table and cannot say
+        # which key it wrote. Assuming the typed name is what put this bug in
+        # production, so assume it only where nothing better exists, and never
+        # let the assumption crash: skew runs both ways and the CLI upgrades
+        # independently of the broker.
+        resolved, table = typed, body
+    entry = table.get(resolved)
+    if entry is None:
+        typer.echo(
+            f"{typed} -> written, but this broker does not report which project it "
+            f"resolved to; run `job projects list` to confirm"
+        )
+        return
+    priority = _entry_priority(entry)
+    if resolved == typed:
+        typer.echo(f"{typed} -> {priority}")
+    else:
+        typer.echo(f"{typed} -> {resolved} -> {priority}  (folded onto registered spelling)")
+
+
 @projects_app.command("list")
 def projects_list():
     """List projects with their effective priority and any defaults."""
@@ -1074,7 +1108,7 @@ def projects_set(name: str, priority: int):
     with _client() as c:
         r = c.post(f"/projects/{name}", json={"priority": priority})
         r.raise_for_status()
-        typer.echo(f"{name} -> {_entry_priority(r.json()[name])}")
+        _echo_project_write(name, r.json())
 
 
 @projects_app.command("nudge")
@@ -1084,7 +1118,7 @@ def projects_nudge(name: str, delta: int):
     with _client() as c:
         r = c.post(f"/projects/{name}/nudge", json={"delta": delta})
         r.raise_for_status()
-        typer.echo(f"{name} -> {_entry_priority(r.json()[name])}")
+        _echo_project_write(name, r.json())
 
 
 # ---------------------------------------------------------------------------

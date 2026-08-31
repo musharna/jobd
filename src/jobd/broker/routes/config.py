@@ -36,6 +36,24 @@ from jobd.models import (
 )
 
 
+def _write_result(name: str, state) -> dict:
+    """Report the name a write LANDED ON, beside the resulting table.
+
+    The write path folds a spelling onto the registered project, so the name the
+    caller sent may not be a key in the table at all -- `job projects set
+    arf_promoter 65` re-prices `arf-promoter`. Returning the bare table left the
+    caller to guess which key it wrote, and the CLI guessed the name it had
+    typed: KeyError, mid-registration, after the write had already landed.
+
+    Guessing the other way would have been worse than the crash. Falling back to
+    the typed name would print it beside the canonical entry's priority and so
+    report a project set that does not exist. The resolved name is not
+    derivable by the caller -- folding is server-side -- so the server has to
+    say it. /resolve already does exactly this for the read path.
+    """
+    return {"project": name, "projects": _projects_to_jsonable(state["projects"])}
+
+
 def build_router(deps: BrokerDeps) -> APIRouter:
     router = APIRouter()
     state = deps.state
@@ -68,7 +86,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             else:
                 existing.priority = priority
             _persist_projects(state)
-            return _projects_to_jsonable(state["projects"])
+            return _write_result(name, state)
 
     @router.post("/projects/{name}/nudge")
     def nudge_project_priority(name: str, payload: NudgePriorityRequest):
@@ -84,7 +102,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             else:
                 existing.priority = max(0, min(100, existing.priority + delta))
             _persist_projects(state)
-            return _projects_to_jsonable(state["projects"])
+            return _write_result(name, state)
 
     @router.post("/reload")
     def reload_config():
