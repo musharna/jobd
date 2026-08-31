@@ -24,7 +24,7 @@ identifiers:
 repository-code: "https://github.com/musharna/jobd"
 url: "https://pypi.org/project/jobd/"
 license: MIT
-version: 0.5.40
+version: 0.5.41
 date-released: "2026-08-30"
 keywords:
   - job-scheduler
