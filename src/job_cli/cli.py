@@ -15,6 +15,7 @@ import typer
 
 from jobd import __version__
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
+from jobd.config import project_key
 from jobd.models import TERMINAL_FAIL_STATES, TERMINAL_STATES
 
 # Default cap for `job list` (audit 2026-07-12): a long-lived broker with
@@ -345,15 +346,35 @@ def submit(
                 typer.echo(f"--- member {jid} ---", err=True)
                 _stream_wait(jid)
         return
-    label = resp.get("project_label")
-    if label and label != resp.get("project"):
-        typer.echo(f"project: {label} -> {resp['project']}  (identity from cwd)")
+    note = _project_substitution_note(resp.get("project_label"), resp.get("project"))
+    if note:
+        # stderr, like every other human-facing line in this function: stdout
+        # carries the submit JSON alone, so `job submit ... | jq .id` parses.
+        typer.secho(note, err=True)
     if eta:
         banner = _eta_banner_line(resp)
         if banner:
             typer.echo(banner, err=True)
     if wait:
         _stream_wait(resp["id"])
+
+
+def _project_substitution_note(label: str | None, project: str | None) -> str | None:
+    """One line explaining why the scheduling project is not what was typed.
+
+    Two different mechanisms can substitute a name, and naming the wrong one
+    sends an operator to the wrong file. `canonical_project_name` folds case
+    and `-`/`_` onto a REGISTERED spelling (`Orchid_SDXL` -> `orchid-sdxl`);
+    cwd was never consulted, so "identity from cwd" would point at `roots:`,
+    which had nothing to do with it. `project_key` is the same fold the broker
+    applies, so asking it here discriminates the two client-side rather than
+    guessing from the strings.
+    """
+    if not label or not project or label == project:
+        return None
+    if project_key(label) == project_key(project):
+        return f"project: {label} -> {project}  (folded onto the registered spelling)"
+    return f"project: {label} -> {project}  (identity from cwd)"
 
 
 def _fmt_seconds(s: int | None) -> str:
@@ -532,6 +553,15 @@ def _print_resolved(resolved: dict) -> None:
         typer.echo(f"  {label:<{width}}  {rendered:<24}  [source: {source}]")
     sw = resolved.get("submit_warning")
     typer.echo(f"  submit_warning: {sw if sw else 'none'}")
+    # `--explain` is the dry run an operator reads to answer "why did this get
+    # that priority?". When the identity came from cwd rather than from the
+    # name they typed, the answer IS the root -- printing only `project` leaves
+    # the surface built for that question unable to answer it. Rendered only
+    # when rule 2 fired: `matched_root` is None whenever cwd was not consulted.
+    matched_root = resolved.get("matched_root")
+    if matched_root:
+        label = resolved.get("project_label")
+        typer.echo(f"  identity from cwd: root {matched_root} (submitted as {label})")
 
 
 def _stream_wait(job_id: int) -> None:

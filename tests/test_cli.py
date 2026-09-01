@@ -1,5 +1,6 @@
 """CLI tests — smoke only; deeper API tests are in test_api.py."""
 
+import json
 from datetime import UTC
 
 from typer.testing import CliRunner
@@ -363,6 +364,57 @@ def test_submit_omits_timeout_fields_when_unset(monkeypatch):
     assert "max_wall_s" not in captured["body"]
     assert "idle_timeout_s" not in captured["body"]
     assert "checkpoint_grace_s" not in captured["body"]
+
+
+def _submit_with_response(monkeypatch, response):
+    import job_cli.cli as cli_mod
+
+    captured: dict = {}
+    monkeypatch.setattr(cli_mod, "_client", lambda: _FakePostClient(captured, response=response))
+    return CliRunner().invoke(
+        cli_mod.app,
+        ["submit", "--project", "p", "--cwd", "/tmp", "--no-eta", "--", "echo", "hi"],
+    )
+
+
+def test_submit_identity_note_goes_to_stderr(monkeypatch):
+    """`job submit ... | jq .id` must keep parsing. The note is a human-facing
+    line like every other one in this function, all of which go to stderr."""
+    r = _submit_with_response(
+        monkeypatch,
+        {"id": 7, "project": "jepagame", "project_label": "pillar2a1_sweep"},
+    )
+    assert r.exit_code == 0, r.output
+    # The whole point: stdout stays machine-readable.
+    assert json.loads(r.stdout)["id"] == 7
+    assert "pillar2a1_sweep" in r.stderr
+    assert "identity from cwd" in r.stderr
+
+
+def test_submit_folded_spelling_does_not_claim_the_cwd_supplied_it(monkeypatch):
+    """`Orchid_SDXL` -> `orchid-sdxl` is case/`-`_`_` FOLDING by
+    `canonical_project_name`; cwd was never consulted. Saying "identity from
+    cwd" here sends an operator debugging a surprise priority to read
+    `roots:`, which had nothing to do with it."""
+    r = _submit_with_response(
+        monkeypatch,
+        {"id": 8, "project": "orchid-sdxl", "project_label": "Orchid_SDXL"},
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["id"] == 8
+    assert "Orchid_SDXL" in r.stderr
+    assert "cwd" not in r.stderr
+
+
+def test_submit_prints_no_note_when_the_typed_name_was_used_verbatim(monkeypatch):
+    """Positive control: no substitution, no line — so the two tests above are
+    reading a message that is actually conditional."""
+    r = _submit_with_response(
+        monkeypatch, {"id": 9, "project": "jepagame", "project_label": "jepagame"}
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["id"] == 9
+    assert "jepagame" not in r.stderr
 
 
 def test_submit_eta_banner_prints_p50_p90_when_history(monkeypatch):

@@ -94,3 +94,42 @@ def test_an_ambiguous_shallow_root_still_loses_to_a_deeper_unambiguous_one():
 def test_default_is_never_returned_as_an_identity():
     projects = {"_default": ProjectEntry(priority=40, roots=["/home/mjarnold"])}
     assert project_from_cwd(projects, "/home/mjarnold/anything") is None
+
+
+# --- `..` in the submitted cwd ------------------------------------------
+#
+# `--cwd` is a free-text CLI flag and `JobSubmit.cwd` is a bare `str` with no
+# normalization, so a caller can submit a path whose textual components say one
+# thing and whose meaning says another. Comparing raw components made a job
+# actually running in /tmp price at jepagame's priority. Collapsing `..`
+# LEXICALLY is the fix: the broker has no access to the worker's filesystem, so
+# resolving symlinks is both wrong here and unavailable.
+
+
+def _rooted():
+    """The two shipped roots the `..` cases traverse between."""
+    projects = {"_default": ProjectEntry(priority=40)}
+    projects["jepagame"] = ProjectEntry(priority=78, roots=["/home/mjarnold/jepagame"])
+    projects["orchid-sdxl"] = ProjectEntry(priority=60, roots=["/home/mjarnold/orchid-sdxl"])
+    return projects
+
+
+def test_dotdot_out_of_a_root_and_into_another_takes_the_other_projects_identity():
+    """`/home/mjarnold/jepagame/../orchid-sdxl` IS orchid-sdxl. Component-wise
+    matching on un-normalized parts read the leading `jepagame` component and
+    handed the job jepagame's 78."""
+    assert project_from_cwd(_rooted(), "/home/mjarnold/jepagame/../orchid-sdxl") == (
+        "orchid-sdxl",
+        "/home/mjarnold/orchid-sdxl",
+    )
+
+
+def test_dotdot_onto_a_prefix_sibling_does_not_match():
+    """The sibling-prefix regression, reachable through `..`: this path means
+    `/home/mjarnold/jepagame2`, which the direct spelling already refuses."""
+    assert project_from_cwd(_rooted(), "/home/mjarnold/jepagame/../jepagame2") is None
+
+
+def test_dotdot_escaping_the_home_tree_entirely_does_not_match():
+    """The worst case: a job really running in /tmp, priced at jepagame's 78."""
+    assert project_from_cwd(_rooted(), "/home/mjarnold/jepagame/../../tmp") is None

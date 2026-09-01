@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -162,6 +163,16 @@ def _parse_roots(raw: object, project_name: str) -> list[str]:
                 f"projects.yaml {project_name!r}: roots entry {r!r} is not an absolute path"
             )
         norm = str(PurePosixPath(r))
+        if ".." in PurePosixPath(norm).parts:
+            # A root is a stable identity boundary, so a `..` in it is a config
+            # error, not a path to interpret. Collapsing it silently would
+            # accept two spellings of the same boundary and make `matched_root`
+            # -- the field an operator reads to learn WHY a job got a priority
+            # -- report a directory that is not the one that matched.
+            raise ValueError(
+                f"projects.yaml {project_name!r}: roots entry {r!r} contains '..'; "
+                f"write the directory it denotes"
+            )
         if norm == "/":
             # A root of "/" contains every cwd, so this one project would claim
             # every otherwise-unidentified job on the fleet -- including /tmp
@@ -415,9 +426,23 @@ def _path_is_within(cwd: str, root: str) -> bool:
     `/home/mjarnold/jepagame`, which would hand a sibling project its
     neighbour's priority. Comparing tuples of path components makes the
     boundary structural rather than textual.
+
+    `..` is collapsed first, LEXICALLY (`os.path.normpath`). Without it the
+    components lied about where the job runs: measured against the shipped
+    config, `/home/mjarnold/jepagame/../../tmp` matched a root of
+    `/home/mjarnold/jepagame`, so a job actually running in /tmp priced at
+    jepagame's 78. `--cwd` is a free-text CLI flag and `JobSubmit.cwd` is a
+    bare `str` with no normalization, so that path is caller-reachable.
+
+    Lexical is the RIGHT normalization here, not a weaker stand-in for
+    `Path.resolve()`: the broker matches paths belonging to a worker's
+    filesystem, which it cannot see, so resolving symlinks would be both
+    unavailable and wrong (it would answer for the broker's disk). Collapsing
+    `..` needs no filesystem and is correct on any. Symlinks and bind mounts
+    remain unresolved by design — see docs/projects-yaml.md.
     """
-    c = PurePosixPath(cwd).parts
-    r = PurePosixPath(root).parts
+    c = PurePosixPath(os.path.normpath(cwd)).parts
+    r = PurePosixPath(os.path.normpath(root)).parts
     return len(c) >= len(r) and c[: len(r)] == r
 
 
