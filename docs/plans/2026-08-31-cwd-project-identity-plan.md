@@ -20,6 +20,7 @@
 - **Every new test is run against pre-change code first and must fail for the stated reason.** A test never seen to fail is not evidence.
 - **Branch:** `design/cwd-project-identity`, already checked out, spec committed at `e95bbc1`.
 - Run the suite with `.venv/bin/pytest`. It takes ~110-130s; use a generous timeout.
+- **Line numbers in this plan are as-of `80e02a3` and drift as tasks land.** Tasks 5 and 6 touch files Task 4 already edited. Locate every edit site by surrounding CONTENT, and treat a cited line number as a hint, not an address.
 
 ---
 
@@ -810,23 +811,41 @@ In `src/jobd/models.py`, add to `KNOWN_EVENTS` after the warning-kind block:
         "cwd_identity_applied",
 ```
 
-In `src/jobd/broker/submit.py`, inside the same `if` block that emits the typed warnings, after the `for kind, text in typed_warnings:` loop (:362-369):
+In `src/jobd/broker/submit.py`, inside the `for jid in member_ids:` loop,
+immediately after the `job_submitted` emission and **OUTSIDE** the
+`if warning_text:` block beneath it.
+
+Placement is the whole point here, so locate it by content rather than by line
+number (Task 4 has already shifted this file). The typed-warning emissions are
+nested inside `if warning_text:`. Putting this event there would be a defect
+that hides itself: when rule 2 fires, `unknown_project_warning` is None, so a
+plain cwd-identified submit usually has **no** warning text at all — the event
+would never fire in exactly the case it exists to report, while still firing on
+the rarer submit that happened to warn for some other reason.
 
 ```python
-                # Not a warning -- nothing went wrong -- so it is emitted
-                # separately rather than folded into typed_warnings, whose
-                # entries all carry `warning_text` and feed the submit_warning
-                # baselines.
-                if eff.matched_root is not None:
-                    _emit_event(
-                        logs_dir,
-                        "cwd_identity_applied",
-                        source="broker",
-                        job_id=jid,
-                        project=project,
-                        project_label=eff.project_label,
-                        matched_root=eff.matched_root,
-                    )
+        for jid in member_ids:
+            _emit_event(
+                logs_dir,
+                "job_submitted",
+                ...
+            )
+            # Not a warning -- nothing went wrong -- so this sits beside
+            # job_submitted rather than inside the `if warning_text:` block
+            # below. Per member, like job_submitted: every member of an array
+            # shares the identity, and a per-job count is what the metric means.
+            if eff.matched_root is not None:
+                _emit_event(
+                    logs_dir,
+                    "cwd_identity_applied",
+                    source="broker",
+                    job_id=jid,
+                    project=project,
+                    project_label=eff.project_label,
+                    matched_root=eff.matched_root,
+                )
+            if warning_text:
+                ...
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
