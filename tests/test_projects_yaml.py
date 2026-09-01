@@ -341,3 +341,48 @@ def test_valid_defaults_still_parse_bounds_inclusive(tmp_path):
     assert d.idle_timeout_s == 1
     assert d.checkpoint_grace_s == 300
     assert d.priority == 0
+
+
+def test_roots_are_parsed_and_normalized(tmp_path):
+    """A trailing slash is a spelling of the same directory, not a different
+    root — normalizing at load means the matcher never has to care."""
+    p = tmp_path / "projects.yaml"
+    p.write_text(
+        "projects:\n"
+        "  jepagame:\n"
+        "    priority: 78\n"
+        "    roots:\n"
+        "      - /home/mjarnold/jepagame/\n"
+        "      - /srv/jepagame\n"
+    )
+    projects = load_projects(p)
+    assert projects["jepagame"].roots == ["/home/mjarnold/jepagame", "/srv/jepagame"]
+
+
+def test_a_project_without_roots_gets_an_empty_list(tmp_path):
+    """Positive control: roots is optional, and its absence must not change
+    how an ordinary entry loads."""
+    p = tmp_path / "projects.yaml"
+    p.write_text("projects:\n  plain: { priority: 60 }\n")
+    projects = load_projects(p)
+    assert projects["plain"].roots == []
+    assert projects["plain"].priority == 60
+
+
+@pytest.mark.parametrize(
+    "bad, why",
+    [
+        ("roots: [relative/path]", "not absolute"),
+        ("roots: [17]", "not a string"),
+        ("roots: /home/mjarnold/x", "not a list"),
+        ("roots: ['/']", "filesystem root captures every job"),
+    ],
+)
+def test_a_bad_root_is_a_load_error_not_a_silent_drop(tmp_path, bad, why):
+    """`defaults:` silently drops unknown keys by design. A dropped ROOT would
+    present to the operator as 'the feature just doesn't work on my machine',
+    so roots are validated loudly instead."""
+    p = tmp_path / "projects.yaml"
+    p.write_text(f"projects:\n  jepagame:\n    priority: 78\n    {bad}\n")
+    with pytest.raises(ValueError, match="roots"):
+        load_projects(p)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, fields
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import yaml
@@ -55,10 +55,15 @@ class ProjectDefaults:
 
 @dataclass
 class ProjectEntry:
-    """One row of projects.yaml: a base priority plus an optional defaults block."""
+    """One row of projects.yaml: a base priority, optional defaults, optional roots."""
 
     priority: int
     defaults: ProjectDefaults = field(default_factory=ProjectDefaults)
+    # Absolute directories this project owns. A submit whose typed name matches
+    # no registered project takes its identity from the deepest root containing
+    # its cwd. Top level rather than inside `defaults:` because a root is not a
+    # per-job field default — it is how the project is IDENTIFIED.
+    roots: list[str] = field(default_factory=list)
 
 
 # Keys recognized inside `defaults:` — anything else is silently dropped so
@@ -133,6 +138,42 @@ def _parse_defaults(raw: dict | None) -> ProjectDefaults:
     return ProjectDefaults(**kwargs)
 
 
+def _parse_roots(raw: object, project_name: str) -> list[str]:
+    """Validate and normalize a project's `roots:` list.
+
+    Raises rather than dropping. `_parse_defaults` silently ignores what it does
+    not recognize, which is right for forward-compatible per-job defaults: an
+    old broker meeting a new key should keep running. A root is different — it
+    is the identity mechanism itself, so a dropped one does not degrade the
+    feature, it removes it, and does so invisibly on exactly the machine whose
+    config is wrong.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"projects.yaml {project_name!r}: roots must be a list of absolute paths, "
+            f"got {type(raw).__name__}"
+        )
+    out: list[str] = []
+    for r in raw:
+        if not isinstance(r, str) or not r.startswith("/"):
+            raise ValueError(
+                f"projects.yaml {project_name!r}: roots entry {r!r} is not an absolute path"
+            )
+        norm = str(PurePosixPath(r))
+        if norm == "/":
+            # A root of "/" contains every cwd, so this one project would claim
+            # every otherwise-unidentified job on the fleet -- including /tmp
+            # scratch runs. Always a mistake, and a silent one: it produces a
+            # confidently wrong identity rather than no identity.
+            raise ValueError(
+                f"projects.yaml {project_name!r}: roots entry '/' would match every job"
+            )
+        out.append(norm)
+    return out
+
+
 def load_projects(path: Path | str) -> dict[str, ProjectEntry]:
     """Load projects.yaml into {name: ProjectEntry}.
 
@@ -155,7 +196,8 @@ def load_projects(path: Path | str) -> dict[str, ProjectEntry]:
         if not isinstance(cfg, dict) or "priority" not in cfg:
             continue
         defaults = _parse_defaults(cfg.get("defaults"))
-        out[name] = ProjectEntry(priority=int(cfg["priority"]), defaults=defaults)
+        roots = _parse_roots(cfg.get("roots"), name)
+        out[name] = ProjectEntry(priority=int(cfg["priority"]), defaults=defaults, roots=roots)
     if "_default" not in out:
         out["_default"] = ProjectEntry(priority=40)
     return out
