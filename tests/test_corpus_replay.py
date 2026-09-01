@@ -91,9 +91,7 @@ def projects():
 def _eff(projects, typed, cwd):
     """The REAL production path. A mirrored cascade cannot detect a change
     to the cascade it mirrors -- that is what made arm 2 a tautology."""
-    return resolve_effective_config(
-        JobSubmit(cmd=["true"], cwd=cwd, project=typed), projects, None
-    )
+    return resolve_effective_config(JobSubmit(cmd=["true"], cwd=cwd, project=typed), projects, None)
 
 
 def _owning_project(projects, cwd):
@@ -167,6 +165,6 @@ def test_no_job_is_assigned_an_identity_from_a_scratch_directory(corpus, project
     """Positive control on the other side. /tmp and a bare $HOME host many
     projects' work, so an identity derived from either would be a confident
     wrong answer -- worse than the _default it replaced."""
-    for typed, cwd, _n in corpus:
+    for _typed, cwd, _n in corpus:
         if cwd.rstrip("/") in ("/tmp", "/home/mjarnold", ""):
             assert project_from_cwd(projects, cwd) is None, f"{cwd} claimed by a root"
