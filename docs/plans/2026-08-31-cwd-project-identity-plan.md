@@ -1252,13 +1252,32 @@ def test_no_job_is_assigned_an_identity_from_a_scratch_directory(corpus, project
 
 - [ ] **Step 4: Run the test to verify it fails on pre-change code**
 
+**Do NOT use `git stash` here.** The tree is clean at this point, so `stash`
+stashes nothing, the "pre-change" run executes current code, and it PASSES —
+manufacturing exactly the "I saw it fail" evidence this step exists to produce.
+
+Use mutation instead, which tests the arms rather than the imports. Arm 2 is the
+regression control, so prove arm 2 can fail:
+
 ```bash
-git stash                                        # revert to pre-feature source
-.venv/bin/pytest tests/test_corpus_replay.py -v  # expect ImportError: project_from_cwd
-git stash pop
+# 1. Arm 2 must fail when rule 1 no longer wins.
+#    In src/jobd/config.py, inside resolve_effective_config, change
+#        if project not in projects:
+#    to
+#        if True:
+#    so a cwd match overrides a registered typed name.
+.venv/bin/pytest tests/test_corpus_replay.py -v      # arm 2 MUST fail
+git checkout -- src/jobd/config.py                   # revert (tree is clean, safe)
+
+# 2. Arm 1 must fail when the roots it depends on are gone.
+#    In tests/test_corpus_replay.py, temporarily set ROOTS = {}.
+.venv/bin/pytest tests/test_corpus_replay.py -v      # arm 1 MUST fail
+git checkout -- tests/test_corpus_replay.py
 ```
 
-Expected on the stashed tree: FAIL with `ImportError: cannot import name 'project_from_cwd'`. Then, on the restored tree, arm 1 must be the test that fails if you delete the `roots` from the `projects` fixture — check that too, since arm 1 passing for the wrong reason is the likelier defect.
+Confirm the tree is clean again afterwards (`git status --porcelain`) and that
+each mutation failed the arm it targets — arm 1 passing for the wrong reason is
+the likelier defect of the two.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
