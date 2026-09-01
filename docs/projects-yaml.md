@@ -712,8 +712,11 @@ Beyond `..`, matching stays purely lexical on the components of `cwd` as
 submitted — it does **not** resolve symlinks or bind mounts, and cannot: the
 broker matches paths that live on a worker's filesystem, which it has no
 access to, so a `realpath` would answer for the wrong disk. Collapsing `..`
-needs no filesystem and is correct on any; a symlink cannot be collapsed
-without one. So a symlink that points into a rooted directory from somewhere
+needs no filesystem; resolving a symlink does. The two agree except where a
+`..` steps back through a symlinked ancestor — `/a/link/../b` denotes `/a/b`
+lexically but something else on disk — and that one case is matched as
+written, deliberately: the only alternative reads a filesystem the broker
+cannot see. So a symlink that points into a rooted directory from somewhere
 else does not inherit that root's identity, and a root pointed at a symlink
 target will not match a job submitted against the symlink path. If a
 project's real working directory is reached through a symlink in practice,
