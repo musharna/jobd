@@ -39,6 +39,12 @@ projects:
       # via the same root, component-wise) — every typed name is `jepagame`
       # or a `pillarN...` sweep label.
       - /home/mjarnold/jepagame
+      # 12 jobs, one typed label (`pillar1l-emerge`), unregistered — every one
+      # of them falls to _default today. A sibling of the root above (not
+      # nested under it, so it needs its own entry), and unlike orchid-data/
+      # dreamer-chassis below this one is NOT forward-looking: it recovers
+      # real historical jobs today.
+      - /home/mjarnold/jepagame-1l-sweep
 
   # Tier 2 — active development
   project-c:
@@ -53,16 +59,22 @@ projects:
     priority: 60
     roots:
       # 335 jobs at /home/mjarnold/orchid-sdxl under `orchid-sdxl` plus a
-      # dozen `orchid-*`/`stage*` variants, and 17 more at the sibling
-      # /home/mjarnold/orchid-data — typed `orchid-sdxl` 17/17 times.
+      # dozen `orchid-*`/`stage*` variants — real historical recovery.
       - /home/mjarnold/orchid-sdxl
+      # Forward-looking, not evidence-backed: every one of the 17 jobs here
+      # was already typed `orchid-sdxl` exactly, so this root recovers ZERO
+      # historical jobs (rule 1 already handled all of them). Kept because
+      # the directory is 17/17 clean for this project — it exists so a
+      # future mistyped run from here lands right, not because the corpus
+      # needed it.
       - /home/mjarnold/orchid-data
   dreamer-chassis:
     priority: 60
     roots:
-      # 18/18 jobs at this cwd typed exactly `dreamer-chassis` today; the root
-      # is a forward-looking safety net for a future variant label typed from
-      # the same directory, same as the other three above.
+      # Forward-looking, not evidence-backed: all 18 jobs here were already
+      # typed `dreamer-chassis` exactly, so this root recovers ZERO
+      # historical jobs (rule 1 already handled all of them). Kept as a
+      # safety net for a future mistyped label from this directory.
       - /home/mjarnold/dreamer-chassis
 
   # Tier 3 — background / best-effort
