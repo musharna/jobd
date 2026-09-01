@@ -564,6 +564,13 @@ class EffectiveConfig:
     # this rather than req.project, so a name that resolved to a registered
     # project cannot be recorded under one spelling and priced under another.
     project: str
+    # The name exactly as the caller typed it. `project` above may differ: by
+    # folding (rule 1), or because cwd supplied the identity (rule 2). Kept so
+    # the Job row can record what a human will search for.
+    project_label: str
+    # The root that supplied the identity, when cwd did. None when the typed
+    # name was already registered, or when nothing matched.
+    matched_root: str | None
 
 
 def resolve_effective_config(
@@ -582,7 +589,13 @@ def resolve_effective_config(
     # and the Job row /submit writes then agree by construction; matching in
     # each consumer instead is how `ARFDSynInt` got priced as an unknown
     # project while `arfdsynint` sat registered at 65.
-    project = canonical_project_name(projects, req.project)
+    project_label = req.project
+    project = canonical_project_name(projects, project_label)
+    matched_root: str | None = None
+    if project not in projects:
+        hit = project_from_cwd(projects, req.cwd)
+        if hit is not None:
+            project, matched_root = hit
     proj_defaults = resolve_project_defaults(projects, project)
     known_project = project in projects
 
@@ -707,4 +720,6 @@ def resolve_effective_config(
         escalate_to_arc=FieldResolution(value=arc_value, source=arc_source),
         unknown_project_warning=unknown_project_warning,
         project=project,
+        project_label=project_label,
+        matched_root=matched_root,
     )
