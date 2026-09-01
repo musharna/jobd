@@ -35,6 +35,12 @@ class Job(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project: Mapped[str] = mapped_column(String(100), index=True)
+    # The name as the submitter typed it, when it differs from `project` above.
+    # `project` is the SCHEDULING identity (which projects.yaml row prices this
+    # job); this is the free-text run label a human searches for. NULL means the
+    # two are the same, which is why this needed no backfill: every row that
+    # predates the column is already correct under that reading.
+    project_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     profile: Mapped[str | None] = mapped_column(String(100), nullable=True)
     host_pin: Mapped[str] = mapped_column(String(50), default="any")
     priority: Mapped[int] = mapped_column(Integer, index=True)
@@ -202,6 +208,7 @@ _JOB_ADDS = [
     ("array_size", "INTEGER"),
     ("reconcile_misses", "INTEGER DEFAULT 0"),
     ("env_scrubbed_at", "DATETIME"),
+    ("project_label", "VARCHAR(100)"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),
