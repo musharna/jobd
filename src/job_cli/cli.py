@@ -560,8 +560,10 @@ def _print_resolved(resolved: dict) -> None:
     # when rule 2 fired: `matched_root` is None whenever cwd was not consulted.
     matched_root = resolved.get("matched_root")
     if matched_root:
-        label = resolved.get("project_label")
-        typer.echo(f"  identity from cwd: root {matched_root} (submitted as {label})")
+        # Not `label`: that name is already bound to a `str` by the row loop
+        # above, and rebinding it to an `Any | None` is a type error.
+        submitted_as = resolved.get("project_label")
+        typer.echo(f"  identity from cwd: root {matched_root} (submitted as {submitted_as})")
 
 
 def _stream_wait(job_id: int) -> None:
