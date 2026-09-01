@@ -391,6 +391,28 @@ def test_submit_identity_note_goes_to_stderr(monkeypatch):
     assert "identity from cwd" in r.stderr
 
 
+def test_submit_identity_note_states_only_what_it_can_observe(monkeypatch):
+    """The note must not name a mechanism the CLI cannot verify.
+
+    When two registered projects fold onto the same key, `canonical_project_name`
+    REFUSES the fold and cwd supplies the identity -- yet the two names still
+    fold together, so a client-side `project_key` comparison reads exactly as it
+    does for a real fold. Claiming the fold caused it sends an operator to a
+    mechanism that did not fire, which is the failure this note exists to avoid.
+    """
+    r = _submit_with_response(
+        monkeypatch,
+        {"id": 9, "project": "foo-bar", "project_label": "foo_bar"},
+    )
+    assert r.exit_code == 0, r.output
+    # Positive control, in the same test as the negative one below: a note that
+    # never rendered at all would satisfy a bare `not in` assertion.
+    assert "foo_bar -> foo-bar" in r.stderr
+    assert "folded" in r.stderr
+    # The guard: an observation about the names, not a claim about the cause.
+    assert "folded onto the registered spelling" not in r.stderr
+
+
 def test_submit_folded_spelling_does_not_claim_the_cwd_supplied_it(monkeypatch):
     """`Orchid_SDXL` -> `orchid-sdxl` is case/`-`_`_` FOLDING by
     `canonical_project_name`; cwd was never consulted. Saying "identity from

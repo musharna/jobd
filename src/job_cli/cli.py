@@ -363,17 +363,26 @@ def _project_substitution_note(label: str | None, project: str | None) -> str | 
     """One line explaining why the scheduling project is not what was typed.
 
     Two different mechanisms can substitute a name, and naming the wrong one
-    sends an operator to the wrong file. `canonical_project_name` folds case
-    and `-`/`_` onto a REGISTERED spelling (`Orchid_SDXL` -> `orchid-sdxl`);
-    cwd was never consulted, so "identity from cwd" would point at `roots:`,
-    which had nothing to do with it. `project_key` is the same fold the broker
-    applies, so asking it here discriminates the two client-side rather than
-    guessing from the strings.
+    sends an operator to the wrong file: `canonical_project_name` folds case
+    and `-`/`_` onto a REGISTERED spelling (`Orchid_SDXL` -> `orchid-sdxl`)
+    without ever consulting cwd, so "identity from cwd" would point at
+    `roots:`, which had nothing to do with it.
+
+    So this line reports what it can OBSERVE -- that the two names fold
+    together -- rather than which mechanism caused the substitution, which it
+    cannot. The response carries the two names and nothing else: `matched_root`
+    is not a column on the job row, and putting it on `JobInfo` would make
+    every other route report `null` for a job whose identity did come from cwd.
+    Nor are the two separable by inspection here: when two registered projects
+    fold onto the same key `canonical_project_name` REFUSES the fold and cwd
+    decides, yet the names still fold together, so a `project_key` comparison
+    reads exactly as it does for a real fold. `job submit --explain` carries
+    `matched_root` and answers the question exactly.
     """
     if not label or not project or label == project:
         return None
     if project_key(label) == project_key(project):
-        return f"project: {label} -> {project}  (folded onto the registered spelling)"
+        return f"project: {label} -> {project}  (same name once case and -/_ are folded)"
     return f"project: {label} -> {project}  (identity from cwd)"
 
 

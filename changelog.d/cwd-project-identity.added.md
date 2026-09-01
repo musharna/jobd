@@ -32,9 +32,11 @@
     warning: nothing went wrong, and a substitution that is invisible in the event stream
     is one nobody can audit after the fact.
   - The `job submit` substitution note goes to **stderr** (stdout carries the submit JSON
-    alone, so `job submit ... | jq .id` parses) and distinguishes its two causes: a name
-    folded onto a registered spelling by case or `-`/`_` never consulted cwd, and saying
-    otherwise sent operators to read `roots:` for a substitution `roots:` did not cause.
+    alone, so `job submit ... | jq .id` parses). It reports what it can observe — that the
+    typed name and the scheduling one fold together, or that they do not and cwd supplied
+    the identity — rather than naming a mechanism it cannot verify: when two registered
+    projects fold onto the same key the fold is refused and cwd decides, yet the names
+    still fold together. `job submit --explain` carries `matched_root` and answers it.
   - Path matching now collapses `..` lexically before comparing components. It previously
     did not, so `/home/mjarnold/jepagame/../../tmp` — a job actually running in `/tmp` —
     matched a root of `/home/mjarnold/jepagame` and was priced at that project's `78`.
