@@ -24,6 +24,23 @@ Arm 1's "expected project" is ALSO computed independently of `project_from_cwd`
 `project_from_cwd` what it expects and then checked the resolver's answer
 against that same (mutated) function's output, a broken `project_from_cwd`
 would corrupt both sides identically and the comparison would still pass.
+
+One honest limit remains, and it belongs here rather than only in a review
+ledger: on THIS corpus, arm 2 passes vacuously against a precedence
+inversion (rule 2 winning over rule 1) -- 0 of its 1129 rule-1 jobs diverge
+under that mutation, because no registered project's real job history has a
+cwd crossing into a DIFFERENT registered project's root. People run their
+jobs from their own project's directory, so the corpus never exercises the
+case arm 2 would need to catch that specific regression. The discrimination
+for that regression lives in the synthetic tests instead --
+`tests/unit/test_cwd_identity_resolution.py` explicitly, plus
+`tests/unit/test_cwd_identity_event.py` and
+`tests/unit/test_cwd_identity_resolve_api.py` -- which construct the
+crossing case by hand. This file's contribution is real-world BREADTH (249
+distinct pairs, 3,608 jobs), not that discrimination. A future refresh of
+the CSV could start containing such a row, at which point arm 2 gains real
+teeth against a precedence inversion too; nobody should add one by hand to
+force that.
 """
 
 import csv
