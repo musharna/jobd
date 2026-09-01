@@ -432,6 +432,12 @@ KNOWN_EVENTS = frozenset(
         "serialization_warning",
         "gpu_contention_warning",
         "sweep_warning",
+        # cwd supplied a job's scheduling identity because the typed name was
+        # not a registered project. Distinct from `unknown_project` (which is
+        # now the strictly-worse case: nothing identified the job at all), so a
+        # rising rate here reads as "roots are working" while a rising rate
+        # there still reads as "someone's work is being priced at 40".
+        "cwd_identity_applied",
         # The sweep declined to run its time-based terminal phases because the
         # broker had not been observing the interval it would otherwise have
         # reasoned about (fresh start, or a suspend/stall gap). Audit H-1.

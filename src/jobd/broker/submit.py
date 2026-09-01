@@ -351,6 +351,20 @@ def submit_job(
                 preemptible=preemptible,
                 warning=warning_text,
             )
+            # Not a warning -- nothing went wrong -- so this sits beside
+            # job_submitted rather than inside the `if warning_text:` block
+            # below. Per member, like job_submitted: every member of an array
+            # shares the identity, and a per-job count is what the metric means.
+            if eff.matched_root is not None:
+                _emit_event(
+                    logs_dir,
+                    "cwd_identity_applied",
+                    source="broker",
+                    job_id=jid,
+                    project=project,
+                    project_label=eff.project_label,
+                    matched_root=eff.matched_root,
+                )
             if warning_text:
                 _emit_event(
                     logs_dir,
