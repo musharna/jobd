@@ -274,7 +274,7 @@ sentinel (including the bools), because a merge cannot otherwise distinguish "th
 project said nothing" from "the project said `false`".
 
 This was `projects.get(name) or projects.get("_default")` — an either/or — until
-2026-07-14. A project *with* an entry never saw `_default.defaults`, so the block
+2026-07-14. A project _with_ an entry never saw `_default.defaults`, so the block
 `config/projects.yaml` calls "the FLEET-WIDE hang-guard" (`idle_timeout_s`,
 `max_wall_s` — the zombie reaper) reached only projects that were **not** configured.
 Registering 32 projects to give them priorities disarmed the hang-guard on all 32.
@@ -611,3 +611,133 @@ reload` is sufficient.
   schema (symmetry with other fields) but the loader uses the top-level
   `priority` key as the canonical source; `defaults.priority` only applies
   when the top-level is absent.
+
+---
+
+## 10. `roots:` — cwd-derived project identity
+
+### The problem
+
+`--project` is free text, chosen once at submit time and typed by a human
+every time after. A directory does not change; the spelling a person types
+for it does — `pillar2a1_sweep`, `arf-promoter`, `orchid-sdxl-stage4b` are
+all real, one-off run labels for jobs that in every other sense belong to
+one long-running project. Each of those typos-that-aren't-typos used to fall
+through to `_default`, at `_default`'s priority, with no warning anyone
+reads twice. `roots:` gives a project a second way to be recognized: not by
+what the caller typed, but by where the job runs from.
+
+### Schema
+
+```yaml
+projects:
+  jepagame:
+    priority: 78
+    roots:
+      - /home/mjarnold/jepagame
+```
+
+`roots` is a top-level key, a sibling of `priority` and `defaults:`, not
+nested inside `defaults:`. It lives outside `defaults:` on purpose: a
+`defaults:` key an old broker doesn't recognize is silently dropped (that is
+the right behavior for a forward-compatible per-job default), but a dropped
+root doesn't degrade the feature, it removes it — invisibly, on exactly the
+machine whose config is wrong. `roots:` is validated hard instead: each
+entry must be an absolute path (a relative path raises), a string (not an
+int, list, etc.), and never `/` — a root of `/` would contain every cwd on
+the fleet, silently handing this one project every otherwise-unidentified
+job, `/tmp` scratch runs included. Any of those raises at `load_projects`
+time rather than being dropped, so a bad root is caught at reload/broker
+start, not discovered later as a job that quietly ran at the wrong
+priority. See `tests/test_projects_yaml.py::test_a_bad_root_is_a_load_error_not_a_silent_drop`.
+
+Trailing slashes are normalized away (`/home/mjarnold/jepagame/` and
+`/home/mjarnold/jepagame` are the same root) but nothing else about a root
+is inferred — see path matching, below.
+
+### Resolution order — three rules
+
+The identity for a job's `project` field is decided by trying three rules in
+order, and stopping at the first that produces an answer:
+
+1. **The typed name, registered.** `req.project` is folded (case and `-`/`_`
+   insensitive — see `canonical_project_name`) and checked against the
+   registered projects. If that fold lands on a registered project, that
+   project's priority and defaults apply, in full, and **`cwd` is never
+   consulted.** This is the safety property the other two rules sit behind:
+   a directory's `roots:` can never override an operator's explicit,
+   correctly-spelled project selection. Rule 2 only ever gets a turn when
+   rule 1 comes up empty — a job typed `--project jepagame` from inside
+   `/home/mjarnold/orchid-sdxl` is `jepagame`, full stop, not a fight between
+   the typed name and the cwd.
+2. **The cwd, rooted.** Only when rule 1 found nothing: every registered
+   project's `roots` are checked against `cwd`. The **deepest matching root
+   wins** (most path components), so a project nested inside a parent's tree
+   keeps its own identity rather than inheriting the parent's. If the
+   deepest root is claimed by more than one project, that is treated as
+   unresolvable, not as a coin flip — see "Ambiguous roots," below.
+3. **Neither.** Falls through to `_default`; if `_default` is registered,
+   `resolve_effective_config` also sets `unknown_project_warning` naming the
+   typed project. Nothing new here — this is the same fallback that existed
+   before `roots:`.
+
+`_default` itself is never eligible for a root under rule 2 — it is the
+fallback priority row, not a project, and letting it carry roots would
+silently convert every unmatched job into a confidently-identified one
+(`project_from_cwd` skips it explicitly).
+
+### Path matching: component-wise, not textual, and not symlink-aware
+
+A root matches when `cwd` equals the root or lives under it, compared
+**path-component by path-component** — not `cwd.startswith(root)`. That
+distinction is the whole reason this is safe to ship: a bare string prefix
+would say `/home/mjarnold/jepagame2` is inside `/home/mjarnold/jepagame`,
+handing a sibling directory (and whatever unrelated project lives there) its
+neighbour's priority. Comparing tuples of path parts (`_path_is_within` in
+`src/jobd/config.py`) makes the boundary structural: `/home/mjarnold/jepagame2`
+and `/home/mjarnold/jepagame/../jepagame2` do not match a root of
+`/home/mjarnold/jepagame`; `/home/mjarnold/jepagame/sweeps` does.
+
+Matching is purely lexical on the components of `cwd` as submitted — it does
+not resolve symlinks, `..`, or bind mounts. A symlink that points into a
+rooted directory from somewhere else does not inherit that root's identity,
+and a root pointed at a symlink target will not match a job submitted
+against the symlink path. If a project's real working directory is reached
+through a symlink in practice, root the symlink path itself (or every path
+a caller might plausibly type), not just the target.
+
+### Ambiguous roots
+
+Two projects can, by editing error, both list a root that contains the same
+`cwd` — e.g. one project's root is an ancestor directory of another's, and a
+job runs from a path both consider theirs at equal depth. When that happens
+`project_from_cwd` does not guess: it returns no identity at all (the job
+falls through to rule 3, `_default`) and logs a warning naming both
+projects and the contested `cwd`. This mirrors exactly what
+`canonical_project_name` already does when two registered names fold
+together — guessing in either case would run someone's jobs at a
+neighbour's priority, which is the exact failure this feature exists to
+prevent. Fix it by narrowing one project's root to a subdirectory, or by
+merging the two projects.
+
+### `--project` is still required
+
+`roots:` changes what a submitted job's identity can come from; it does not
+change whether `--project` must be given. `--project` remains a required
+flag on every `job submit`. What changes is what its value _means_: when the
+typed name resolves via rule 2 instead of rule 1, the typed spelling is kept
+as the job's `project_label` (what a human searches for) while `project`
+(what gets priced and reported) is the cwd-derived identity. Both are
+visible on the Job row and in `job --explain` / `POST /resolve` output
+(`matched_root` is set to the root that supplied the identity whenever rule
+2 fired, and is `None` otherwise).
+
+### The roots shipped in this file
+
+Every root currently in `config/projects.yaml` was derived by replaying
+`tests/data/project_cwd_corpus.csv` — 3,608 real submits, 249 distinct
+`(project, cwd)` pairs — ranked by job volume per `cwd`, and added only
+where every project name ever typed from that directory read as a variant
+of one project. See the comments beside each project's `roots:` entry for
+the specific evidence, and `tests/test_corpus_replay.py` for the same
+corpus replayed end-to-end through the real resolver.

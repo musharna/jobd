@@ -9,6 +9,37 @@ projects:
   project-a: { priority: 80 }
   project-b: { priority: 75 }
 
+  # `roots:` gives a project a cwd-derived identity for a job whose typed
+  # --project is not itself registered (rule 2; see docs/projects-yaml.md).
+  # Every root below was picked by replaying tests/data/project_cwd_corpus.csv
+  # (3,608 real submits, 249 distinct project/cwd pairs) through
+  # `.venv/bin/python -c` grouped by cwd: a directory earned a root only when
+  # EVERY project name ever typed from it read as a variant of one project —
+  # never a shared scratch path, and never a directory the corpus also shows
+  # in the hands of a genuinely different project. `tests/test_corpus_replay.py`
+  # replays the same corpus against the resolver these roots feed.
+  agrigen:
+    priority: 80
+    roots:
+      # 287 jobs across agrigen's own tree (backend + worktrees), all typed
+      # `agrigen` or an `agrigen-*`/`phase*` variant. Deliberately NOT
+      # including /home/mjarnold/trellis2, .../hunyuan3d or .../instantmesh —
+      # each is >=97% agrigen-typed in the corpus too (trellis2 alone is the
+      # single largest cwd in the whole corpus, 1209 jobs), but all three are
+      # generic third-party tool checkouts (TRELLIS, Hunyuan3D, InstantMesh);
+      # a differently-owned future clone at the same path would silently
+      # inherit agrigen's identity. Revisit if that risk turns out to be
+      # theoretical.
+      - /home/mjarnold/agrigen
+  jepagame:
+    priority: 78
+    roots:
+      # 187 jobs directly in /home/mjarnold/jepagame plus several hundred more
+      # in its .claude/worktrees/* and .worktrees/* subdirectories (matched
+      # via the same root, component-wise) — every typed name is `jepagame`
+      # or a `pillarN...` sweep label.
+      - /home/mjarnold/jepagame
+
   # Tier 2 — active development
   project-c:
     priority: 60
@@ -18,6 +49,21 @@ projects:
       # grace window) — only safe for jobs that checkpoint. See docs/preemption.md.
       preemptible: true
       checkpoint_grace_s: 60
+  orchid-sdxl:
+    priority: 60
+    roots:
+      # 335 jobs at /home/mjarnold/orchid-sdxl under `orchid-sdxl` plus a
+      # dozen `orchid-*`/`stage*` variants, and 17 more at the sibling
+      # /home/mjarnold/orchid-data — typed `orchid-sdxl` 17/17 times.
+      - /home/mjarnold/orchid-sdxl
+      - /home/mjarnold/orchid-data
+  dreamer-chassis:
+    priority: 60
+    roots:
+      # 18/18 jobs at this cwd typed exactly `dreamer-chassis` today; the root
+      # is a forward-looking safety net for a future variant label typed from
+      # the same directory, same as the other three above.
+      - /home/mjarnold/dreamer-chassis
 
   # Tier 3 — background / best-effort
   project-d: { priority: 40 }
