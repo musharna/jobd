@@ -698,13 +698,27 @@ neighbour's priority. Comparing tuples of path parts (`_path_is_within` in
 and `/home/mjarnold/jepagame/../jepagame2` do not match a root of
 `/home/mjarnold/jepagame`; `/home/mjarnold/jepagame/sweeps` does.
 
-Matching is purely lexical on the components of `cwd` as submitted — it does
-not resolve symlinks, `..`, or bind mounts. A symlink that points into a
-rooted directory from somewhere else does not inherit that root's identity,
-and a root pointed at a symlink target will not match a job submitted
-against the symlink path. If a project's real working directory is reached
-through a symlink in practice, root the symlink path itself (or every path
-a caller might plausibly type), not just the target.
+`..` is collapsed before the comparison, lexically (`os.path.normpath`), so
+the components compared are the ones the path actually denotes. Without that
+step the example above went the other way: `/home/mjarnold/jepagame/../jepagame2`
+led with a literal `jepagame` component and matched, and worse,
+`/home/mjarnold/jepagame/../../tmp` — a job really running in `/tmp` — priced
+at jepagame's `78`. `cwd` is free text on the wire (`--cwd` is a CLI flag,
+`JobSubmit.cwd` a plain string), so that was reachable from a caller, not
+just in theory. A root containing a `..` component is rejected at load
+instead: a root is an identity boundary, so write the directory it denotes.
+
+Beyond `..`, matching stays purely lexical on the components of `cwd` as
+submitted — it does **not** resolve symlinks or bind mounts, and cannot: the
+broker matches paths that live on a worker's filesystem, which it has no
+access to, so a `realpath` would answer for the wrong disk. Collapsing `..`
+needs no filesystem and is correct on any; a symlink cannot be collapsed
+without one. So a symlink that points into a rooted directory from somewhere
+else does not inherit that root's identity, and a root pointed at a symlink
+target will not match a job submitted against the symlink path. If a
+project's real working directory is reached through a symlink in practice,
+root the symlink path itself (or every path a caller might plausibly type),
+not just the target.
 
 ### Ambiguous roots
 
@@ -727,10 +741,23 @@ change whether `--project` must be given. `--project` remains a required
 flag on every `job submit`. What changes is what its value _means_: when the
 typed name resolves via rule 2 instead of rule 1, the typed spelling is kept
 as the job's `project_label` (what a human searches for) while `project`
-(what gets priced and reported) is the cwd-derived identity. Both are
-visible on the Job row and in `job --explain` / `POST /resolve` output
-(`matched_root` is set to the root that supplied the identity whenever rule
-2 fired, and is `None` otherwise).
+(what gets priced and reported) is the cwd-derived identity.
+
+Where each is visible differs, and the difference matters when you are
+debugging:
+
+- `project` and `project_label` are both persisted on the Job row and
+  returned in `JobInfo` (`project_label` is `null` when the two agree, so
+  the field reads as "something was substituted here"). `job list --project`
+  matches **either**, so `job list --project pillar2a1_sweep` still finds
+  the job that was priced as `jepagame` — though the rendered table column
+  shows `project`, the scheduling identity.
+- `matched_root` — the root that supplied the identity — is **not** on the
+  Job row. It is computed at resolution time and surfaced in exactly two
+  places: the `POST /resolve` response (so `job submit --explain` prints
+  it, alongside the typed label) and the `cwd_identity_applied` event
+  recorded when rule 2 fires. It is `None`/absent whenever cwd was not
+  consulted.
 
 ### The roots shipped in this file
 
