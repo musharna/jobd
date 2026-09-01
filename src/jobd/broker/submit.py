@@ -228,6 +228,8 @@ def submit_job(
                 "would_use_worker": would_use_worker,
                 "array_count": member_count,
                 "validation": {
+                    "effective_project": project,
+                    "effective_matched_root": eff.matched_root,
                     "effective_priority": priority,
                     "effective_host_pin": host_pin,
                     "effective_preemptible": preemptible,

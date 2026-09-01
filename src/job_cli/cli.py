@@ -345,6 +345,9 @@ def submit(
                 typer.echo(f"--- member {jid} ---", err=True)
                 _stream_wait(jid)
         return
+    label = resp.get("project_label")
+    if label and label != resp.get("project"):
+        typer.echo(f"project: {label} -> {resp['project']}  (identity from cwd)")
     if eta:
         banner = _eta_banner_line(resp)
         if banner:

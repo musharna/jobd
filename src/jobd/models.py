@@ -200,6 +200,10 @@ class JobSubmit(BaseModel):
 class JobInfo(BaseModel):
     id: int
     project: str
+    # The name the submitter typed, when it differs from `project`. None when
+    # they agree. Nullable rather than always-populated so the field reads as
+    # "something was substituted here", which is the only case worth showing.
+    project_label: str | None = None
     profile: str | None
     host_pin: str
     priority: int
@@ -523,6 +527,8 @@ class ResolvedConfig(BaseModel):
     """
 
     project: str
+    project_label: str
+    matched_root: str | None = None
     effective_priority: FieldResolution
     effective_host_pin: FieldResolution
     effective_max_wall_s: FieldResolution
