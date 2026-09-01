@@ -92,6 +92,7 @@ def _to_info(job: Job, eta_ctx: dict | None = None, *, redact_env: bool = True) 
     info = JobInfo(
         id=job.id,
         project=job.project,
+        project_label=job.project_label,
         profile=job.profile,
         host_pin=job.host_pin,
         priority=job.priority,

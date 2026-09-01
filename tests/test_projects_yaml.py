@@ -8,6 +8,8 @@ test green.
 
 from __future__ import annotations
 
+from pathlib import Path, PurePosixPath
+
 import pytest
 import yaml
 
@@ -15,8 +17,10 @@ from jobd.broker.projects import _persist_projects
 from jobd.config import (
     ProjectDefaults,
     ProjectEntry,
+    _path_is_within,
     load_effective_projects,
     load_projects,
+    project_from_cwd,
 )
 
 
@@ -341,3 +345,85 @@ def test_valid_defaults_still_parse_bounds_inclusive(tmp_path):
     assert d.idle_timeout_s == 1
     assert d.checkpoint_grace_s == 300
     assert d.priority == 0
+
+
+def test_roots_are_parsed_and_normalized(tmp_path):
+    """A trailing slash is a spelling of the same directory, not a different
+    root — normalizing at load means the matcher never has to care."""
+    p = tmp_path / "projects.yaml"
+    p.write_text(
+        "projects:\n"
+        "  jepagame:\n"
+        "    priority: 78\n"
+        "    roots:\n"
+        "      - /home/mjarnold/jepagame/\n"
+        "      - /srv/jepagame\n"
+    )
+    projects = load_projects(p)
+    assert projects["jepagame"].roots == ["/home/mjarnold/jepagame", "/srv/jepagame"]
+
+
+def test_a_project_without_roots_gets_an_empty_list(tmp_path):
+    """Positive control: roots is optional, and its absence must not change
+    how an ordinary entry loads."""
+    p = tmp_path / "projects.yaml"
+    p.write_text("projects:\n  plain: { priority: 60 }\n")
+    projects = load_projects(p)
+    assert projects["plain"].roots == []
+    assert projects["plain"].priority == 60
+
+
+@pytest.mark.parametrize(
+    "bad, why",
+    [
+        ("roots: [relative/path]", "not absolute"),
+        ("roots: [17]", "not a string"),
+        ("roots: /home/mjarnold/x", "not a list"),
+        ("roots: ['/']", "filesystem root captures every job"),
+        ("roots: ['/home/mjarnold/x/../y']", "parent-dir component"),
+        ("roots: ['/home/mjarnold/..']", "parent-dir component"),
+    ],
+)
+def test_a_bad_root_is_a_load_error_not_a_silent_drop(tmp_path, bad, why):
+    """`defaults:` silently drops unknown keys by design. A dropped ROOT would
+    present to the operator as 'the feature just doesn't work on my machine',
+    so roots are validated loudly instead."""
+    p = tmp_path / "projects.yaml"
+    p.write_text(f"projects:\n  jepagame:\n    priority: 78\n    {bad}\n")
+    with pytest.raises(ValueError, match="roots"):
+        load_projects(p)
+
+
+# --- the config this repo actually ships ---------------------------------
+#
+# Nothing in the suite loaded `config/projects.yaml` itself, and `_parse_roots`
+# RAISES on a malformed root by design. So a typo in that file aborts broker
+# startup at boot while CI stays entirely green -- the failure lands on the
+# operator, not on the change that caused it. One load closes that gap.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_the_shipped_projects_yaml_parses():
+    projects = load_projects(_REPO_ROOT / "config" / "projects.yaml")
+    assert projects, "the shipped config must define at least one project"
+    for name, entry in projects.items():
+        for root in entry.roots:
+            assert root.startswith("/"), f"{name}: root {root!r} is not absolute"
+            assert ".." not in PurePosixPath(root).parts, f"{name}: root {root!r} has a '..'"
+
+
+def test_the_shipped_roots_resolve_as_intended():
+    """Behaviour, not an exact root list: editing the file must stay cheap.
+
+    Asserted here is the boundary property the whole feature rests on -- a
+    directory inside a shipped root takes that project's identity, and its
+    prefix-sharing sibling takes none.
+    """
+    projects = load_projects(_REPO_ROOT / "config" / "projects.yaml")
+    hit = project_from_cwd(projects, "/home/mjarnold/jepagame/sweeps/a")
+    assert hit is not None, "a path under a shipped root must resolve"
+    name, root = hit
+    assert name == "jepagame"
+    assert _path_is_within("/home/mjarnold/jepagame/sweeps/a", root)
+    assert project_from_cwd(projects, "/home/mjarnold/jepagame2") is None

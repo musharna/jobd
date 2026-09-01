@@ -15,7 +15,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sse_starlette.sse import EventSourceResponse
 
 from jobd.broker.admission import refuse_admission as refuse_admission_service
@@ -105,7 +105,11 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             if state_filter:
                 conds.append(Job.state == state_filter)
             if project:
-                conds.append(Job.project == project)
+                # Either name: the identity that priced the job, or the label
+                # the submitter typed. A human filtering by the label they used
+                # must still find their run after cwd supplied a different
+                # identity for it.
+                conds.append(or_(Job.project == project, Job.project_label == project))
             if warnings_only:
                 conds.append(Job.warning.is_not(None))
             if array_id is not None:

@@ -24,3 +24,6 @@ htmlcov/
 # swept in as gitlinks by `git add -A` during a release cut; happened once).
 .claude/worktrees/
 .hypothesis/
+
+# Subagent-driven-development scratch: per-plan ledgers, briefs, review packages.
+.superpowers/

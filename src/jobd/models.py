@@ -200,6 +200,10 @@ class JobSubmit(BaseModel):
 class JobInfo(BaseModel):
     id: int
     project: str
+    # The name the submitter typed, when it differs from `project`. None when
+    # they agree. Nullable rather than always-populated so the field reads as
+    # "something was substituted here", which is the only case worth showing.
+    project_label: str | None = None
     profile: str | None
     host_pin: str
     priority: int
@@ -432,6 +436,12 @@ KNOWN_EVENTS = frozenset(
         "serialization_warning",
         "gpu_contention_warning",
         "sweep_warning",
+        # cwd supplied a job's scheduling identity because the typed name was
+        # not a registered project. Distinct from `unknown_project` (which is
+        # now the strictly-worse case: nothing identified the job at all), so a
+        # rising rate here reads as "roots are working" while a rising rate
+        # there still reads as "someone's work is being priced at 40".
+        "cwd_identity_applied",
         # The sweep declined to run its time-based terminal phases because the
         # broker had not been observing the interval it would otherwise have
         # reasoned about (fresh start, or a suspend/stall gap). Audit H-1.
@@ -517,6 +527,8 @@ class ResolvedConfig(BaseModel):
     """
 
     project: str
+    project_label: str
+    matched_root: str | None = None
     effective_priority: FieldResolution
     effective_host_pin: FieldResolution
     effective_max_wall_s: FieldResolution

@@ -82,6 +82,10 @@ def submit_job(
     # registered project by case or -/_ is stored and reported under that
     # project, so it cannot be priced as one project and recorded as another.
     project = eff.project
+    # NULL when the label and the identity agree, so the column carries only
+    # genuine divergence and `job list --project X` on a plain submit still
+    # matches on `project` alone.
+    project_label = eff.project_label if eff.project_label != project else None
     priority = eff.priority.value
     host_pin = eff.host_pin.value
     preemptible = eff.preemptible.value
@@ -224,6 +228,8 @@ def submit_job(
                 "would_use_worker": would_use_worker,
                 "array_count": member_count,
                 "validation": {
+                    "effective_project": project,
+                    "effective_matched_root": eff.matched_root,
                     "effective_priority": priority,
                     "effective_host_pin": host_pin,
                     "effective_preemptible": preemptible,
@@ -249,6 +255,7 @@ def submit_job(
             member_env = render_env(req.env, subs) if is_array else req.env
             job = Job(
                 project=project,
+                project_label=project_label,
                 profile=req.profile,
                 host_pin=host_pin,
                 priority=priority,
@@ -346,6 +353,20 @@ def submit_job(
                 preemptible=preemptible,
                 warning=warning_text,
             )
+            # Not a warning -- nothing went wrong -- so this sits beside
+            # job_submitted rather than inside the `if warning_text:` block
+            # below. Per member, like job_submitted: every member of an array
+            # shares the identity, and a per-job count is what the metric means.
+            if eff.matched_root is not None:
+                _emit_event(
+                    logs_dir,
+                    "cwd_identity_applied",
+                    source="broker",
+                    job_id=jid,
+                    project=project,
+                    project_label=eff.project_label,
+                    matched_root=eff.matched_root,
+                )
             if warning_text:
                 _emit_event(
                     logs_dir,

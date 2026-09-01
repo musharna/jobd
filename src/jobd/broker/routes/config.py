@@ -140,6 +140,8 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             # will run as the registered `arfdsynint` rather than being handed
             # its own spelling back beside that project's priority.
             project=eff.project,
+            project_label=eff.project_label,
+            matched_root=eff.matched_root,
             effective_priority=eff.priority,
             effective_host_pin=eff.host_pin,
             effective_max_wall_s=eff.max_wall_s,

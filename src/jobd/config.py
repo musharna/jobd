@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field, fields
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import yaml
@@ -55,10 +56,15 @@ class ProjectDefaults:
 
 @dataclass
 class ProjectEntry:
-    """One row of projects.yaml: a base priority plus an optional defaults block."""
+    """One row of projects.yaml: a base priority, optional defaults, optional roots."""
 
     priority: int
     defaults: ProjectDefaults = field(default_factory=ProjectDefaults)
+    # Absolute directories this project owns. A submit whose typed name matches
+    # no registered project takes its identity from the deepest root containing
+    # its cwd. Top level rather than inside `defaults:` because a root is not a
+    # per-job field default — it is how the project is IDENTIFIED.
+    roots: list[str] = field(default_factory=list)
 
 
 # Keys recognized inside `defaults:` — anything else is silently dropped so
@@ -133,6 +139,52 @@ def _parse_defaults(raw: dict | None) -> ProjectDefaults:
     return ProjectDefaults(**kwargs)
 
 
+def _parse_roots(raw: object, project_name: str) -> list[str]:
+    """Validate and normalize a project's `roots:` list.
+
+    Raises rather than dropping. `_parse_defaults` silently ignores what it does
+    not recognize, which is right for forward-compatible per-job defaults: an
+    old broker meeting a new key should keep running. A root is different — it
+    is the identity mechanism itself, so a dropped one does not degrade the
+    feature, it removes it, and does so invisibly on exactly the machine whose
+    config is wrong.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"projects.yaml {project_name!r}: roots must be a list of absolute paths, "
+            f"got {type(raw).__name__}"
+        )
+    out: list[str] = []
+    for r in raw:
+        if not isinstance(r, str) or not r.startswith("/"):
+            raise ValueError(
+                f"projects.yaml {project_name!r}: roots entry {r!r} is not an absolute path"
+            )
+        norm = str(PurePosixPath(r))
+        if ".." in PurePosixPath(norm).parts:
+            # A root is a stable identity boundary, so a `..` in it is a config
+            # error, not a path to interpret. Collapsing it silently would
+            # accept two spellings of the same boundary and make `matched_root`
+            # -- the field an operator reads to learn WHY a job got a priority
+            # -- report a directory that is not the one that matched.
+            raise ValueError(
+                f"projects.yaml {project_name!r}: roots entry {r!r} contains '..'; "
+                f"write the directory it denotes"
+            )
+        if norm == "/":
+            # A root of "/" contains every cwd, so this one project would claim
+            # every otherwise-unidentified job on the fleet -- including /tmp
+            # scratch runs. Always a mistake, and a silent one: it produces a
+            # confidently wrong identity rather than no identity.
+            raise ValueError(
+                f"projects.yaml {project_name!r}: roots entry '/' would match every job"
+            )
+        out.append(norm)
+    return out
+
+
 def load_projects(path: Path | str) -> dict[str, ProjectEntry]:
     """Load projects.yaml into {name: ProjectEntry}.
 
@@ -155,7 +207,8 @@ def load_projects(path: Path | str) -> dict[str, ProjectEntry]:
         if not isinstance(cfg, dict) or "priority" not in cfg:
             continue
         defaults = _parse_defaults(cfg.get("defaults"))
-        out[name] = ProjectEntry(priority=int(cfg["priority"]), defaults=defaults)
+        roots = _parse_roots(cfg.get("roots"), name)
+        out[name] = ProjectEntry(priority=int(cfg["priority"]), defaults=defaults, roots=roots)
     if "_default" not in out:
         out["_default"] = ProjectEntry(priority=40)
     return out
@@ -366,6 +419,72 @@ def canonical_project_name(projects: dict[str, ProjectEntry], name: str) -> str:
     return name
 
 
+def _path_is_within(cwd: str, root: str) -> bool:
+    """True when `cwd` is `root` or lives underneath it, compared COMPONENT-WISE.
+
+    Not `cwd.startswith(root)`: that says `/home/mjarnold/jepagame2` is inside
+    `/home/mjarnold/jepagame`, which would hand a sibling project its
+    neighbour's priority. Comparing tuples of path components makes the
+    boundary structural rather than textual.
+
+    `..` is collapsed first, LEXICALLY (`os.path.normpath`). Without it the
+    components lied about where the job runs: measured against the shipped
+    config, `/home/mjarnold/jepagame/../../tmp` matched a root of
+    `/home/mjarnold/jepagame`, so a job actually running in /tmp priced at
+    jepagame's 78. `--cwd` is a free-text CLI flag and `JobSubmit.cwd` is a
+    bare `str` with no normalization, so that path is caller-reachable.
+
+    Lexical is the RIGHT normalization here, not a weaker stand-in for
+    `Path.resolve()`: the broker matches paths belonging to a worker's
+    filesystem, which it cannot see, so resolving symlinks would be both
+    unavailable and wrong (it would answer for the broker's disk). Collapsing
+    `..` needs no filesystem and is correct on any. Symlinks and bind mounts
+    remain unresolved by design — see docs/projects-yaml.md.
+    """
+    c = PurePosixPath(os.path.normpath(cwd)).parts
+    r = PurePosixPath(os.path.normpath(root)).parts
+    return len(c) >= len(r) and c[: len(r)] == r
+
+
+def project_from_cwd(projects: dict[str, ProjectEntry], cwd: str) -> tuple[str, str] | None:
+    """Identify a project by the directory a job runs in.
+
+    Returns (project_name, matched_root), or None when nothing matches or the
+    match is ambiguous. The DEEPEST root wins, so a sub-project nested inside a
+    parent's tree keeps its own identity.
+
+    `_default` is skipped: it is the fallback priority row, not a project, and
+    letting it carry roots would silently convert every unmatched job into a
+    confidently-identified one.
+    """
+    matches: list[tuple[int, str, str]] = []
+    for name, entry in projects.items():
+        if name == "_default":
+            continue
+        for root in entry.roots:
+            if _path_is_within(cwd, root):
+                matches.append((len(PurePosixPath(root).parts), name, root))
+    if not matches:
+        return None
+
+    best = max(depth for depth, _, _ in matches)
+    finalists = sorted({(name, root) for depth, name, root in matches if depth == best})
+    distinct_projects = {name for name, _ in finalists}
+    if len(distinct_projects) > 1:
+        # Two projects claim the same directory, so there is no single right
+        # answer. Say so and yield nothing, exactly as canonical_project_name
+        # does for an ambiguous fold: guessing here runs someone's jobs at a
+        # neighbour's priority, which is the failure this matching prevents.
+        log.warning(
+            "cwd %r is claimed by more than one project (%s) — no cwd identity "
+            "applied; narrow their roots or merge the projects",
+            cwd,
+            ", ".join(sorted(distinct_projects)),
+        )
+        return None
+    return finalists[0]
+
+
 def project_key_collisions(projects: dict[str, ProjectEntry]) -> dict[str, list[str]]:
     """Registered names that differ only by case or `-`/`_`, keyed by their fold.
 
@@ -470,6 +589,13 @@ class EffectiveConfig:
     # this rather than req.project, so a name that resolved to a registered
     # project cannot be recorded under one spelling and priced under another.
     project: str
+    # The name exactly as the caller typed it. `project` above may differ: by
+    # folding (rule 1), or because cwd supplied the identity (rule 2). Kept so
+    # the Job row can record what a human will search for.
+    project_label: str
+    # The root that supplied the identity, when cwd did. None when the typed
+    # name was already registered, or when nothing matched.
+    matched_root: str | None
 
 
 def resolve_effective_config(
@@ -488,7 +614,13 @@ def resolve_effective_config(
     # and the Job row /submit writes then agree by construction; matching in
     # each consumer instead is how `ARFDSynInt` got priced as an unknown
     # project while `arfdsynint` sat registered at 65.
-    project = canonical_project_name(projects, req.project)
+    project_label = req.project
+    project = canonical_project_name(projects, project_label)
+    matched_root: str | None = None
+    if project not in projects:
+        hit = project_from_cwd(projects, req.cwd)
+        if hit is not None:
+            project, matched_root = hit
     proj_defaults = resolve_project_defaults(projects, project)
     known_project = project in projects
 
@@ -613,4 +745,6 @@ def resolve_effective_config(
         escalate_to_arc=FieldResolution(value=arc_value, source=arc_source),
         unknown_project_warning=unknown_project_warning,
         project=project,
+        project_label=project_label,
+        matched_root=matched_root,
     )
