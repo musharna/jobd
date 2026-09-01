@@ -59,10 +59,19 @@ from jobd.models import JobSubmit
 
 CORPUS = Path(__file__).parent / "data" / "project_cwd_corpus.csv"
 
-# The roots this feature ships with, mirroring config/projects.yaml.
+# Every root this feature ships with, mirroring config/projects.yaml. An
+# earlier version of this table listed three of the six while still claiming
+# to mirror the shipped config, which quietly narrowed arm 1 from 214 jobs to
+# 179: agrigen fell through `ROOTS.get(name, [])` to no roots at all, so the
+# replay could not have caught a regression in it, and the second root of
+# jepagame and of orchid-sdxl went unexercised too. (agrigen's own tree holds
+# 287 corpus jobs, but 264 of them are typed `agrigen` exactly and so are
+# rule-1 business; 23 are the rule-2 recoveries at stake here.) Add a root
+# here whenever one is added there.
 ROOTS = {
-    "jepagame": ["/home/mjarnold/jepagame"],
-    "orchid-sdxl": ["/home/mjarnold/orchid-sdxl"],
+    "agrigen": ["/home/mjarnold/agrigen"],
+    "jepagame": ["/home/mjarnold/jepagame", "/home/mjarnold/jepagame-1l-sweep"],
+    "orchid-sdxl": ["/home/mjarnold/orchid-sdxl", "/home/mjarnold/orchid-data"],
     "dreamer-chassis": ["/home/mjarnold/dreamer-chassis"],
 }
 
@@ -72,6 +81,16 @@ def corpus():
     with CORPUS.open() as fh:
         rows = [(r["project"], r["cwd"], int(r["n"])) for r in csv.DictReader(fh)]
     assert len(rows) > 200, f"corpus looks truncated: {len(rows)} rows"
+    # `_owning_project` below compares path components exactly as written,
+    # while production `_path_is_within` first collapses `..` lexically.
+    # Those agree today only because no cwd in this corpus contains a `..`
+    # segment. A refresh that introduced one would break that agreement
+    # silently, so trip loudly here rather than let the oracle drift.
+    dotdot = [c for _p, c, _n in rows if ".." in PurePosixPath(c).parts]
+    assert not dotdot, (
+        f"{len(dotdot)} cwd(s) contain '..' (e.g. {dotdot[0]!r}); teach "
+        "`_owning_project` to normalize before trusting it as an oracle"
+    )
     return rows
 
 
@@ -102,7 +121,8 @@ def _owning_project(projects, cwd):
     -- it does not need `project_from_cwd`'s deepest-root/ambiguity handling
     to agree with it on this fixture. The point is that a mutation to
     `project_from_cwd` cannot corrupt this oracle, since this function never
-    calls it."""
+    calls it. It does NOT collapse `..`; the corpus fixture asserts no cwd
+    needs that."""
     c = PurePosixPath(cwd).parts
     for name, entry in projects.items():
         if name == "_default":
