@@ -408,6 +408,58 @@ def canonical_project_name(projects: dict[str, ProjectEntry], name: str) -> str:
     return name
 
 
+def _path_is_within(cwd: str, root: str) -> bool:
+    """True when `cwd` is `root` or lives underneath it, compared COMPONENT-WISE.
+
+    Not `cwd.startswith(root)`: that says `/home/mjarnold/jepagame2` is inside
+    `/home/mjarnold/jepagame`, which would hand a sibling project its
+    neighbour's priority. Comparing tuples of path components makes the
+    boundary structural rather than textual.
+    """
+    c = PurePosixPath(cwd).parts
+    r = PurePosixPath(root).parts
+    return len(c) >= len(r) and c[: len(r)] == r
+
+
+def project_from_cwd(projects: dict[str, ProjectEntry], cwd: str) -> tuple[str, str] | None:
+    """Identify a project by the directory a job runs in.
+
+    Returns (project_name, matched_root), or None when nothing matches or the
+    match is ambiguous. The DEEPEST root wins, so a sub-project nested inside a
+    parent's tree keeps its own identity.
+
+    `_default` is skipped: it is the fallback priority row, not a project, and
+    letting it carry roots would silently convert every unmatched job into a
+    confidently-identified one.
+    """
+    matches: list[tuple[int, str, str]] = []
+    for name, entry in projects.items():
+        if name == "_default":
+            continue
+        for root in entry.roots:
+            if _path_is_within(cwd, root):
+                matches.append((len(PurePosixPath(root).parts), name, root))
+    if not matches:
+        return None
+
+    best = max(depth for depth, _, _ in matches)
+    finalists = sorted({(name, root) for depth, name, root in matches if depth == best})
+    distinct_projects = {name for name, _ in finalists}
+    if len(distinct_projects) > 1:
+        # Two projects claim the same directory, so there is no single right
+        # answer. Say so and yield nothing, exactly as canonical_project_name
+        # does for an ambiguous fold: guessing here runs someone's jobs at a
+        # neighbour's priority, which is the failure this matching prevents.
+        log.warning(
+            "cwd %r is claimed by more than one project (%s) — no cwd identity "
+            "applied; narrow their roots or merge the projects",
+            cwd,
+            ", ".join(sorted(distinct_projects)),
+        )
+        return None
+    return finalists[0]
+
+
 def project_key_collisions(projects: dict[str, ProjectEntry]) -> dict[str, list[str]]:
     """Registered names that differ only by case or `-`/`_`, keyed by their fold.
 
