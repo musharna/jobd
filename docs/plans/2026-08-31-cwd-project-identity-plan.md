@@ -551,7 +551,7 @@ git commit -m "feat(config): derive project identity from cwd when the typed nam
 **Files:**
 
 - Modify: `src/jobd/db.py` (`Job` at :33, `_JOB_ADDS` at :184)
-- Modify: `src/jobd/broker/submit.py` (:84, and the three `project=project` insert sites at :251, :343, :355)
+- Modify: `src/jobd/broker/submit.py` (the `project = eff.project` block, and the single `Job(...)` construction)
 - Test: `tests/unit/test_project_label_column.py` (create)
 
 **Interfaces:**
@@ -639,7 +639,14 @@ In `src/jobd/broker/submit.py`, after `project = eff.project` at :84:
     project_label = eff.project_label if eff.project_label != project else None
 ```
 
-Add `project_label=project_label,` beside each of the three `project=project,` arguments in the `Job(...)` constructions (:251, :343, :355). Leave the `_emit_event(..., project=project, ...)` calls alone — those take the identity.
+Add `project_label=project_label,` beside the `project=project,` argument in
+the **single** `Job(...)` construction.
+
+There is exactly one. It sits inside the `for i, subs in enumerate(subs_list):`
+member fan-out loop, so that one site covers a plain submit and every member of
+an array alike. Searching for `project=project,` returns four hits; three of them
+are `_emit_event(...)` calls, which take the identity and must be left alone.
+Confirm which call each hit belongs to before editing — do not count grep hits.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
