@@ -47,6 +47,12 @@ def _entry_to_yaml_dict(entry: ProjectEntry) -> dict:
         defaults_dict["escalate_to_arc"] = d.escalate_to_arc
     if defaults_dict:
         out["defaults"] = defaults_dict
+    if entry.roots:
+        # Read surface only: `_persist_projects` writes priorities alone, so
+        # exposing roots here cannot leak them into the overlay. Without this
+        # no runtime surface showed which roots the broker had loaded
+        # (audit 2026-09-02).
+        out["roots"] = list(entry.roots)
     return out
 
 

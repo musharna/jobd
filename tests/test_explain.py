@@ -172,3 +172,39 @@ def test_explain_output_format(client_with_defaults, monkeypatch):
     assert "desktop" in r.output
     assert "[source: project default]" in r.output
     assert "max_wall_s" in r.output
+
+
+def test_explain_names_the_typed_spelling_when_only_the_fold_changed_it(
+    client_with_defaults, monkeypatch
+):
+    """audit 2026-09-02: the typed name was printed only inside the
+    `if matched_root:` branch, so a rule-1 fold (`PROJECT-C` -> `project-c`)
+    rendered `resolved config for project project-c` and never said what the
+    operator had actually typed -- the CHANGELOG claimed both were rendered."""
+    import job_cli.cli as cli_mod
+
+    real_client = client_with_defaults
+
+    class _ExplainFakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            pass
+
+        def post(self, path, *, json=None, params=None):
+            return real_client.post("/resolve", json=json)
+
+    monkeypatch.setattr(cli_mod, "_client", lambda: _ExplainFakeClient())
+    r = CliRunner().invoke(
+        cli_mod.app, ["submit", "--project", "PROJECT-C", "--explain", "--", "./run.sh"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "resolved config for project project-c" in r.output
+    assert "submitted as PROJECT-C" in r.output
+    # Positive control: an exact spelling has nothing to explain.
+    r2 = CliRunner().invoke(
+        cli_mod.app, ["submit", "--project", "project-c", "--explain", "--", "./run.sh"]
+    )
+    assert r2.exit_code == 0, r2.output
+    assert "submitted as" not in r2.output

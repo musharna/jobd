@@ -756,11 +756,13 @@ debugging:
   the job that was priced as `beta` — though the rendered table column
   shows `project`, the scheduling identity.
 - `matched_root` — the root that supplied the identity — is **not** on the
-  Job row. It is computed at resolution time and surfaced in exactly two
+  Job row. It is computed at resolution time and surfaced in three
   places: the `POST /resolve` response (so `job submit --explain` prints
-  it, alongside the typed label) and the `cwd_identity_applied` event
-  recorded when rule 2 fires. It is `None`/absent whenever cwd was not
-  consulted.
+  it, alongside the typed label), the `validation.effective_matched_root`
+  field of a `job submit --dry-run` plan, and the `cwd_identity_applied`
+  event recorded when rule 2 fires. It is `None`/absent whenever cwd was
+  not consulted. The roots a broker has loaded are listed by
+  `GET /projects` / `job projects list`.
 
 ### The roots shipped in this file
 
