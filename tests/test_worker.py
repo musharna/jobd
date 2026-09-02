@@ -1247,20 +1247,32 @@ def test_own_scope_job_not_counted_as_foreign_vram(tmp_path, monkeypatch):
         _reset_in_flight()
 
 
-def test_is_solo_in_flight_gates_reparented_orphan_sweep():
+def test_the_reparented_orphan_sweep_runs_only_for_a_solo_job(monkeypatch):
     """P3.5: the reparented-orphan /proc sweep must only run when this is the
     sole in-flight job. With a concurrent job registered, the global sweep
-    could kill the other job's reparented fast-path descendant, so the gate
-    returns False and run_job skips it."""
+    could kill the other job's reparented fast-path descendant. The gate is
+    now atomic with the scan (audit 2026-09-02 L-4; see
+    tests/unit/test_orphan_sweep_solo_gate_is_atomic.py), so this drives the
+    helper and observes whether the scan ran."""
+    scans: list[set[int]] = []
+    monkeypatch.setattr(
+        job_worker._subreaper,
+        "sweep_and_kill_reparented_orphans",
+        lambda known: scans.append(set(known)) or [],
+    )
     _reset_in_flight()
     try:
-        assert job_worker._is_solo_in_flight() is True  # nothing in flight
+        job_worker._sweep_reparented_orphans_if_solo(960, {1})
+        assert len(scans) == 1  # nothing in flight
         job_worker._register_in_flight({"id": 960, "vram_gb": 0, "ram_gb": 0, "cpus": 0})
-        assert job_worker._is_solo_in_flight() is True  # just me
+        job_worker._sweep_reparented_orphans_if_solo(960, {1})
+        assert len(scans) == 2  # just me
         job_worker._register_in_flight({"id": 961, "vram_gb": 0, "ram_gb": 0, "cpus": 0})
-        assert job_worker._is_solo_in_flight() is False  # a concurrent job exists
+        job_worker._sweep_reparented_orphans_if_solo(960, {1})
+        assert len(scans) == 2  # a concurrent job exists: no scan
         job_worker._unregister_in_flight(961)
-        assert job_worker._is_solo_in_flight() is True  # back to solo
+        job_worker._sweep_reparented_orphans_if_solo(960, {1})
+        assert len(scans) == 3  # back to solo
     finally:
         _reset_in_flight()
 
