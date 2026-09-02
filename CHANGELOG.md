@@ -4,17 +4,6 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Privacy — tracked config no longer carries real paths
-
-- `config/projects.local.yaml` (gitignored, beside `projects.yaml`) now holds
-  machine-specific `roots:` and private project names; each entry replaces the
-  same-named tracked entry wholesale. Operators must create it on deploy or lose
-  cwd-derived identity for those roots — see docs/projects-yaml.md.
-- The tracked `projects.yaml`, the replay corpus `tests/data/project_cwd_corpus.csv`,
-  tests, plans and docs are pseudonymised (`/home/user/...`, greek-letter project
-  names). `tests/test_no_private_paths.py` fails the suite if a private path, host,
-  address or session trailer is ever tracked again.
-
 ## [0.5.42] — 2026-09-01
 
 ### Added
