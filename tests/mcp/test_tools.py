@@ -466,6 +466,20 @@ def test_jobd_list_summarizes_jobs():
     assert out["jobs"][1]["job_id"] == 1
 
 
+def test_the_live_suite_pins_the_same_summary_keys_as_the_source():
+    """The `jobd_list` summary shape exists in three places: the source tuple,
+    the synthetic assertion above, and the live-broker test. The live one is
+    deselected on any machine without a broker, so a field added to the source
+    reaches CI's live leg as a red diff nobody saw locally — which is exactly
+    what `project_label` did on 2026-09-02. Pin the live copy here, where it
+    runs in the default suite.
+    """
+    from jobd.mcp.tools import _LIST_SUMMARY_FIELDS
+    from tests.mcp.test_live import LIST_SUMMARY_KEYS
+
+    assert set(_LIST_SUMMARY_FIELDS) == LIST_SUMMARY_KEYS
+
+
 def _job_row(i: int, state: str) -> dict:
     return {
         "id": i,
