@@ -620,7 +620,7 @@ reload` is sufficient.
 
 `--project` is free text, chosen once at submit time and typed by a human
 every time after. A directory does not change; the spelling a person types
-for it does — `pillar2a1_sweep`, `arf-promoter`, `orchid-sdxl-stage4b` are
+for it does — `pillar2a1_sweep`, `arf-promoter`, `gamma-stage4b` are
 all real, one-off run labels for jobs that in every other sense belong to
 one long-running project. Each of those typos-that-aren't-typos used to fall
 through to `_default`, at `_default`'s priority, with no warning anyone
@@ -631,10 +631,10 @@ what the caller typed, but by where the job runs from.
 
 ```yaml
 projects:
-  jepagame:
+  beta:
     priority: 78
     roots:
-      - /home/mjarnold/jepagame
+      - /home/user/beta
 ```
 
 `roots` is a top-level key, a sibling of `priority` and `defaults:`, not
@@ -651,8 +651,8 @@ time rather than being dropped, so a bad root is caught at reload/broker
 start, not discovered later as a job that quietly ran at the wrong
 priority. See `tests/test_projects_yaml.py::test_a_bad_root_is_a_load_error_not_a_silent_drop`.
 
-Trailing slashes are normalized away (`/home/mjarnold/jepagame/` and
-`/home/mjarnold/jepagame` are the same root) but nothing else about a root
+Trailing slashes are normalized away (`/home/user/beta/` and
+`/home/user/beta` are the same root) but nothing else about a root
 is inferred — see path matching, below.
 
 ### Resolution order — three rules
@@ -667,8 +667,8 @@ order, and stopping at the first that produces an answer:
    consulted.** This is the safety property the other two rules sit behind:
    a directory's `roots:` can never override an operator's explicit,
    correctly-spelled project selection. Rule 2 only ever gets a turn when
-   rule 1 comes up empty — a job typed `--project jepagame` from inside
-   `/home/mjarnold/orchid-sdxl` is `jepagame`, full stop, not a fight between
+   rule 1 comes up empty — a job typed `--project beta` from inside
+   `/home/user/gamma` is `beta`, full stop, not a fight between
    the typed name and the cwd.
 2. **The cwd, rooted.** Only when rule 1 found nothing: every registered
    project's `roots` are checked against `cwd`. The **deepest matching root
@@ -691,19 +691,19 @@ silently convert every unmatched job into a confidently-identified one
 A root matches when `cwd` equals the root or lives under it, compared
 **path-component by path-component** — not `cwd.startswith(root)`. That
 distinction is the whole reason this is safe to ship: a bare string prefix
-would say `/home/mjarnold/jepagame2` is inside `/home/mjarnold/jepagame`,
+would say `/home/user/beta2` is inside `/home/user/beta`,
 handing a sibling directory (and whatever unrelated project lives there) its
 neighbour's priority. Comparing tuples of path parts (`_path_is_within` in
-`src/jobd/config.py`) makes the boundary structural: `/home/mjarnold/jepagame2`
-and `/home/mjarnold/jepagame/../jepagame2` do not match a root of
-`/home/mjarnold/jepagame`; `/home/mjarnold/jepagame/sweeps` does.
+`src/jobd/config.py`) makes the boundary structural: `/home/user/beta2`
+and `/home/user/beta/../beta2` do not match a root of
+`/home/user/beta`; `/home/user/beta/sweeps` does.
 
 `..` is collapsed before the comparison, lexically (`os.path.normpath`), so
 the components compared are the ones the path actually denotes. Without that
-step the example above went the other way: `/home/mjarnold/jepagame/../jepagame2`
-led with a literal `jepagame` component and matched, and worse,
-`/home/mjarnold/jepagame/../../tmp` — a job really running in `/tmp` — priced
-at jepagame's `78`. `cwd` is free text on the wire (`--cwd` is a CLI flag,
+step the example above went the other way: `/home/user/beta/../beta2`
+led with a literal `beta` component and matched, and worse,
+`/home/user/beta/../../tmp` — a job really running in `/tmp` — priced
+at beta's `78`. `cwd` is free text on the wire (`--cwd` is a CLI flag,
 `JobSubmit.cwd` a plain string), so that was reachable from a caller, not
 just in theory. A root containing a `..` component is rejected at load
 instead: a root is an identity boundary, so write the directory it denotes.
@@ -753,7 +753,7 @@ debugging:
   returned in `JobInfo` (`project_label` is `null` when the two agree, so
   the field reads as "something was substituted here"). `job list --project`
   matches **either**, so `job list --project pillar2a1_sweep` still finds
-  the job that was priced as `jepagame` — though the rendered table column
+  the job that was priced as `beta` — though the rendered table column
   shows `project`, the scheduling identity.
 - `matched_root` — the root that supplied the identity — is **not** on the
   Job row. It is computed at resolution time and surfaced in exactly two
@@ -771,3 +771,24 @@ where every project name ever typed from that directory read as a variant
 of one project. See the comments beside each project's `roots:` entry for
 the specific evidence, and `tests/test_corpus_replay.py` for the same
 corpus replayed end-to-end through the real resolver.
+
+
+## `projects.local.yaml` — private roots and names
+
+`config/projects.yaml` is tracked and public, so its `roots:` are illustrative.
+Real filesystem roots (and any project name you would rather not publish) go in
+`config/projects.local.yaml`, which is gitignored and read from the same directory
+as `projects.yaml`. An entry there replaces the same-named tracked entry wholesale
+(priority, defaults, roots) or adds a new project; names it does not mention are
+left as tracked, and `_default` changes only if the file declares it.
+
+```yaml
+projects:
+  alpha:
+    priority: 80
+    roots: [/home/me/alpha]
+```
+
+Deploying: copy the file next to the broker's `projects.yaml` (the Docker image reads
+`$JOBD_CONFIG_DIR`, so mount it there). Without it the broker still starts; only
+cwd-derived identity (rule 2) is limited to the roots the tracked file ships.

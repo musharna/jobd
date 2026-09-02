@@ -17,11 +17,11 @@ field means every submitter has to satisfy 1 while thinking about 2, and the
 failure is silent: an unregistered name falls through to `_default` and runs at
 40 with no error.
 
-v0.5.39–41 closed the _spelling_ half of this (`ARFDSynInt` now folds onto
-`arfdsynint`; a write reports the name it landed on). The retyped-string
+v0.5.39–41 closed the _spelling_ half of this (`epsilon` now folds onto
+`epsilon`; a write reports the name it landed on). The retyped-string
 mechanism itself is untouched, and it is the larger half.
 
-### Measured, live DB `/home/mjarnold/jobd/data/jobd.db`, 2026-08-31
+### Measured, live DB `/home/user/jobd/data/jobd.db`, 2026-08-31
 
 3,608 job rows; 249 distinct `(project, cwd)` pairs; 138 distinct project
 names against 148 distinct cwds.
@@ -39,11 +39,11 @@ The top entries show the mechanism plainly — these are run labels, not
 projects:
 
 ```
- 27  pillar2a1_sweep           /home/mjarnold/jepagame        (jepagame is registered at 78)
- 26  orchid-sdxl-geo           /home/mjarnold/orchid-sdxl
- 18  dreamer-chassis           /home/mjarnold/dreamer-chassis
- 16  pillar4_1                 /home/mjarnold/jepagame
- 15  orchid-stage2             /home/mjarnold/orchid-sdxl
+ 27  pillar2a1_sweep           /home/user/beta        (beta is registered at 78)
+ 26  gamma-geo           /home/user/gamma
+ 18  delta           /home/user/delta
+ 16  pillar4_1                 /home/user/beta
+ 15  gamma-stage2             /home/user/gamma
 ```
 
 The relation is genuinely many-to-many — 33 projects span more than one cwd, 26
@@ -79,19 +79,19 @@ per-job field defaults and a root is not one of those.
 
 ```yaml
 projects:
-  jepagame:
+  beta:
     priority: 78
     roots:
-      - /home/mjarnold/jepagame
-  orchid-sdxl:
+      - /home/user/beta
+  gamma:
     priority: 60
     roots:
-      - /home/mjarnold/orchid-sdxl
+      - /home/user/gamma
 ```
 
 Matching is **longest root wins**, compared **path-component-wise, not as a
-string prefix**. `/home/mjarnold/jepagame2` must not match root
-`/home/mjarnold/jepagame`; a naive `str.startswith` says it does. This is the
+string prefix**. `/home/user/beta2` must not match root
+`/home/user/beta`; a naive `str.startswith` says it does. This is the
 single most likely defect in the feature and gets a dedicated negative test.
 
 Symlinks are not resolved. The broker has no access to the worker's filesystem,
@@ -158,7 +158,7 @@ through to `_default`" signal is not weakened by the new one.
 ## Testing
 
 Unit: precedence (all three rules), longest-root selection, the
-`jepagame2`/`jepagame` boundary negative, ambiguous-roots warn-and-fall-through,
+`beta2`/`beta` boundary negative, ambiguous-roots warn-and-fall-through,
 label preserved in every branch, bad-root load error.
 
 The real-execution check is a **corpus replay**: run the resolver over every one
@@ -194,8 +194,8 @@ would read as a clean pass.
 ## Out of scope
 
 Eighteen entries currently sit at priority 65, and most of them are
-experiment-arm names rather than projects (`host_grammar`,
-`convergent_mimicry`, `outgroup_control`, `effector_host`, `kai2d`,
+experiment-arm names rather than projects (`h_grammar`,
+`c_mimicry`, `og_control`, `eff_host`, `k2d`,
 `arf-dimer-g1`, …) registered one at a time as a workaround for exactly this
 gap. They become redundant once roots exist, but rule 1 keeps them winning and
 nothing breaks while they stay. Retiring them is separate cleanup, after this

@@ -122,7 +122,7 @@ def test_submit_matches_resolve(client, project, profile, extra, expected_host_p
 # Project names are free text typed at submit time and were matched with a bare
 # `name in projects`, so a REGISTERED project silently lost its priority to a
 # differently-typed name. Measured on the live broker 2026-08-30: jobs submitted
-# as `ARFDSynInt` ran at _default 40 while `arfdsynint` sat deliberately
+# as `epsilon` ran at _default 40 while `epsilon` sat deliberately
 # registered at 65 — a difference of case alone, with no error raised and no way
 # to notice except by reading a warning nothing consumed.
 
@@ -197,8 +197,8 @@ def test_a_genuinely_new_project_keeps_the_name_its_owner_chose(client):
 
 
 def test_a_suffix_difference_is_not_treated_as_the_same_project(client):
-    """Folding is case and -/_ ONLY, deliberately. `phelipanche` must not be
-    folded onto `phelipanche-fm` — that differs by a suffix, and equating them
+    """Folding is case and -/_ ONLY, deliberately. `kappa` must not be
+    folded onto `kappa-fm` — that differs by a suffix, and equating them
     would run work at another project's priority, which is the bug this matching
     exists to end, inverted."""
     _submit(client, "pinned")

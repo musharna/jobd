@@ -364,7 +364,7 @@ def _project_substitution_note(label: str | None, project: str | None) -> str | 
 
     Two different mechanisms can substitute a name, and naming the wrong one
     sends an operator to the wrong file: `canonical_project_name` folds case
-    and `-`/`_` onto a REGISTERED spelling (`Orchid_SDXL` -> `orchid-sdxl`)
+    and `-`/`_` onto a REGISTERED spelling (`GAMMA` -> `gamma`)
     without ever consulting cwd, so "identity from cwd" would point at
     `roots:`, which had nothing to do with it.
 

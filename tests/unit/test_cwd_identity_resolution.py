@@ -17,18 +17,16 @@ def _req(project: str, cwd: str) -> JobSubmit:
 def _projects() -> dict[str, ProjectEntry]:
     return {
         "_default": ProjectEntry(priority=40),
-        "jepagame": ProjectEntry(priority=78, roots=["/home/mjarnold/jepagame"]),
-        "orchid-sdxl": ProjectEntry(priority=60, roots=["/home/mjarnold/orchid-sdxl"]),
+        "beta": ProjectEntry(priority=78, roots=["/home/user/beta"]),
+        "gamma": ProjectEntry(priority=60, roots=["/home/user/gamma"]),
     }
 
 
 def test_rule1_a_registered_name_wins_over_a_conflicting_cwd():
-    """THE invariant. Submitted as orchid-sdxl from inside jepagame's tree:
+    """THE invariant. Submitted as gamma from inside beta's tree:
     the typed, registered name must win, so no correct submit is repriced."""
-    eff = resolve_effective_config(
-        _req("orchid-sdxl", "/home/mjarnold/jepagame/sweeps"), _projects(), None
-    )
-    assert eff.project == "orchid-sdxl"
+    eff = resolve_effective_config(_req("gamma", "/home/user/beta/sweeps"), _projects(), None)
+    assert eff.project == "gamma"
     assert eff.priority.value == 60
     assert eff.matched_root is None
 
@@ -36,21 +34,19 @@ def test_rule1_a_registered_name_wins_over_a_conflicting_cwd():
 def test_rule1_still_wins_when_the_name_needed_folding():
     """A name reaching rule 1 only via case/`-_` folding is still a rule-1 hit
     and must not be overridden by cwd."""
-    eff = resolve_effective_config(
-        _req("Orchid_SDXL", "/home/mjarnold/jepagame"), _projects(), None
-    )
-    assert eff.project == "orchid-sdxl"
+    eff = resolve_effective_config(_req("GAMMA", "/home/user/beta"), _projects(), None)
+    assert eff.project == "gamma"
     assert eff.matched_root is None
-    assert eff.project_label == "Orchid_SDXL"
+    assert eff.project_label == "GAMMA"
 
 
 def test_rule2_an_unregistered_label_takes_its_identity_from_cwd():
     eff = resolve_effective_config(
-        _req("pillar2a1_sweep", "/home/mjarnold/jepagame/sweeps"), _projects(), None
+        _req("pillar2a1_sweep", "/home/user/beta/sweeps"), _projects(), None
     )
-    assert eff.project == "jepagame"
+    assert eff.project == "beta"
     assert eff.priority.value == 78
-    assert eff.matched_root == "/home/mjarnold/jepagame"
+    assert eff.matched_root == "/home/user/beta"
     assert eff.project_label == "pillar2a1_sweep"
     assert eff.unknown_project_warning is None
 
@@ -58,10 +54,8 @@ def test_rule2_an_unregistered_label_takes_its_identity_from_cwd():
 def test_rule2_supplies_project_defaults_too_not_just_priority():
     """Identity means the whole entry, not only the number."""
     projects = _projects()
-    projects["jepagame"].defaults.max_wall_s = 3600
-    eff = resolve_effective_config(
-        _req("pillar2a1_sweep", "/home/mjarnold/jepagame"), projects, None
-    )
+    projects["beta"].defaults.max_wall_s = 3600
+    eff = resolve_effective_config(_req("pillar2a1_sweep", "/home/user/beta"), projects, None)
     assert eff.max_wall_s.value == 3600
     assert eff.max_wall_s.source == "project_default"
 
@@ -79,8 +73,8 @@ def test_rule3_an_unmatched_job_still_warns_as_before():
 def test_the_typed_label_is_preserved_in_every_branch():
     projects = _projects()
     for name, cwd in [
-        ("orchid-sdxl", "/home/mjarnold/jepagame"),
-        ("pillar2a1_sweep", "/home/mjarnold/jepagame"),
+        ("gamma", "/home/user/beta"),
+        ("pillar2a1_sweep", "/home/user/beta"),
         ("whatever", "/tmp"),
     ]:
         eff = resolve_effective_config(_req(name, cwd), projects, None)

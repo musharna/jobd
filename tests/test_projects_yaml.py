@@ -353,14 +353,14 @@ def test_roots_are_parsed_and_normalized(tmp_path):
     p = tmp_path / "projects.yaml"
     p.write_text(
         "projects:\n"
-        "  jepagame:\n"
+        "  beta:\n"
         "    priority: 78\n"
         "    roots:\n"
-        "      - /home/mjarnold/jepagame/\n"
-        "      - /srv/jepagame\n"
+        "      - /home/user/beta/\n"
+        "      - /srv/beta\n"
     )
     projects = load_projects(p)
-    assert projects["jepagame"].roots == ["/home/mjarnold/jepagame", "/srv/jepagame"]
+    assert projects["beta"].roots == ["/home/user/beta", "/srv/beta"]
 
 
 def test_a_project_without_roots_gets_an_empty_list(tmp_path):
@@ -378,10 +378,10 @@ def test_a_project_without_roots_gets_an_empty_list(tmp_path):
     [
         ("roots: [relative/path]", "not absolute"),
         ("roots: [17]", "not a string"),
-        ("roots: /home/mjarnold/x", "not a list"),
+        ("roots: /home/user/x", "not a list"),
         ("roots: ['/']", "filesystem root captures every job"),
-        ("roots: ['/home/mjarnold/x/../y']", "parent-dir component"),
-        ("roots: ['/home/mjarnold/..']", "parent-dir component"),
+        ("roots: ['/home/user/x/../y']", "parent-dir component"),
+        ("roots: ['/home/user/..']", "parent-dir component"),
     ],
 )
 def test_a_bad_root_is_a_load_error_not_a_silent_drop(tmp_path, bad, why):
@@ -389,7 +389,7 @@ def test_a_bad_root_is_a_load_error_not_a_silent_drop(tmp_path, bad, why):
     present to the operator as 'the feature just doesn't work on my machine',
     so roots are validated loudly instead."""
     p = tmp_path / "projects.yaml"
-    p.write_text(f"projects:\n  jepagame:\n    priority: 78\n    {bad}\n")
+    p.write_text(f"projects:\n  beta:\n    priority: 78\n    {bad}\n")
     with pytest.raises(ValueError, match="roots"):
         load_projects(p)
 
@@ -421,9 +421,45 @@ def test_the_shipped_roots_resolve_as_intended():
     prefix-sharing sibling takes none.
     """
     projects = load_projects(_REPO_ROOT / "config" / "projects.yaml")
-    hit = project_from_cwd(projects, "/home/mjarnold/jepagame/sweeps/a")
+    hit = project_from_cwd(projects, "/home/user/beta/sweeps/a")
     assert hit is not None, "a path under a shipped root must resolve"
     name, root = hit
-    assert name == "jepagame"
-    assert _path_is_within("/home/mjarnold/jepagame/sweeps/a", root)
-    assert project_from_cwd(projects, "/home/mjarnold/jepagame2") is None
+    assert name == "beta"
+    assert _path_is_within("/home/user/beta/sweeps/a", root)
+    assert project_from_cwd(projects, "/home/user/beta2") is None
+
+
+def test_local_overlay_replaces_roots_and_adds_projects(tmp_path):
+    """`projects.local.yaml` beside projects.yaml overrides the tracked entry
+    wholesale and can add a project; names it does not declare are untouched,
+    and `_default` keeps the tracked priority."""
+    from jobd.config import load_effective_projects
+
+    (tmp_path / "projects.yaml").write_text(
+        "projects:\n  _default: {priority: 40}\n"
+        "  alpha: {priority: 80, roots: [/srv/example/alpha]}\n"
+        "  beta: {priority: 70}\n"
+    )
+    (tmp_path / "projects.local.yaml").write_text(
+        "projects:\n  alpha: {priority: 80, roots: [/home/me/alpha]}\n  private-x: {priority: 55}\n"
+    )
+    eff, base = load_effective_projects(tmp_path / "projects.yaml", tmp_path / "overrides.yaml")
+    assert [str(r) for r in eff["alpha"].roots] == ["/home/me/alpha"]
+    assert eff["private-x"].priority == 55
+    assert eff["beta"].priority == 70
+    assert eff["_default"].priority == 40
+    assert base["private-x"] == 55
+
+
+def test_no_local_overlay_is_a_noop(tmp_path):
+    """Negative control for the test above: with no local file the effective
+    table is exactly the tracked one."""
+    from jobd.config import load_effective_projects, load_projects
+
+    (tmp_path / "projects.yaml").write_text(
+        "projects:\n  alpha: {priority: 80, roots: [/srv/example/alpha]}\n"
+    )
+    eff, _ = load_effective_projects(tmp_path / "projects.yaml", tmp_path / "overrides.yaml")
+    tracked = load_projects(tmp_path / "projects.yaml")
+    assert set(eff) == set(tracked)
+    assert [str(r) for r in eff["alpha"].roots] == ["/srv/example/alpha"]

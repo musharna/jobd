@@ -24,12 +24,12 @@ def rooted_app(tmp_path, sample_profiles_yaml, sample_classifier_yaml):
     projects = tmp_path / "rooted-projects.yaml"
     projects.write_text(
         "projects:\n"
-        "  jepagame:\n"
+        "  beta:\n"
         "    priority: 78\n"
-        "    roots: ['/home/mjarnold/jepagame']\n"
-        "  orchid-sdxl:\n"
+        "    roots: ['/home/user/beta']\n"
+        "  gamma:\n"
         "    priority: 60\n"
-        "    roots: ['/home/mjarnold/orchid-sdxl']\n"
+        "    roots: ['/home/user/gamma']\n"
         "  _default: { priority: 40 }\n"
     )
     return build_app(

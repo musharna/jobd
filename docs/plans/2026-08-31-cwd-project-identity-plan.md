@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Rule 1 wins.** A typed name that resolves to a registered project via `canonical_project_name` is the identity. cwd is consulted **only** when it does not. No currently-correct submit may change priority.
-- **Path-component matching, never `str.startswith`.** `/home/mjarnold/jepagame2` must not match root `/home/mjarnold/jepagame`.
+- **Path-component matching, never `str.startswith`.** `/home/user/beta2` must not match root `/home/user/beta`.
 - **No symlink resolution.** The broker cannot see the worker's filesystem; it compares the path it was handed.
 - **Schema changes go through the existing additive `migrate()`** in `src/jobd/db.py:222` plus an entry in `_JOB_ADDS` (`db.py:184`). No alembic.
 - **`cwd_identity_applied` must land in `KNOWN_EVENTS` (`src/jobd/models.py:406`) in the same commit that emits it.** An unlisted name collapses into the `other` bucket at `broker/events.py:74` and any alert on it silently never fires.
@@ -47,14 +47,14 @@ def test_roots_are_parsed_and_normalized(tmp_path):
     p = tmp_path / "projects.yaml"
     p.write_text(
         "projects:\n"
-        "  jepagame:\n"
+        "  beta:\n"
         "    priority: 78\n"
         "    roots:\n"
-        "      - /home/mjarnold/jepagame/\n"
-        "      - /srv/jepagame\n"
+        "      - /home/user/beta/\n"
+        "      - /srv/beta\n"
     )
     projects = load_projects(p)
-    assert projects["jepagame"].roots == ["/home/mjarnold/jepagame", "/srv/jepagame"]
+    assert projects["beta"].roots == ["/home/user/beta", "/srv/beta"]
 
 
 def test_a_project_without_roots_gets_an_empty_list(tmp_path):
@@ -72,7 +72,7 @@ def test_a_project_without_roots_gets_an_empty_list(tmp_path):
     [
         ("roots: [relative/path]", "not absolute"),
         ("roots: [17]", "not a string"),
-        ("roots: /home/mjarnold/x", "not a list"),
+        ("roots: /home/user/x", "not a list"),
         ("roots: ['/']", "filesystem root captures every job"),
     ],
 )
@@ -81,7 +81,7 @@ def test_a_bad_root_is_a_load_error_not_a_silent_drop(tmp_path, bad, why):
     present to the operator as 'the feature just doesn't work on my machine',
     so roots are validated loudly instead."""
     p = tmp_path / "projects.yaml"
-    p.write_text(f"projects:\n  jepagame:\n    priority: 78\n    {bad}\n")
+    p.write_text(f"projects:\n  beta:\n    priority: 78\n    {bad}\n")
     with pytest.raises(ValueError, match="roots"):
         load_projects(p)
 ```
@@ -199,8 +199,8 @@ Create `tests/unit/test_project_from_cwd.py`:
 """cwd -> project identity matching.
 
 The boundary case is the whole point of this module. A `str.startswith` root
-match is the obvious implementation and it is wrong: `/home/mjarnold/jepagame2`
-starts with `/home/mjarnold/jepagame`, so a sibling project would silently
+match is the obvious implementation and it is wrong: `/home/user/beta2`
+starts with `/home/user/beta`, so a sibling project would silently
 inherit its neighbour's priority -- the exact failure class this feature exists
 to end, pointing the other way.
 """
@@ -216,43 +216,43 @@ def _projects(**roots_by_name):
 
 
 def test_a_cwd_inside_a_root_resolves_to_that_project():
-    projects = _projects(jepagame=["/home/mjarnold/jepagame"])
-    assert project_from_cwd(projects, "/home/mjarnold/jepagame/sweeps/a") == (
-        "jepagame",
-        "/home/mjarnold/jepagame",
+    projects = _projects(beta=["/home/user/beta"])
+    assert project_from_cwd(projects, "/home/user/beta/sweeps/a") == (
+        "beta",
+        "/home/user/beta",
     )
 
 
 def test_the_root_itself_matches():
-    projects = _projects(jepagame=["/home/mjarnold/jepagame"])
-    assert project_from_cwd(projects, "/home/mjarnold/jepagame") == (
-        "jepagame",
-        "/home/mjarnold/jepagame",
+    projects = _projects(beta=["/home/user/beta"])
+    assert project_from_cwd(projects, "/home/user/beta") == (
+        "beta",
+        "/home/user/beta",
     )
 
 
 def test_a_sibling_directory_sharing_a_name_prefix_does_not_match():
     """The regression this module exists to prevent."""
-    projects = _projects(jepagame=["/home/mjarnold/jepagame"])
-    assert project_from_cwd(projects, "/home/mjarnold/jepagame2") is None
-    assert project_from_cwd(projects, "/home/mjarnold/jepagame-scratch") is None
+    projects = _projects(beta=["/home/user/beta"])
+    assert project_from_cwd(projects, "/home/user/beta2") is None
+    assert project_from_cwd(projects, "/home/user/beta-scratch") is None
 
 
 def test_the_deepest_root_wins():
     """Nesting is legitimate: a sub-project living inside a parent's tree must
     take its own identity, not the parent's."""
     projects = _projects(
-        jepagame=["/home/mjarnold/jepagame"],
-        jepagame_xcheck=["/home/mjarnold/jepagame/xcheck"],
+        beta=["/home/user/beta"],
+        beta_xcheck=["/home/user/beta/xcheck"],
     )
-    assert project_from_cwd(projects, "/home/mjarnold/jepagame/xcheck/run1") == (
-        "jepagame-xcheck",
-        "/home/mjarnold/jepagame/xcheck",
+    assert project_from_cwd(projects, "/home/user/beta/xcheck/run1") == (
+        "beta-xcheck",
+        "/home/user/beta/xcheck",
     )
 
 
 def test_an_unmatched_cwd_returns_none():
-    projects = _projects(jepagame=["/home/mjarnold/jepagame"])
+    projects = _projects(beta=["/home/user/beta"])
     assert project_from_cwd(projects, "/tmp") is None
 
 
@@ -260,7 +260,7 @@ def test_a_project_with_no_roots_never_matches():
     """Positive control for the opt-in: roots are opt-in, and a project that
     declares none must not be reachable by cwd at all."""
     projects = {"_default": ProjectEntry(priority=40), "plain": ProjectEntry(priority=60)}
-    assert project_from_cwd(projects, "/home/mjarnold/plain") is None
+    assert project_from_cwd(projects, "/home/user/plain") is None
 
 
 def test_two_projects_claiming_the_same_depth_yield_no_identity(caplog):
@@ -268,30 +268,30 @@ def test_two_projects_claiming_the_same_depth_yield_no_identity(caplog):
     canonical_project_name's posture on an ambiguous fold (config.py:355).
     Picking one would run someone's jobs at a neighbour's priority."""
     projects = _projects(
-        alpha=["/home/mjarnold/shared"],
-        beta=["/home/mjarnold/shared"],
+        alpha=["/home/user/shared"],
+        beta=["/home/user/shared"],
     )
     with caplog.at_level("WARNING"):
-        assert project_from_cwd(projects, "/home/mjarnold/shared/x") is None
+        assert project_from_cwd(projects, "/home/user/shared/x") is None
     assert "alpha" in caplog.text and "beta" in caplog.text
 
 
 def test_an_ambiguous_shallow_root_still_loses_to_a_deeper_unambiguous_one():
     """Ambiguity at depth N must not poison a clear winner at depth N+1."""
     projects = _projects(
-        alpha=["/home/mjarnold/shared"],
-        beta=["/home/mjarnold/shared"],
-        gamma=["/home/mjarnold/shared/g"],
+        alpha=["/home/user/shared"],
+        beta=["/home/user/shared"],
+        gamma=["/home/user/shared/g"],
     )
-    assert project_from_cwd(projects, "/home/mjarnold/shared/g/run") == (
+    assert project_from_cwd(projects, "/home/user/shared/g/run") == (
         "gamma",
-        "/home/mjarnold/shared/g",
+        "/home/user/shared/g",
     )
 
 
 def test_default_is_never_returned_as_an_identity():
-    projects = {"_default": ProjectEntry(priority=40, roots=["/home/mjarnold"])}
-    assert project_from_cwd(projects, "/home/mjarnold/anything") is None
+    projects = {"_default": ProjectEntry(priority=40, roots=["/home/user"])}
+    assert project_from_cwd(projects, "/home/user/anything") is None
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -307,8 +307,8 @@ Add to `src/jobd/config.py`, immediately after `canonical_project_name`:
 def _path_is_within(cwd: str, root: str) -> bool:
     """True when `cwd` is `root` or lives underneath it, compared COMPONENT-WISE.
 
-    Not `cwd.startswith(root)`: that says `/home/mjarnold/jepagame2` is inside
-    `/home/mjarnold/jepagame`, which would hand a sibling project its
+    Not `cwd.startswith(root)`: that says `/home/user/beta2` is inside
+    `/home/user/beta`, which would hand a sibling project its
     neighbour's priority. Comparing tuples of path components makes the
     boundary structural rather than textual.
     """
@@ -408,18 +408,18 @@ def _req(project: str, cwd: str) -> JobSubmit:
 def _projects() -> dict[str, ProjectEntry]:
     return {
         "_default": ProjectEntry(priority=40),
-        "jepagame": ProjectEntry(priority=78, roots=["/home/mjarnold/jepagame"]),
-        "orchid-sdxl": ProjectEntry(priority=60, roots=["/home/mjarnold/orchid-sdxl"]),
+        "beta": ProjectEntry(priority=78, roots=["/home/user/beta"]),
+        "gamma": ProjectEntry(priority=60, roots=["/home/user/gamma"]),
     }
 
 
 def test_rule1_a_registered_name_wins_over_a_conflicting_cwd():
-    """THE invariant. Submitted as orchid-sdxl from inside jepagame's tree:
+    """THE invariant. Submitted as gamma from inside beta's tree:
     the typed, registered name must win, so no correct submit is repriced."""
     eff = resolve_effective_config(
-        _req("orchid-sdxl", "/home/mjarnold/jepagame/sweeps"), _projects(), None
+        _req("gamma", "/home/user/beta/sweeps"), _projects(), None
     )
-    assert eff.project == "orchid-sdxl"
+    assert eff.project == "gamma"
     assert eff.priority.value == 60
     assert eff.matched_root is None
 
@@ -428,20 +428,20 @@ def test_rule1_still_wins_when_the_name_needed_folding():
     """A name reaching rule 1 only via case/`-_` folding is still a rule-1 hit
     and must not be overridden by cwd."""
     eff = resolve_effective_config(
-        _req("Orchid_SDXL", "/home/mjarnold/jepagame"), _projects(), None
+        _req("GAMMA", "/home/user/beta"), _projects(), None
     )
-    assert eff.project == "orchid-sdxl"
+    assert eff.project == "gamma"
     assert eff.matched_root is None
-    assert eff.project_label == "Orchid_SDXL"
+    assert eff.project_label == "GAMMA"
 
 
 def test_rule2_an_unregistered_label_takes_its_identity_from_cwd():
     eff = resolve_effective_config(
-        _req("pillar2a1_sweep", "/home/mjarnold/jepagame/sweeps"), _projects(), None
+        _req("pillar2a1_sweep", "/home/user/beta/sweeps"), _projects(), None
     )
-    assert eff.project == "jepagame"
+    assert eff.project == "beta"
     assert eff.priority.value == 78
-    assert eff.matched_root == "/home/mjarnold/jepagame"
+    assert eff.matched_root == "/home/user/beta"
     assert eff.project_label == "pillar2a1_sweep"
     assert eff.unknown_project_warning is None
 
@@ -449,9 +449,9 @@ def test_rule2_an_unregistered_label_takes_its_identity_from_cwd():
 def test_rule2_supplies_project_defaults_too_not_just_priority():
     """Identity means the whole entry, not only the number."""
     projects = _projects()
-    projects["jepagame"].defaults.max_wall_s = 3600
+    projects["beta"].defaults.max_wall_s = 3600
     eff = resolve_effective_config(
-        _req("pillar2a1_sweep", "/home/mjarnold/jepagame"), projects, None
+        _req("pillar2a1_sweep", "/home/user/beta"), projects, None
     )
     assert eff.max_wall_s.value == 3600
     assert eff.max_wall_s.source == "project_default"
@@ -470,8 +470,8 @@ def test_rule3_an_unmatched_job_still_warns_as_before():
 def test_the_typed_label_is_preserved_in_every_branch():
     projects = _projects()
     for name, cwd in [
-        ("orchid-sdxl", "/home/mjarnold/jepagame"),
-        ("pillar2a1_sweep", "/home/mjarnold/jepagame"),
+        ("gamma", "/home/user/beta"),
+        ("pillar2a1_sweep", "/home/user/beta"),
         ("whatever", "/tmp"),
     ]:
         eff = resolve_effective_config(_req(name, cwd), projects, None)
@@ -706,7 +706,7 @@ def test_the_event_is_emitted_with_the_label_and_the_root(rooted_logs):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
@@ -718,9 +718,9 @@ def test_the_event_is_emitted_with_the_label_and_the_root(rooted_logs):
     ]
     hits = [e for e in rows if e["event"] == "cwd_identity_applied"]
     assert len(hits) == 1, f"expected exactly one, got {[e['event'] for e in rows]}"
-    assert hits[0]["project"] == "jepagame"
+    assert hits[0]["project"] == "beta"
     assert hits[0]["payload"]["project_label"] == "pillar2a1_sweep"
-    assert hits[0]["payload"]["matched_root"] == "/home/mjarnold/jepagame"
+    assert hits[0]["payload"]["matched_root"] == "/home/user/beta"
 
 
 def test_no_event_when_the_typed_name_was_already_registered(rooted_logs):
@@ -731,7 +731,7 @@ def test_no_event_when_the_typed_name_was_already_registered(rooted_logs):
     client, logs_dir = rooted_logs
     r = client.post(
         "/submit",
-        json={"cmd": ["true"], "cwd": "/home/mjarnold/jepagame", "project": "jepagame"},
+        json={"cmd": ["true"], "cwd": "/home/user/beta", "project": "beta"},
     )
     assert r.status_code == 200, r.text
     rows = [
@@ -768,12 +768,12 @@ def rooted_app(tmp_path, sample_profiles_yaml, sample_classifier_yaml):
     projects = tmp_path / "rooted-projects.yaml"
     projects.write_text(
         "projects:\n"
-        "  jepagame:\n"
+        "  beta:\n"
         "    priority: 78\n"
-        "    roots: ['/home/mjarnold/jepagame']\n"
-        "  orchid-sdxl:\n"
+        "    roots: ['/home/user/beta']\n"
+        "  gamma:\n"
         "    priority: 60\n"
-        "    roots: ['/home/mjarnold/orchid-sdxl']\n"
+        "    roots: ['/home/user/gamma']\n"
         "  _default: { priority: 40 }\n"
     )
     return build_app(
@@ -917,13 +917,13 @@ def test_filtering_by_the_label_finds_the_job(rooted_client):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
     rows = client.get("/jobs", params={"project": "pillar2a1_sweep"}).json()["jobs"]
     assert len(rows) == 1
-    assert rows[0]["project"] == "jepagame"
+    assert rows[0]["project"] == "beta"
 
 
 def test_filtering_by_the_identity_finds_the_same_job(rooted_client):
@@ -931,11 +931,11 @@ def test_filtering_by_the_identity_finds_the_same_job(rooted_client):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
-    rows = client.get("/jobs", params={"project": "jepagame"}).json()["jobs"]
+    rows = client.get("/jobs", params={"project": "beta"}).json()["jobs"]
     assert len(rows) == 1
 
 
@@ -946,11 +946,11 @@ def test_an_unrelated_project_filter_still_matches_nothing(rooted_client):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
-    assert client.get("/jobs", params={"project": "orchid-sdxl"}).json()["jobs"] == []
+    assert client.get("/jobs", params={"project": "gamma"}).json()["jobs"] == []
 ```
 
 Create `tests/unit/test_cwd_identity_resolve_api.py`:
@@ -963,20 +963,20 @@ def test_resolve_reports_the_root_that_supplied_the_identity(rooted_client):
         "/resolve",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
     body = r.json()
-    assert body["project"] == "jepagame"
+    assert body["project"] == "beta"
     assert body["project_label"] == "pillar2a1_sweep"
-    assert body["matched_root"] == "/home/mjarnold/jepagame"
+    assert body["matched_root"] == "/home/user/beta"
 
 
 def test_resolve_reports_no_root_for_a_registered_name(rooted_client):
     r = client.post(
         "/resolve",
-        json={"cmd": ["true"], "cwd": "/home/mjarnold/jepagame", "project": "jepagame"},
+        json={"cmd": ["true"], "cwd": "/home/user/beta", "project": "beta"},
     )
     assert r.json()["matched_root"] is None
 ```
@@ -1121,7 +1121,7 @@ signal.signal(
 )
 signal.alarm(60)
 
-DB = os.environ.get("JOBD_DB", "/home/mjarnold/jobd/data/jobd.db")
+DB = os.environ.get("JOBD_DB", "/home/user/jobd/data/jobd.db")
 rows = sqlite3.connect(f"file:{DB}?mode=ro", uri=True).execute(
     "SELECT project, cwd, COUNT(*) FROM jobs GROUP BY project, cwd ORDER BY project, cwd"
 ).fetchall()
@@ -1135,7 +1135,7 @@ w.writerows(rows)
 
 ```bash
 mkdir -p tests/data
-ssh mjarnold@100.113.204.41 'timeout 90 python3 -' \
+ssh user@broker-host 'timeout 90 python3 -' \
   < scripts/export_project_cwd_corpus.py > tests/data/project_cwd_corpus.csv
 wc -l tests/data/project_cwd_corpus.csv   # expect ~250 (249 pairs + header)
 ```
@@ -1176,9 +1176,9 @@ CORPUS = Path(__file__).parent / "data" / "project_cwd_corpus.csv"
 
 # The roots this feature ships with, mirroring config/projects.yaml.
 ROOTS = {
-    "jepagame": ["/home/mjarnold/jepagame"],
-    "orchid-sdxl": ["/home/mjarnold/orchid-sdxl"],
-    "dreamer-chassis": ["/home/mjarnold/dreamer-chassis"],
+    "beta": ["/home/user/beta"],
+    "gamma": ["/home/user/gamma"],
+    "delta": ["/home/user/delta"],
 }
 
 
@@ -1194,10 +1194,10 @@ def corpus():
 def projects():
     p = {"_default": ProjectEntry(priority=40)}
     for name, prio in [
-        ("jepagame", 78),
-        ("orchid-sdxl", 60),
-        ("dreamer-chassis", 60),
-        ("agrigen", 80),
+        ("beta", 78),
+        ("gamma", 60),
+        ("delta", 60),
+        ("alpha", 80),
     ]:
         p[name] = ProjectEntry(priority=prio, roots=ROOTS.get(name, []))
     return p
@@ -1246,7 +1246,7 @@ def test_no_job_is_assigned_an_identity_from_a_scratch_directory(corpus, project
     projects' work, so an identity derived from either would be a confident
     wrong answer -- worse than the _default it replaced."""
     for typed, cwd, _n in corpus:
-        if cwd.rstrip("/") in ("/tmp", "/home/mjarnold", ""):
+        if cwd.rstrip("/") in ("/tmp", "/home/user", ""):
             assert project_from_cwd(projects, cwd) is None, f"{cwd} claimed by a root"
 ```
 
@@ -1329,12 +1329,12 @@ for name, e in sorted(p.items()):
     if e.roots:
         print(f"{name:30s} {e.roots}")
 print()
-for cwd in ["/home/mjarnold/jepagame/sweeps", "/home/mjarnold/jepagame2", "/tmp"]:
+for cwd in ["/home/user/beta/sweeps", "/home/user/beta2", "/tmp"]:
     print(f"{cwd:40s} -> {project_from_cwd(p, cwd)}")
 PY
 ```
 
-Expected: the roots print as declared; `/home/mjarnold/jepagame/sweeps` resolves to `jepagame`; `/home/mjarnold/jepagame2` and `/tmp` resolve to `None`. A load error here means a malformed root — fix it now rather than at broker start.
+Expected: the roots print as declared; `/home/user/beta/sweeps` resolves to `beta`; `/home/user/beta2` and `/tmp` resolve to `None`. A load error here means a malformed root — fix it now rather than at broker start.
 
 - [ ] **Step 3: Document `roots:` in `docs/projects-yaml.md`**
 
@@ -1369,10 +1369,10 @@ uv pip install --python .venv/bin/python --force-reinstall --no-deps .
 After deploying, verify against the live broker rather than the test suite:
 
 ```bash
-job submit --project some_new_label --cwd /home/mjarnold/jepagame --dry-run -- true
+job submit --project some_new_label --cwd /home/user/beta --dry-run -- true
 ```
 
-Expected: `validation.effective_project` is `jepagame`,
+Expected: `validation.effective_project` is `beta`,
 `validation.effective_priority` is 78, and `validation.effective_matched_root`
-is `/home/mjarnold/jepagame`. Add `--json` if the CLI's dry-run output does not
+is `/home/user/beta`. Add `--json` if the CLI's dry-run output does not
 show the raw validation block.

@@ -2,22 +2,33 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]\n\n### Privacy — tracked config no longer carries real paths
+
+- `config/projects.local.yaml` (gitignored, beside `projects.yaml`) now holds
+  machine-specific `roots:` and private project names; each entry replaces the
+  same-named tracked entry wholesale. Operators must create it on deploy or lose
+  cwd-derived identity for those roots — see docs/projects-yaml.md.
+- The tracked `projects.yaml`, the replay corpus `tests/data/project_cwd_corpus.csv`,
+  tests, plans and docs are pseudonymised (`/home/user/...`, greek-letter project
+  names). `tests/test_no_private_paths.py` fails the suite if a private path, host,
+  address or session trailer is ever tracked again.
+
 ## [Unreleased]
 
 ## [0.5.42] — 2026-09-01
 
 ### Added
 
-- **The cwd-derived project identity feature is no longer inert: `agrigen`, `jepagame`,
-  `orchid-sdxl`, and `dreamer-chassis` now declare `roots:` in `config/projects.yaml`.**
+- **The cwd-derived project identity feature is no longer inert: `alpha`, `beta`,
+  `gamma`, and `delta` now declare `roots:` in `config/projects.yaml`.**
   The matching machinery and its acceptance gate against 3,608 rows of real job history
   (`tests/test_corpus_replay.py`) landed first, but no project had ever declared a root,
   so a job typed with an unregistered run label (`pillar2a1_sweep`, `arf-promoter`,
-  `orchid-sdxl-stage4b`, ...) still fell through to `_default` regardless. Each root was
+  `gamma-stage4b`, ...) still fell through to `_default` regardless. Each root was
   picked by replaying `tests/data/project_cwd_corpus.csv` grouped by cwd and keeping only
   directories where every project name ever typed from them reads as a variant of one
-  project — deliberately excluding `/home/mjarnold/trellis2` and `.../hunyuan3d`
-  (>=97% agrigen-typed in the corpus, trellis2 the single largest cwd in it) because both
+  project — deliberately excluding `/home/user/trellis2` and `.../hunyuan3d`
+  (>=97% alpha-typed in the corpus, trellis2 the single largest cwd in it) because both
   are generic third-party tool checkouts a differently-owned future clone could silently
   inherit. `docs/projects-yaml.md` gains a `roots:` section covering the schema, the
   three-rule resolution order (an explicit, registered `--project` always wins over cwd —
@@ -29,7 +40,7 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
   Shipping in the same release, the user-visible surface that makes a substituted identity
   findable and explainable rather than merely correct:
   - `job list --project NAME` now matches **either** the scheduling identity or the typed
-    run label. Without this a job submitted as `pillar2a1_sweep` and priced as `jepagame`
+    run label. Without this a job submitted as `pillar2a1_sweep` and priced as `beta`
     was unfindable under the only name its submitter ever knew it by.
   - `JobInfo` gains `project_label`: the name as typed, `null` when it agrees with
     `project`, so the field reads as "something was substituted here".
@@ -48,8 +59,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
     projects fold onto the same key the fold is refused and cwd decides, yet the names
     still fold together. `job submit --explain` carries `matched_root` and answers it.
   - Path matching now collapses `..` lexically before comparing components. It previously
-    did not, so `/home/mjarnold/jepagame/../../tmp` — a job actually running in `/tmp` —
-    matched a root of `/home/mjarnold/jepagame` and was priced at that project's `78`.
+    did not, so `/home/user/beta/../../tmp` — a job actually running in `/tmp` —
+    matched a root of `/home/user/beta` and was priced at that project's `78`.
     `cwd` is free text on the wire, so this was caller-reachable. A root containing a `..`
     component is now a load error, in the same raise-don't-drop style as the other root
     validations. Symlinks and bind mounts remain unresolved by design: the broker cannot
@@ -76,12 +87,12 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 - **A registered project no longer loses its priority to how the name was typed.**
   Project names are free text chosen at submit time and were matched with a bare
-  `name in projects`, so `ARFDSynInt` ran at `_default` 40 while `arfdsynint` sat
+  `name in projects`, so `epsilon` ran at `_default` 40 while `epsilon` sat
   deliberately registered at 65 — a difference of case alone, raising no error and
   visible only in a warning nothing consumed. Case and `-`/`_` are now folded when
   matching, the resolved name is what `/submit` stores and `/resolve` previews, and an
-  exact hit always wins. Folding is deliberately **not** fuzzy: `phelipanche` is not
-  folded onto `phelipanche-fm`, because a suffix difference is a registration decision,
+  exact hit always wins. Folding is deliberately **not** fuzzy: `kappa` is not
+  folded onto `kappa-fm`, because a suffix difference is a registration decision,
   and guessing there would run work at another project's priority — the same bug
   inverted. Two registered names that fold together are reported at load and fall back
   to exact matching rather than one being picked arbitrarily.
