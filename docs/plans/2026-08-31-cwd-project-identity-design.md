@@ -1,6 +1,9 @@
 # cwd-derived project identity
 
-Design, 2026-08-31. Status: approved, not yet planned.
+Design, 2026-08-31. **Status: shipped in v0.5.42 (2026-09-01).** Historical design
+record; the shipped behaviour diverged in places (lexical `..` collapse, the
+stderr substitution note's wording, `matched_root` in the dry-run plan). The
+current specification is `docs/projects-yaml.md` §10.
 
 ## The problem
 
@@ -21,7 +24,7 @@ v0.5.39–41 closed the _spelling_ half of this (`epsilon` now folds onto
 `epsilon`; a write reports the name it landed on). The retyped-string
 mechanism itself is untouched, and it is the larger half.
 
-### Measured, live DB `/home/user/jobd/data/jobd.db`, 2026-08-31
+### Measured, live broker DB, 2026-08-31
 
 3,608 job rows; 249 distinct `(project, cwd)` pairs; 138 distinct project
 names against 148 distinct cwds.

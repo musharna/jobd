@@ -2,6 +2,18 @@
 # This file is OPTIONAL — with no projects.yaml the broker uses the global
 # default priority for every job. Edit freely for your own projects.
 #
+# WHAT IS IN HERE: every name and path in this file is a PSEUDONYM. The
+# `project-a..d` rows are placeholders, and the `alpha`/`beta`/`gamma`/`delta`
+# entries with `roots:` mirror the maintainer's fleet with names and home
+# directory rewritten, so that CI can replay 3,608 rows of real job history
+# (tests/data/project_cwd_corpus.csv, rewritten the same way) through
+# tests/test_corpus_replay.py without publishing where anything really lives.
+# The real names and roots go in `config/projects.local.yaml` beside this file
+# -- gitignored, and read by the broker as an overlay that replaces same-named
+# entries and adds new ones (docs/projects-yaml.md, "projects.local.yaml").
+# If you cloned jobd to run your own broker: put YOUR projects there, or
+# replace the entries below; `docker-compose.yml` bind-mounts ./config.
+#
 # Change priorities live (persists + reloads) with:
 #   job projects set NAME PRIORITY
 projects:
@@ -36,8 +48,9 @@ projects:
     roots:
       # 187 jobs directly in /home/user/beta plus several hundred more
       # in its .claude/worktrees/* and .worktrees/* subdirectories (matched
-      # via the same root, component-wise) — every typed name is `beta`
-      # or a `pillarN...` sweep label.
+      # via the same root, component-wise). Typed names are `beta`, the
+      # `pillarN...` sweep labels, and a few others (`synthetic-souls`,
+      # `ss-1l-emerge`, `beta-2c-*`) that all read as this one project.
       - /home/user/beta
       # 12 jobs, one typed label (`pillar1l-emerge`), unregistered — every one
       # of them falls to _default today. A sibling of the root above (not
