@@ -162,7 +162,11 @@ def _parse_roots(raw: object, project_name: str) -> list[str]:
             raise ValueError(
                 f"projects.yaml {project_name!r}: roots entry {r!r} is not an absolute path"
             )
-        norm = str(PurePosixPath(r))
+        # POSIX lets `//x` differ from `/x` and both PurePosixPath and
+        # normpath preserve exactly two leading slashes, so `//home/x` was a
+        # valid root that could never match a cwd of `/home/x/...`. On Linux
+        # they are the same directory; spell the root that way.
+        norm = "/" + str(PurePosixPath(r)).lstrip("/")
         if ".." in PurePosixPath(norm).parts:
             # A root is a stable identity boundary, so a `..` in it is a config
             # error, not a path to interpret. Collapsing it silently would
@@ -204,10 +208,29 @@ def load_projects(path: Path | str) -> dict[str, ProjectEntry]:
     projects = data.get("projects", {})
     out: dict[str, ProjectEntry] = {}
     for name, cfg in projects.items():
-        if not isinstance(cfg, dict) or "priority" not in cfg:
+        if not isinstance(cfg, dict):
+            continue
+        if "priority" not in cfg:
+            if "roots" in cfg:
+                # An entry without `priority` is skipped as not-a-project. That
+                # skip used to run BEFORE the roots validation, so a project
+                # declared as `name: {roots: [...]}` vanished with no log line
+                # -- the invisible removal `_parse_roots` exists to prevent
+                # (audit 2026-09-02 C-2).
+                raise ValueError(
+                    f"projects.yaml {name!r}: declares roots but no priority; "
+                    f"a project with roots must be a full entry"
+                )
             continue
         defaults = _parse_defaults(cfg.get("defaults"))
         roots = _parse_roots(cfg.get("roots"), name)
+        if name == "_default" and roots:
+            # `project_from_cwd` skips `_default` on purpose; accepting roots
+            # here would validate them and then never consult them.
+            raise ValueError(
+                "projects.yaml '_default': may not declare roots; it is the fallback "
+                "priority row, not a project"
+            )
         out[name] = ProjectEntry(priority=int(cfg["priority"]), defaults=defaults, roots=roots)
     if "_default" not in out:
         out["_default"] = ProjectEntry(priority=40)
@@ -466,9 +489,17 @@ def _path_is_within(cwd: str, root: str) -> bool:
     `..` needs no filesystem and is correct on any. Symlinks and bind mounts
     remain unresolved by design — see docs/projects-yaml.md.
     """
-    c = PurePosixPath(os.path.normpath(cwd)).parts
-    r = PurePosixPath(os.path.normpath(root)).parts
+    c = PurePosixPath(_normalize_abs(cwd)).parts
+    r = PurePosixPath(_normalize_abs(root)).parts
     return len(c) >= len(r) and c[: len(r)] == r
+
+
+def _normalize_abs(path: str) -> str:
+    """`os.path.normpath`, plus collapsing a leading `//` (which POSIX and
+    normpath both preserve) onto `/`. A relative path is returned as normpath
+    leaves it; it will match no absolute root, which is the right answer."""
+    norm = os.path.normpath(path)
+    return "/" + norm.lstrip("/") if norm.startswith("/") else norm
 
 
 def project_from_cwd(projects: dict[str, ProjectEntry], cwd: str) -> tuple[str, str] | None:

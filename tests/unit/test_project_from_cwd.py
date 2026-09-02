@@ -133,3 +133,15 @@ def test_dotdot_onto_a_prefix_sibling_does_not_match():
 def test_dotdot_escaping_the_home_tree_entirely_does_not_match():
     """The worst case: a job really running in /tmp, priced at beta's 78."""
     assert project_from_cwd(_rooted(), "/home/user/beta/../../tmp") is None
+    """The worst case: a job really running in /tmp, priced at beta's 78."""
+    assert project_from_cwd(_rooted(), "/home/user/beta/../../tmp") is None
+
+
+def test_a_leading_double_slash_in_the_cwd_still_matches():
+    """`//home/...` and `/home/...` name the same directory on Linux; the
+    match must not fail on a spelling difference in the caller's cwd."""
+    projects = _projects(beta=["/home/user/beta"])
+    assert project_from_cwd(projects, "//home/user/beta/sweeps") == (
+        "beta",
+        "/home/user/beta",
+    )

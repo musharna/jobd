@@ -13,12 +13,14 @@ from fastapi import APIRouter, Response
 from jobd import events as _events
 from jobd.broker.context import BrokerDeps
 from jobd.broker.events import _emit_event, _parse_since
+from jobd.config import canonical_project_name
 from jobd.models import EventIngest
 
 
 def build_router(deps: BrokerDeps) -> APIRouter:
     router = APIRouter()
     logs_dir = deps.logs_dir
+    state = deps.state
 
     @router.post("/events", status_code=204)
     def ingest_event(body: EventIngest):
@@ -58,13 +60,21 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         """
         limit = max(1, min(10000, int(limit)))
         cutoff = _parse_since(since) if since else None
+        # Broker-emitted rows carry the CANONICAL project (submit folds the
+        # typed spelling onto the registered one), so the filter folds too, or
+        # a query for `Project_A` finds nothing written after the fold landed
+        # (audit 2026-09-02 C-1). The typed spelling is kept as well: rows
+        # ingested by hooks/workers may carry whatever the caller sent.
+        project_names: set[str] | None = None
+        if project is not None:
+            project_names = {project, canonical_project_name(state["projects"], project)}
 
         def _match(row: dict) -> bool:
             # Rows missing `source` are legacy (pre-schema-v2) — excluded, same
             # as before. The reverse-reader handles the ts/cutoff early-stop.
             if "source" not in row:
                 return False
-            if project is not None and row.get("project") != project:
+            if project_names is not None and row.get("project") not in project_names:
                 return False
             if event is not None and row.get("event") != event:
                 return False

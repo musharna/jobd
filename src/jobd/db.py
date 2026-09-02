@@ -40,7 +40,7 @@ class Job(Base):
     # job); this is the free-text run label a human searches for. NULL means the
     # two are the same, which is why this needed no backfill: every row that
     # predates the column is already correct under that reading.
-    project_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    project_label: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     profile: Mapped[str | None] = mapped_column(String(100), nullable=True)
     host_pin: Mapped[str] = mapped_column(String(50), default="any")
     priority: Mapped[int] = mapped_column(Integer, index=True)
@@ -226,6 +226,14 @@ _WORKER_ADDS = [
 ]
 
 
+# Indexes that `create_all` builds on a fresh database but an in-place upgrade
+# (which only ALTERs columns on) would otherwise never get. Names match
+# SQLAlchemy's `index=True` convention so the two paths converge on one index.
+_JOB_INDEXES = [
+    ("ix_jobs_project_label", "project_label"),
+]
+
+
 def migrate(engine) -> None:
     """Additive SQLite migration for Phase 2 capability columns. Idempotent."""
     insp = _inspect(engine)
@@ -235,6 +243,8 @@ def migrate(engine) -> None:
             for col, ddl in _JOB_ADDS:
                 if col not in existing:
                     conn.execute(_text(f"ALTER TABLE jobs ADD COLUMN {col} {ddl}"))
+            for idx, col in _JOB_INDEXES:
+                conn.execute(_text(f"CREATE INDEX IF NOT EXISTS {idx} ON jobs ({col})"))
     if "workers" in insp.get_table_names():
         existing = {c["name"] for c in insp.get_columns("workers")}
         with engine.begin() as conn:
