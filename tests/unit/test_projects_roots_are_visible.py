@@ -12,8 +12,8 @@ import job_cli.cli as cli_mod
 
 def test_get_projects_reports_each_projects_roots(rooted_client):
     body = rooted_client.get("/projects").json()
-    assert body["jepagame"]["roots"] == ["/home/mjarnold/jepagame"]
-    assert body["orchid-sdxl"]["roots"] == ["/home/mjarnold/orchid-sdxl"]
+    assert body["beta"]["roots"] == ["/home/user/beta"]
+    assert body["gamma"]["roots"] == ["/home/user/gamma"]
     # A project without roots does not grow an empty key.
     assert "roots" not in body["_default"]
 
@@ -31,5 +31,5 @@ def test_job_projects_list_renders_roots(rooted_app, monkeypatch):
     monkeypatch.setattr(cli_mod, "_client", _AppClient)
     r = CliRunner().invoke(cli_mod.app, ["projects", "list"])
     assert r.exit_code == 0, r.output
-    jepagame_line = next(line for line in r.output.splitlines() if "jepagame" in line)
-    assert "roots=/home/mjarnold/jepagame" in jepagame_line
+    beta_line = next(line for line in r.output.splitlines() if "beta" in line)
+    assert "roots=/home/user/beta" in beta_line
