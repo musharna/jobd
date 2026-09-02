@@ -2,7 +2,9 @@
 
 All notable changes to jobd. Format roughly follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]\n\n### Privacy — tracked config no longer carries real paths
+## [Unreleased]
+
+### Privacy — tracked config no longer carries real paths
 
 - `config/projects.local.yaml` (gitignored, beside `projects.yaml`) now holds
   machine-specific `roots:` and private project names; each entry replaces the
@@ -12,8 +14,6 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
   tests, plans and docs are pseudonymised (`/home/user/...`, greek-letter project
   names). `tests/test_no_private_paths.py` fails the suite if a private path, host,
   address or session trailer is ever tracked again.
-
-## [Unreleased]
 
 ## [0.5.42] — 2026-09-01
 
