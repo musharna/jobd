@@ -729,13 +729,13 @@ def test_call_tool_logs_error_kind_for_refusal(tmp_path, monkeypatch):
 def test_jobd_list_carries_the_typed_label_beside_the_identity():
     """audit 2026-09-02 Q-3: the broker filter matches either name, so
     `jobd_list(project="pillar2a1_sweep")` returned rows whose `project` was
-    `jepagame` with no field saying why. The summary hand-lists its columns;
+    `beta` with no field saying why. The summary hand-lists its columns;
     the label has to be one of them or the substitution is invisible here."""
     _mock_jobs_endpoint(
         [
             {
                 "id": 3,
-                "project": "jepagame",
+                "project": "beta",
                 "project_label": "pillar2a1_sweep",
                 "state": "queued",
                 "worker": None,
@@ -749,7 +749,7 @@ def test_jobd_list_carries_the_typed_label_beside_the_identity():
 
     client = JobdClient(base_url="http://broker.test")
     out = jobd_list(client, {"state": ["queued"]})
-    assert out["jobs"][0]["project"] == "jepagame"
+    assert out["jobs"][0]["project"] == "beta"
     assert out["jobs"][0]["project_label"] == "pillar2a1_sweep"
 
 
@@ -763,7 +763,7 @@ def test_submit_reports_the_typed_label_when_the_identity_was_substituted():
             json={
                 "job_id": 7,
                 "state": "queued",
-                "project": "jepagame",
+                "project": "beta",
                 "project_label": "pillar2a1_sweep",
                 "host_pin": "any",
                 "queued_at": "2026-04-26T00:00:00Z",
@@ -772,5 +772,5 @@ def test_submit_reports_the_typed_label_when_the_identity_was_substituted():
     )
     client = JobdClient(base_url="http://broker.test")
     out = jobd_submit(client, {"command": "x", "project": "pillar2a1_sweep", "cwd": "/x"})
-    assert out["project"] == "jepagame"
+    assert out["project"] == "beta"
     assert out["project_label"] == "pillar2a1_sweep"
