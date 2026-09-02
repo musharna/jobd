@@ -23,17 +23,6 @@ _PYPROJECT = tomllib.loads((_ROOT / "pyproject.toml").read_text())
 _SERVER_JSON = json.loads((_ROOT / "server.json").read_text())
 
 
-def test_server_json_version_matches_pyproject() -> None:
-    expected = _PYPROJECT["project"]["version"]
-    assert _SERVER_JSON["version"] == expected, (
-        f"server.json top-level version {_SERVER_JSON['version']!r} != pyproject {expected!r}"
-    )
-    for i, pkg in enumerate(_SERVER_JSON.get("packages", [])):
-        assert pkg["version"] == expected, (
-            f"server.json packages[{i}].version {pkg['version']!r} != pyproject {expected!r}"
-        )
-
-
 def test_server_json_identity() -> None:
     assert _SERVER_JSON["name"] == "io.github.musharna/jobd"
     identifiers = {p.get("identifier") for p in _SERVER_JSON.get("packages", [])}

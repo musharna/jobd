@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: ["python"]
+        # `actions` scans the workflows themselves (untrusted-input injection,
+        # unpinned actions, over-broad permissions) — six of them ship here.
+        language: ["python", "actions"]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

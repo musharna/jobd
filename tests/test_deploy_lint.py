@@ -756,6 +756,32 @@ def test_ci_enforces_a_branch_coverage_floor():
     assert any("--cov-branch" in r for r in gated), (
         "the coverage gate no longer measures branch coverage"
     )
+    # The VALUE lives in pyproject ([tool.coverage.report] fail_under) so it is
+    # discoverable from the repo, not only from a workflow line; the workflow
+    # flag must agree with it (audit 2026-09-02).
+    import tomllib
+
+    floor = tomllib.loads(_PYPROJECT.read_text())["tool"]["coverage"]["report"]["fail_under"]
+    flags = {int(m) for r in gated for m in re.findall(r"--cov-fail-under=(\d+)", r)}
+    assert flags == {floor}, f"ci.yml floors {flags} disagree with pyproject fail_under={floor}"
+
+
+def test_the_suite_imports_jobd_from_the_working_tree():
+    """audit 2026-09-02 T-1: a non-editable `jobd` wheel in the venv made every
+    local pytest run test the installed SNAPSHOT, not src/ -- nine mutation
+    checks passed vacuously and a coverage run read 0%. CI installs editable
+    (uv.lock: `source = { editable = "." }`); this pins that shape wherever the
+    suite runs, and points at the fix when it does not hold."""
+    import job_cli
+    import jobd
+
+    src = _REPO_ROOT / "src"
+    for mod in (jobd, job_cli):
+        where = Path(mod.__file__).resolve()
+        assert src in where.parents, (
+            f"{mod.__name__} imports from {where}, not {src}: the venv holds a "
+            f"non-editable install. Run `uv sync --extra dev --extra worker --extra mcp`."
+        )
 
 
 def test_workflow_run_blocks_do_not_splice_github_expressions():

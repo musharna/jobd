@@ -51,6 +51,7 @@ import pytest
 from jobd.config import (
     ProjectEntry,
     canonical_project_name,
+    load_projects,
     project_from_cwd,
     resolve_effective_config,
     resolve_priority,
@@ -139,10 +140,12 @@ def test_arm2_no_currently_registered_submit_changes_priority(corpus, projects):
     registered project today must keep its exact priority, through the real
     resolver."""
     changed = []
+    checked_jobs = 0
     for typed, cwd, n in corpus:
         before = canonical_project_name(projects, typed)
         if before not in projects:
             continue  # not a rule-1 job; arm 1's business
+        checked_jobs += n
         eff = _eff(projects, typed, cwd)
         expected_priority = resolve_priority(projects, before, 0)
         if eff.project != before or eff.priority.value != expected_priority:
@@ -150,6 +153,20 @@ def test_arm2_no_currently_registered_submit_changes_priority(corpus, projects):
                 (typed, cwd, before, eff.project, eff.priority.value, expected_priority, n)
             )
     assert not changed, f"{len(changed)} registered submits were repriced: {changed[:5]}"
+    # Non-empty floor (audit 2026-09-02 T-2): with `canonical_project_name`
+    # broken so that nothing registers, every row takes the `continue` above
+    # and `changed` is empty -- this arm passed while checking NOTHING. Counted
+    # in JOBS like arm 1 (63 rule-1 pairs / 1129 jobs measured 2026-09-02); a
+    # derived guard needs a floor or it fails open.
+    assert checked_jobs >= 1000, f"arm 2 checked only {checked_jobs} rule-1 jobs"
+
+
+def test_the_roots_table_mirrors_the_shipped_config():
+    """`ROOTS` claims to mirror config/projects.yaml, and an earlier version
+    listed three of six roots under that same claim (681f60b). Assert it, so
+    the next drift fails here instead of silently narrowing arm 1."""
+    shipped = load_projects(Path(__file__).resolve().parent.parent / "config" / "projects.yaml")
+    assert {name: entry.roots for name, entry in shipped.items() if entry.roots} == ROOTS
 
 
 def test_arm1_jobs_inside_a_rooted_project_now_get_an_identity(corpus, projects):
