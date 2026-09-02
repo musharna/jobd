@@ -63,3 +63,15 @@ def test_scanner_reports_every_planted_hit(tmp_path):
     found = {h.split(": ", 1)[1] for h in hits}
     assert found == set(FORBIDDEN), sorted(set(FORBIDDEN) - found)
     assert all(h.split(":")[1].isdigit() for h in hits)
+
+
+def test_the_private_overlay_is_gitignored():
+    """The real roots and names live in config/projects.local.yaml. If git does
+    not ignore that path, the deploy step that copies it beside projects.yaml
+    turns the next `git add -A` into a publication of everything this file
+    exists to keep private. (#129 appended the rule as one line containing
+    literal backslash-n sequences, so the pattern never matched.)"""
+    r = subprocess.run(
+        ["git", "check-ignore", "-q", "config/projects.local.yaml"], cwd=ROOT, check=False
+    )
+    assert r.returncode == 0, "config/projects.local.yaml is not gitignored"
