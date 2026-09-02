@@ -454,6 +454,7 @@ def test_jobd_list_summarizes_jobs():
     assert set(out["jobs"][0].keys()) == {
         "job_id",
         "project",
+        "project_label",
         "state",
         "host",
         "exit_code",
@@ -722,3 +723,54 @@ def test_call_tool_logs_error_kind_for_refusal(tmp_path, monkeypatch):
     entry = _json.loads((tmp_path / "calls.jsonl").read_text().strip().splitlines()[-1])
     assert entry["error_kind"] == "cwd_outside_mount_roots"
     assert entry["tool"] == "jobd_submit"
+
+
+@respx.mock
+def test_jobd_list_carries_the_typed_label_beside_the_identity():
+    """audit 2026-09-02 Q-3: the broker filter matches either name, so
+    `jobd_list(project="pillar2a1_sweep")` returned rows whose `project` was
+    `jepagame` with no field saying why. The summary hand-lists its columns;
+    the label has to be one of them or the substitution is invisible here."""
+    _mock_jobs_endpoint(
+        [
+            {
+                "id": 3,
+                "project": "jepagame",
+                "project_label": "pillar2a1_sweep",
+                "state": "queued",
+                "worker": None,
+                "exit_code": None,
+                "submitted_at": "2026-04-26T00:00:00+00:00",
+                "started_at": None,
+            }
+        ]
+    )
+    from jobd.mcp.tools import jobd_list
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_list(client, {"state": ["queued"]})
+    assert out["jobs"][0]["project"] == "jepagame"
+    assert out["jobs"][0]["project_label"] == "pillar2a1_sweep"
+
+
+@respx.mock
+def test_submit_reports_the_typed_label_when_the_identity_was_substituted():
+    """Same gap on the submit result: the agent typed one name and the broker
+    scheduled under another; the reply must carry both."""
+    respx.post("http://broker.test/submit").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "job_id": 7,
+                "state": "queued",
+                "project": "jepagame",
+                "project_label": "pillar2a1_sweep",
+                "host_pin": "any",
+                "queued_at": "2026-04-26T00:00:00Z",
+            },
+        )
+    )
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_submit(client, {"command": "x", "project": "pillar2a1_sweep", "cwd": "/x"})
+    assert out["project"] == "jepagame"
+    assert out["project_label"] == "pillar2a1_sweep"

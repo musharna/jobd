@@ -113,3 +113,61 @@ def test_unknown_tool_is_an_error_result_not_an_exception():
 
     assert result.is_error
     assert "unknown tool" in result.content[0].text.lower()
+
+
+@respx.mock
+def test_missing_required_argument_is_an_error_result_not_a_protocol_crash():
+    """audit 2026-09-02: `_call` caught transport and unknown-tool errors but
+    not the KeyError a missing required argument raises inside a tool, so
+    `jobd_status {}` -- the most common agent mistake -- reached the client as
+    a bare protocol-level 'Internal server error' with a traceback on stderr,
+    and the `is_error` + hint contract silently stopped applying."""
+    respx.get("http://broker.test/jobs/7").mock(
+        return_value=httpx.Response(200, json={"job_id": 7, "state": "running"})
+    )
+    server = build_server(client=JobdClient(base_url="http://broker.test"))
+
+    async def go():
+        async with Client(server) as client:
+            bad_status = await client.call_tool("jobd_status", {})
+            bad_submit = await client.call_tool("jobd_submit", {})
+            good = await client.call_tool("jobd_status", {"job_id": 7})
+            return bad_status, bad_submit, good
+
+    bad_status, bad_submit, good = _run(go())
+
+    for bad in (bad_status, bad_submit):
+        assert bad.is_error, "a missing argument must be an is_error result"
+        payload = json.loads(bad.content[0].text)
+        assert payload["error"]["kind"] == "invalid_arguments"
+    assert "job_id" in json.loads(bad_status.content[0].text)["error"]["message"]
+    assert not good.is_error, "positive control failed - the harness itself is broken"
+
+
+@respx.mock
+def test_concurrent_calls_do_not_serialize_behind_one_slow_broker_request():
+    """audit 2026-09-02: `_dispatch` ran the blocking httpx call ON the event
+    loop, so a `jobd_submit wait=true` (up to 270 s) stalled every other
+    request on the stdio session. Two 0.4 s broker calls issued together must
+    finish in well under 0.8 s."""
+    import time
+
+    def slow(request):
+        time.sleep(0.4)
+        return httpx.Response(200, json={"job_id": 7, "state": "running"})
+
+    respx.get("http://broker.test/jobs/7").mock(side_effect=slow)
+    server = build_server(client=JobdClient(base_url="http://broker.test"))
+
+    async def go():
+        async with Client(server) as client:
+            t0 = time.monotonic()
+            a, b = await asyncio.gather(
+                client.call_tool("jobd_status", {"job_id": 7}),
+                client.call_tool("jobd_status", {"job_id": 7}),
+            )
+            return a, b, time.monotonic() - t0
+
+    a, b, elapsed = _run(go())
+    assert not a.is_error and not b.is_error
+    assert elapsed < 0.7, f"two concurrent calls took {elapsed:.2f}s: dispatch is serialized"

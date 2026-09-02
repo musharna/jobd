@@ -191,7 +191,12 @@ def build_server(client: JobdClient | None = None) -> Server:
         t0 = time.monotonic()
         error_kind: str | None = None
         try:
-            payload = _dispatch(name, arguments)
+            # Off the event loop: `_dispatch` drives a BLOCKING httpx client,
+            # and a `jobd_submit wait=true` can hold it for up to 270 s. Run
+            # inline, that stalled every other request on the stdio session
+            # (audit 2026-09-02). Unknown-tool ValueError is raised inside the
+            # thread too and propagates through `to_thread` unchanged.
+            payload = await asyncio.to_thread(_dispatch, name, arguments)
             if (
                 isinstance(payload, dict)
                 and "error" in payload
@@ -217,6 +222,24 @@ def build_server(client: JobdClient | None = None) -> Server:
             error_kind = "unknown_tool"
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=str(e))],
+                is_error=True,
+            )
+        except (KeyError, TypeError) as e:
+            # A missing or mis-typed argument (`jobd_status {}`) raises inside
+            # the tool. Uncaught, 2.x reports it as a protocol-level "Internal
+            # server error" with a traceback on stderr, and the is_error + hint
+            # contract silently stops applying to the most common agent
+            # mistake (audit 2026-09-02). Same shape as a broker 422.
+            error_kind = "invalid_arguments"
+            payload = {
+                "error": {
+                    "kind": error_kind,
+                    "message": f"missing or malformed argument: {e}",
+                    "hint": f"check the inputSchema for {name}: required fields and types",
+                }
+            }
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=json.dumps(payload))],
                 is_error=True,
             )
         finally:

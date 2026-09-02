@@ -12,7 +12,13 @@ SUBMIT_INPUT = {
         "command": {"type": "string", "description": "Shell command run by the worker shell."},
         "project": {
             "type": "string",
-            "description": "Priority lookup key; falls back to _default.",
+            "description": (
+                "Scheduling identity. A registered projects.yaml name (matched "
+                "case- and -/_-insensitively) prices at its priority; an "
+                "unregistered name is priced by the project whose roots: contain "
+                "cwd, else by _default. The result's project_label carries the "
+                "name as typed when the two differ."
+            ),
         },
         "cwd": {
             "type": "string",
