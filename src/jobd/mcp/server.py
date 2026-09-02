@@ -212,9 +212,20 @@ def build_server(client: JobdClient | None = None) -> Server:
             # to be built explicitly — otherwise a broker outage propagates as a
             # protocol-level crash instead of the documented is_error response
             # (tests/mcp/walkthrough.md step 11).
-            error_kind = "transport"
+            # Name WHICH transport failure, and pass the client's hint through.
+            # An agent cannot ssh to the host to check whether the broker is
+            # actually down, so it depends on this steer more than a human
+            # operator does: from a bare "timed out" the obvious inference is
+            # "the broker is down", which is precisely wrong for a dropped
+            # packet and can lead an agent to restart a service that is fine.
+            kind = getattr(e, "kind", None)
+            hint = getattr(e, "hint", "")
+            error_kind = f"transport_{kind}" if kind else "transport"
+            text = f"jobd transport error ({kind}): {e}" if kind else f"jobd transport error: {e}"
+            if hint:
+                text = f"{text}\nhint: {hint}"
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text=f"jobd transport error: {e}")],
+                content=[types.TextContent(type="text", text=text)],
                 is_error=True,
             )
         except ValueError as e:

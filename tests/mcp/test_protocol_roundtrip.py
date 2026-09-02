@@ -102,6 +102,43 @@ def test_transport_failure_surfaces_as_is_error_not_a_crash():
 
 
 @respx.mock
+def test_transport_error_tells_the_agent_which_failure_it_was():
+    """An agent cannot ssh to the host to check whether the broker is really down.
+
+    That makes it MORE dependent on this steer than a human operator, not less:
+    from a bare "timed out" the obvious inference is "the broker is down", which
+    is exactly wrong for a dropped packet. On 2026-09-02 a human made that
+    inference about a broker that was healthy and freshly upgraded; an agent
+    would have had less evidence to correct it with, and might have gone on to
+    "helpfully" restart a service that was fine.
+    """
+    respx.get("http://broker.test/jobs/7").mock(
+        return_value=httpx.Response(200, json={"job_id": 7, "state": "running"})
+    )
+    respx.get("http://broker.test/workers").mock(side_effect=httpx.ConnectTimeout("timed out"))
+    server = build_server(client=JobdClient(base_url="http://broker.test"))
+
+    async def go():
+        async with Client(server) as client:
+            bad = await client.call_tool("jobd_workers", {})
+            # Positive control in the SAME test, per the sibling above.
+            good = await client.call_tool("jobd_status", {"job_id": 7})
+            return bad, good
+
+    bad, good = _run(go())
+
+    assert bad.is_error
+    text = bad.content[0].text
+    # Parenthesised on purpose: a bare `"timeout" in text` would also be
+    # satisfied by the exception's own class name, and pass without the fix.
+    assert "(timeout)" in text, f"the agent is not told which failure this was: {text!r}"
+    assert "hint:" in text, f"the agent gets no steer: {text!r}"
+    # The load-bearing half: steer AWAY from the broker, toward the path.
+    assert "firewall" in text or "ACL" in text
+    assert not good.is_error, "positive control failed - the harness itself is broken"
+
+
+@respx.mock
 def test_unknown_tool_is_an_error_result_not_an_exception():
     server = build_server(client=JobdClient(base_url="http://broker.test"))
 
