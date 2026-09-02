@@ -884,4 +884,9 @@ def test_ping_broker_returns_non_ok_exits_2(monkeypatch):
     cli_mod = _patch_ping_client(monkeypatch, response={"status": "degraded", "version": "0.1.0"})
     r = CliRunner().invoke(cli_mod.app, ["ping"])
     assert r.exit_code == 2
-    assert "unreachable" in r.output  # human-text path uses "unreachable" for any non-ok
+    # A `{"status": "degraded"}` body is a broker that ANSWERED. This assertion
+    # used to require the word "unreachable" here, which described the defect
+    # rather than the intent: it is the reason a healthy-but-unroutable broker
+    # was reported as down on 2026-09-02. Unhealthy, yes; unreachable, no.
+    assert "reachable, but not healthy" in r.output
+    assert "unreachable" not in r.output
