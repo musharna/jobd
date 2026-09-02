@@ -24,7 +24,7 @@ def test_the_event_is_emitted_with_the_label_and_the_root(rooted_logs):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
@@ -36,9 +36,9 @@ def test_the_event_is_emitted_with_the_label_and_the_root(rooted_logs):
     ]
     hits = [e for e in rows if e["event"] == "cwd_identity_applied"]
     assert len(hits) == 1, f"expected exactly one, got {[e['event'] for e in rows]}"
-    assert hits[0]["project"] == "jepagame"
+    assert hits[0]["project"] == "beta"
     assert hits[0]["payload"]["project_label"] == "pillar2a1_sweep"
-    assert hits[0]["payload"]["matched_root"] == "/home/mjarnold/jepagame"
+    assert hits[0]["payload"]["matched_root"] == "/home/user/beta"
 
 
 def test_no_event_when_the_typed_name_was_already_registered(rooted_logs):
@@ -49,7 +49,7 @@ def test_no_event_when_the_typed_name_was_already_registered(rooted_logs):
     client, logs_dir = rooted_logs
     r = client.post(
         "/submit",
-        json={"cmd": ["true"], "cwd": "/home/mjarnold/jepagame", "project": "jepagame"},
+        json={"cmd": ["true"], "cwd": "/home/user/beta", "project": "beta"},
     )
     assert r.status_code == 200, r.text
     rows = [

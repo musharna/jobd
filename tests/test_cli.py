@@ -382,7 +382,7 @@ def test_submit_identity_note_goes_to_stderr(monkeypatch):
     line like every other one in this function, all of which go to stderr."""
     r = _submit_with_response(
         monkeypatch,
-        {"id": 7, "project": "jepagame", "project_label": "pillar2a1_sweep"},
+        {"id": 7, "project": "beta", "project_label": "pillar2a1_sweep"},
     )
     assert r.exit_code == 0, r.output
     # The whole point: stdout stays machine-readable.
@@ -414,29 +414,27 @@ def test_submit_identity_note_states_only_what_it_can_observe(monkeypatch):
 
 
 def test_submit_folded_spelling_does_not_claim_the_cwd_supplied_it(monkeypatch):
-    """`Orchid_SDXL` -> `orchid-sdxl` is case/`-`_`_` FOLDING by
+    """`GAMMA` -> `gamma` is case/`-`_`_` FOLDING by
     `canonical_project_name`; cwd was never consulted. Saying "identity from
     cwd" here sends an operator debugging a surprise priority to read
     `roots:`, which had nothing to do with it."""
     r = _submit_with_response(
         monkeypatch,
-        {"id": 8, "project": "orchid-sdxl", "project_label": "Orchid_SDXL"},
+        {"id": 8, "project": "gamma", "project_label": "GAMMA"},
     )
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["id"] == 8
-    assert "Orchid_SDXL" in r.stderr
+    assert "GAMMA" in r.stderr
     assert "cwd" not in r.stderr
 
 
 def test_submit_prints_no_note_when_the_typed_name_was_used_verbatim(monkeypatch):
     """Positive control: no substitution, no line — so the two tests above are
     reading a message that is actually conditional."""
-    r = _submit_with_response(
-        monkeypatch, {"id": 9, "project": "jepagame", "project_label": "jepagame"}
-    )
+    r = _submit_with_response(monkeypatch, {"id": 9, "project": "beta", "project_label": "beta"})
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["id"] == 9
-    assert "jepagame" not in r.stderr
+    assert "beta" not in r.stderr
 
 
 def test_submit_eta_banner_prints_p50_p90_when_history(monkeypatch):

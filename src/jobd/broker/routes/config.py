@@ -74,8 +74,8 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         # the shared projects dict; unsynchronized, a concurrent set/nudge can
         # blow up mid-iteration or last-write-win the overlay (F7).
         with projects_mutation_lock:
-            # Resolve the spelling first, so `job projects set ARFDSynInt 65`
-            # RE-PRICES the registered `arfdsynint` instead of minting a second
+            # Resolve the spelling first, so `job projects set epsilon 65`
+            # RE-PRICES the registered `epsilon` instead of minting a second
             # entry that folds onto it. Without this the write path could still
             # create the very collision the read path has to warn about.
             name = canonical_project_name(state["projects"], name)
@@ -136,8 +136,8 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         # is the shared FieldResolution verbatim — same precedence /submit runs.
         requires_value = eff.requires.value
         return ResolvedConfig(
-            # The resolved name, so a caller previewing `ARFDSynInt` is told it
-            # will run as the registered `arfdsynint` rather than being handed
+            # The resolved name, so a caller previewing `epsilon` is told it
+            # will run as the registered `epsilon` rather than being handed
             # its own spelling back beside that project's priority.
             project=eff.project,
             project_label=eff.project_label,

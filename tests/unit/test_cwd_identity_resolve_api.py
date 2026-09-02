@@ -5,20 +5,20 @@ def test_resolve_reports_the_root_that_supplied_the_identity(rooted_client):
         "/resolve",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
     body = r.json()
-    assert body["project"] == "jepagame"
+    assert body["project"] == "beta"
     assert body["project_label"] == "pillar2a1_sweep"
-    assert body["matched_root"] == "/home/mjarnold/jepagame"
+    assert body["matched_root"] == "/home/user/beta"
 
 
 def test_resolve_reports_no_root_for_a_registered_name(rooted_client):
     r = rooted_client.post(
         "/resolve",
-        json={"cmd": ["true"], "cwd": "/home/mjarnold/jepagame", "project": "jepagame"},
+        json={"cmd": ["true"], "cwd": "/home/user/beta", "project": "beta"},
     )
     assert r.json()["matched_root"] is None
 
@@ -51,11 +51,11 @@ def test_explain_shows_the_root_and_the_typed_label(rooted_client, monkeypatch):
     r = _explain(
         monkeypatch,
         rooted_client,
-        ["--project", "pillar2a1_sweep", "--cwd", "/home/mjarnold/jepagame/sweeps"],
+        ["--project", "pillar2a1_sweep", "--cwd", "/home/user/beta/sweeps"],
     )
     assert r.exit_code == 0, r.output
     assert "pillar2a1_sweep" in r.output
-    assert "/home/mjarnold/jepagame" in r.output
+    assert "/home/user/beta" in r.output
 
 
 def test_explain_says_nothing_about_roots_when_cwd_was_not_consulted(rooted_client, monkeypatch):
@@ -64,8 +64,8 @@ def test_explain_says_nothing_about_roots_when_cwd_was_not_consulted(rooted_clie
     r = _explain(
         monkeypatch,
         rooted_client,
-        ["--project", "jepagame", "--cwd", "/home/mjarnold/jepagame"],
+        ["--project", "beta", "--cwd", "/home/user/beta"],
     )
     assert r.exit_code == 0, r.output
-    assert "resolved config for project jepagame" in r.output
+    assert "resolved config for project beta" in r.output
     assert "root" not in r.output

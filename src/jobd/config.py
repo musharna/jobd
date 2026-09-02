@@ -281,6 +281,30 @@ def apply_project_overrides(
     return projects
 
 
+def load_local_projects(path: Path | str) -> dict[str, ProjectEntry]:
+    """Optional, gitignored `projects.local.yaml` beside `projects.yaml`.
+
+    The tracked `projects.yaml` is public: it ships in the repo and in the
+    image. A project's `roots:` are real directories on the operator's
+    machines, and the names themselves can be private, so both belong in a
+    file git never sees. Every entry declared here REPLACES the same-named
+    baseline entry wholesale (priority, defaults, roots) or adds a new one;
+    undeclared names are untouched, and `_default` is only affected if the
+    file declares it explicitly (`load_projects` would otherwise mint one).
+
+    Missing file: {} — the baseline stands alone, exactly as before this
+    overlay existed.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {}
+    declared = set((yaml.safe_load(p.read_text()) or {}).get("projects", {}) or {})
+    entries = {name: e for name, e in load_projects(p).items() if name in declared}
+    if entries:
+        log.info("projects.local.yaml at %s overlays %s", p, ", ".join(sorted(entries)))
+    return entries
+
+
 def load_effective_projects(
     projects_path: Path | str, overrides_path: Path | str
 ) -> tuple[dict[str, ProjectEntry], dict[str, int]]:
@@ -291,6 +315,7 @@ def load_effective_projects(
     only the genuine deltas.
     """
     baseline = load_projects(projects_path)
+    baseline.update(load_local_projects(Path(projects_path).with_name("projects.local.yaml")))
     baseline_priorities = {name: entry.priority for name, entry in baseline.items()}
     overrides = load_project_overrides(overrides_path)
     effective = apply_project_overrides(baseline, overrides)
@@ -375,8 +400,8 @@ def load_classifier_rules(path: Path | str) -> list[ClassifierRule]:
 def project_key(name: str) -> str:
     """Fold a project name to the key used for spelling-insensitive matching.
 
-    Case and `-`/`_` only. Deliberately NOT fuzzy: `phelipanche` is not folded
-    onto `phelipanche-fm`, nor `arf-promoter` onto `arf_promoter_analysis`.
+    Case and `-`/`_` only. Deliberately NOT fuzzy: `kappa` is not folded
+    onto `kappa-fm`, nor `arf-promoter` onto `arf_promoter_analysis`.
     Those differ by a SUFFIX, and treating them as the same project would be a
     guess that silently routes work at another project's priority — the exact
     failure this matching is meant to end, inverted. If two such names really
@@ -391,7 +416,7 @@ def canonical_project_name(projects: dict[str, ProjectEntry], name: str) -> str:
     Project names are free text typed at submit time and were matched with a
     bare `name in projects`, so a REGISTERED project silently lost its priority
     whenever the submitter typed it differently: measured 2026-08-30, jobs
-    submitted as `ARFDSynInt` ran at `_default` 40 while `arfdsynint` was
+    submitted as `epsilon` ran at `_default` 40 while `epsilon` was
     deliberately registered at 65 — a difference of case alone, with no error
     and no way to see it except by reading the warning nothing consumed.
 
@@ -422,16 +447,16 @@ def canonical_project_name(projects: dict[str, ProjectEntry], name: str) -> str:
 def _path_is_within(cwd: str, root: str) -> bool:
     """True when `cwd` is `root` or lives underneath it, compared COMPONENT-WISE.
 
-    Not `cwd.startswith(root)`: that says `/home/mjarnold/jepagame2` is inside
-    `/home/mjarnold/jepagame`, which would hand a sibling project its
+    Not `cwd.startswith(root)`: that says `/home/user/beta2` is inside
+    `/home/user/beta`, which would hand a sibling project its
     neighbour's priority. Comparing tuples of path components makes the
     boundary structural rather than textual.
 
     `..` is collapsed first, LEXICALLY (`os.path.normpath`). Without it the
     components lied about where the job runs: measured against the shipped
-    config, `/home/mjarnold/jepagame/../../tmp` matched a root of
-    `/home/mjarnold/jepagame`, so a job actually running in /tmp priced at
-    jepagame's 78. `--cwd` is a free-text CLI flag and `JobSubmit.cwd` is a
+    config, `/home/user/beta/../../tmp` matched a root of
+    `/home/user/beta`, so a job actually running in /tmp priced at
+    beta's 78. `--cwd` is a free-text CLI flag and `JobSubmit.cwd` is a
     bare `str` with no normalization, so that path is caller-reachable.
 
     Lexical is the RIGHT normalization here, not a weaker stand-in for
@@ -612,8 +637,8 @@ def resolve_effective_config(
     precedence cascade both endpoints used to hand-encode separately."""
     # Resolve the name ONCE, here, before anything reads it. Every field below
     # and the Job row /submit writes then agree by construction; matching in
-    # each consumer instead is how `ARFDSynInt` got priced as an unknown
-    # project while `arfdsynint` sat registered at 65.
+    # each consumer instead is how `epsilon` got priced as an unknown
+    # project while `epsilon` sat registered at 65.
     project_label = req.project
     project = canonical_project_name(projects, project_label)
     matched_root: str | None = None

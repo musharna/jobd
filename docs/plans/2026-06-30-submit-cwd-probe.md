@@ -18,7 +18,6 @@
 - **Follow existing patterns:** mirror the `*_json` nullable-TEXT column style (`Worker.mount_roots_json`, `host_aliases_json`, `tags_json`) and the existing refuse-admission call site (`job_worker.py:1416`).
 - **Commit footer (every commit):**
   ```
-  Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
   ```
 - **Deploy is out of scope for these tasks** (multi-host; gated on user go-ahead). Task 8 writes the deploy checklist only.
@@ -90,7 +89,6 @@ feat(matcher): WorkerSnapshot.mount_roots + _build_snapshots population
 Threads the worker-reported mount_roots prefixes onto the snapshot so
 submit-time routability checks can read them. Default [] = back-compat.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```
@@ -245,7 +243,6 @@ Empty mount_roots = unknown (never false-reject). A shared-prefix path (/home)
 is routable here by design — the worker-side isdir check catches host-local
 paths under it.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```
@@ -333,7 +330,6 @@ Hard-400s a pinned cwd no mount_root covers (generalizes /mnt/c); folds the
 any-pin "no worker covers cwd" case into the submit warnings. /mnt/c fast-path
 unchanged.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```
@@ -412,7 +408,6 @@ Per-job set of hosts that refused the job for a missing cwd, so the matcher
 won't re-offer it to them. Nullable TEXT, NULL -> [] (back-compat). [Schema
 init path noted for deploy: create_all vs ALTER.]
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```
@@ -575,7 +570,6 @@ A worker that finds cwd missing refuses with reason=cwd_missing; broker records
 the host in excluded_workers_json and re-queues, or fails the job
 cwd_unreachable when no eligible worker remains. gpu_contention path unchanged.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```
@@ -631,7 +625,6 @@ git add src/jobd/app.py tests/test_api.py
 git commit -F - <<'EOF'
 feat(broker): /next-job skips workers in a job's cwd-exclusion set
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```
@@ -716,7 +709,6 @@ Before the launcher check, verify os.path.isdir(cwd). If absent, POST
 refuse-admission reason=cwd_missing so the broker re-routes to a host that has
 the path, instead of cd-failing to exit 127.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```
@@ -753,7 +745,6 @@ git add -A
 git commit -F - <<'EOF'
 docs(routing): cwd-probe deploy checklist + changelog; full suite green
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 EOF
 ```

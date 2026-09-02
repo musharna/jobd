@@ -62,17 +62,17 @@ CORPUS = Path(__file__).parent / "data" / "project_cwd_corpus.csv"
 # Every root this feature ships with, mirroring config/projects.yaml. An
 # earlier version of this table listed three of the six while still claiming
 # to mirror the shipped config, which quietly narrowed arm 1 from 214 jobs to
-# 179: agrigen fell through `ROOTS.get(name, [])` to no roots at all, so the
+# 179: alpha fell through `ROOTS.get(name, [])` to no roots at all, so the
 # replay could not have caught a regression in it, and the second root of
-# jepagame and of orchid-sdxl went unexercised too. (agrigen's own tree holds
-# 287 corpus jobs, but 264 of them are typed `agrigen` exactly and so are
+# beta and of gamma went unexercised too. (alpha's own tree holds
+# 287 corpus jobs, but 264 of them are typed `alpha` exactly and so are
 # rule-1 business; 23 are the rule-2 recoveries at stake here.) Add a root
 # here whenever one is added there.
 ROOTS = {
-    "agrigen": ["/home/mjarnold/agrigen"],
-    "jepagame": ["/home/mjarnold/jepagame", "/home/mjarnold/jepagame-1l-sweep"],
-    "orchid-sdxl": ["/home/mjarnold/orchid-sdxl", "/home/mjarnold/orchid-data"],
-    "dreamer-chassis": ["/home/mjarnold/dreamer-chassis"],
+    "alpha": ["/home/user/alpha"],
+    "beta": ["/home/user/beta", "/home/user/beta-1l-sweep"],
+    "gamma": ["/home/user/gamma", "/home/user/gamma-data"],
+    "delta": ["/home/user/delta"],
 }
 
 
@@ -98,10 +98,10 @@ def corpus():
 def projects():
     p = {"_default": ProjectEntry(priority=40)}
     for name, prio in [
-        ("jepagame", 78),
-        ("orchid-sdxl", 60),
-        ("dreamer-chassis", 60),
-        ("agrigen", 80),
+        ("beta", 78),
+        ("gamma", 60),
+        ("delta", 60),
+        ("alpha", 80),
     ]:
         p[name] = ProjectEntry(priority=prio, roots=ROOTS.get(name, []))
     return p
@@ -186,5 +186,5 @@ def test_no_job_is_assigned_an_identity_from_a_scratch_directory(corpus, project
     projects' work, so an identity derived from either would be a confident
     wrong answer -- worse than the _default it replaced."""
     for _typed, cwd, _n in corpus:
-        if cwd.rstrip("/") in ("/tmp", "/home/mjarnold", ""):
+        if cwd.rstrip("/") in ("/tmp", "/home/user", ""):
             assert project_from_cwd(projects, cwd) is None, f"{cwd} claimed by a root"

@@ -25,7 +25,7 @@ signal.signal(
 )
 signal.alarm(60)
 
-DB = os.environ.get("JOBD_DB", "/home/mjarnold/jobd/data/jobd.db")
+DB = os.environ.get("JOBD_DB", "/home/user/jobd/data/jobd.db")
 rows = (
     sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     .execute("SELECT project, cwd, COUNT(*) FROM jobs GROUP BY project, cwd ORDER BY project, cwd")

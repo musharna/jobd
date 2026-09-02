@@ -27,3 +27,4 @@ htmlcov/
 
 # Subagent-driven-development scratch: per-plan ledgers, briefs, review packages.
 .superpowers/
+\n\n# Machine-specific project roots/names; the tracked projects.yaml stays generic.\nconfig/projects.local.yaml\n

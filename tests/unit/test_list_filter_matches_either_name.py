@@ -11,13 +11,13 @@ def test_filtering_by_the_label_finds_the_job(rooted_client):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
     rows = rooted_client.get("/jobs", params={"project": "pillar2a1_sweep"}).json()
     assert len(rows) == 1
-    assert rows[0]["project"] == "jepagame"
+    assert rows[0]["project"] == "beta"
 
 
 def test_filtering_by_the_identity_finds_the_same_job(rooted_client):
@@ -25,11 +25,11 @@ def test_filtering_by_the_identity_finds_the_same_job(rooted_client):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
-    rows = rooted_client.get("/jobs", params={"project": "jepagame"}).json()
+    rows = rooted_client.get("/jobs", params={"project": "beta"}).json()
     assert len(rows) == 1
 
 
@@ -40,8 +40,8 @@ def test_an_unrelated_project_filter_still_matches_nothing(rooted_client):
         "/submit",
         json={
             "cmd": ["true"],
-            "cwd": "/home/mjarnold/jepagame/sweeps",
+            "cwd": "/home/user/beta/sweeps",
             "project": "pillar2a1_sweep",
         },
     )
-    assert rooted_client.get("/jobs", params={"project": "orchid-sdxl"}).json() == []
+    assert rooted_client.get("/jobs", params={"project": "gamma"}).json() == []
