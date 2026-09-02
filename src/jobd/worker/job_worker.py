@@ -462,17 +462,38 @@ def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
     return owned
 
 
-def _is_solo_in_flight() -> bool:
-    """True when at most one job (this one) is registered in flight.
+def _sweep_reparented_orphans_if_solo(job_id: int, tracked_pids: set[int]) -> None:
+    """Run the reparented-orphan /proc sweep, but only while this job is the
+    sole one in flight -- and hold `_in_flight_lock` across BOTH the check and
+    the scan.
 
-    Gates the reparented-orphan /proc sweep in run_job: that sweep treats any
-    process reparented to this worker but not in tracked_pids as a leak, which
-    is only sound when no OTHER job is running concurrently (a concurrent
-    fast-path job's reparented descendant would otherwise look like an orphan
-    and be killed). See run_job's finalize block.
+    The sweep treats any process whose ppid is this worker and which is not in
+    `tracked_pids` as a leak. That is sound only when no OTHER job is running:
+    a concurrent job's fresh Popen child has ppid == this worker too. The gate
+    used to be a point read released before the scan, so the poll loop could
+    register job B and Popen it inside the window and B's child was SIGTERMed
+    (audit 2026-09-02 L-4). `_register_in_flight` takes this same lock BEFORE
+    any Popen, so with the lock held here B cannot register until the scan is
+    done, and if B registered first the count is two and the sweep declines.
+    The scan is a /proc listdir plus a stat read per pid -- milliseconds -- so
+    the poll loop's registration is delayed by at most that.
     """
     with _in_flight_lock:
-        return len(_in_flight) <= 1
+        if len(_in_flight) > 1:
+            return
+        try:
+            known = _tracked_pids_snapshot(tracked_pids)
+            killed = _subreaper.sweep_and_kill_reparented_orphans(known)
+        except Exception as e:
+            log.error("job %s: subreaper /proc-sweep error: %s", job_id, e)
+            return
+    if killed:
+        log.info(
+            "job %s: subreaper /proc-sweep reaped %s reparented orphan PID(s): %s",
+            job_id,
+            len(killed),
+            killed,
+        )
 
 
 def _reserve_and_dispatch(
@@ -1370,23 +1391,12 @@ class _WorkloadRun:
         # Concurrency guard (max_concurrent > 1): this /proc sweep is GLOBAL — it
         # has no way to tell job A's leaked orphan from job B's still-running
         # fast-path descendant (which also reparents to this worker). Only sweep
-        # when this is the sole in-flight job; a concurrent job's orphan is reaped
-        # at the next idle moment instead. cgroup-walk above is per-scope and
-        # stays unconditional, so scope-wrapped jobs lose no cleanup.
-        if _REAPER_OK and _is_solo_in_flight():
-            try:
-                killed = _subreaper.sweep_and_kill_reparented_orphans(
-                    _tracked_pids_snapshot(tracked_pids)
-                )
-                if killed:
-                    log.info(
-                        "job %s: subreaper /proc-sweep reaped %s reparented orphan PID(s): %s",
-                        self.job_id,
-                        len(killed),
-                        killed,
-                    )
-            except Exception as e:
-                log.error("job %s: subreaper /proc-sweep error: %s", self.job_id, e)
+        # when this is the sole in-flight job, atomically with that check (see
+        # the helper); a concurrent job's orphan is reaped at the next idle
+        # moment instead. cgroup-walk above is per-scope and stays
+        # unconditional, so scope-wrapped jobs lose no cleanup.
+        if _REAPER_OK:
+            _sweep_reparented_orphans_if_solo(self.job_id, tracked_pids)
 
     def final_state(self, rc: int) -> str:
         if self.got_signal == "cancel":

@@ -454,6 +454,7 @@ def test_jobd_list_summarizes_jobs():
     assert set(out["jobs"][0].keys()) == {
         "job_id",
         "project",
+        "project_label",
         "state",
         "host",
         "exit_code",
@@ -463,6 +464,20 @@ def test_jobd_list_summarizes_jobs():
     assert out["jobs"][0]["job_id"] == 2  # newest-first across the merged states
     assert out["jobs"][0]["host"] == "desktop"
     assert out["jobs"][1]["job_id"] == 1
+
+
+def test_the_live_suite_pins_the_same_summary_keys_as_the_source():
+    """The `jobd_list` summary shape exists in three places: the source tuple,
+    the synthetic assertion above, and the live-broker test. The live one is
+    deselected on any machine without a broker, so a field added to the source
+    reaches CI's live leg as a red diff nobody saw locally — which is exactly
+    what `project_label` did on 2026-09-02. Pin the live copy here, where it
+    runs in the default suite.
+    """
+    from jobd.mcp.tools import _LIST_SUMMARY_FIELDS
+    from tests.mcp.test_live import LIST_SUMMARY_KEYS
+
+    assert set(_LIST_SUMMARY_FIELDS) == LIST_SUMMARY_KEYS
 
 
 def _job_row(i: int, state: str) -> dict:
@@ -722,3 +737,54 @@ def test_call_tool_logs_error_kind_for_refusal(tmp_path, monkeypatch):
     entry = _json.loads((tmp_path / "calls.jsonl").read_text().strip().splitlines()[-1])
     assert entry["error_kind"] == "cwd_outside_mount_roots"
     assert entry["tool"] == "jobd_submit"
+
+
+@respx.mock
+def test_jobd_list_carries_the_typed_label_beside_the_identity():
+    """audit 2026-09-02 Q-3: the broker filter matches either name, so
+    `jobd_list(project="pillar2a1_sweep")` returned rows whose `project` was
+    `beta` with no field saying why. The summary hand-lists its columns;
+    the label has to be one of them or the substitution is invisible here."""
+    _mock_jobs_endpoint(
+        [
+            {
+                "id": 3,
+                "project": "beta",
+                "project_label": "pillar2a1_sweep",
+                "state": "queued",
+                "worker": None,
+                "exit_code": None,
+                "submitted_at": "2026-04-26T00:00:00+00:00",
+                "started_at": None,
+            }
+        ]
+    )
+    from jobd.mcp.tools import jobd_list
+
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_list(client, {"state": ["queued"]})
+    assert out["jobs"][0]["project"] == "beta"
+    assert out["jobs"][0]["project_label"] == "pillar2a1_sweep"
+
+
+@respx.mock
+def test_submit_reports_the_typed_label_when_the_identity_was_substituted():
+    """Same gap on the submit result: the agent typed one name and the broker
+    scheduled under another; the reply must carry both."""
+    respx.post("http://broker.test/submit").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "job_id": 7,
+                "state": "queued",
+                "project": "beta",
+                "project_label": "pillar2a1_sweep",
+                "host_pin": "any",
+                "queued_at": "2026-04-26T00:00:00Z",
+            },
+        )
+    )
+    client = JobdClient(base_url="http://broker.test")
+    out = jobd_submit(client, {"command": "x", "project": "pillar2a1_sweep", "cwd": "/x"})
+    assert out["project"] == "beta"
+    assert out["project_label"] == "pillar2a1_sweep"

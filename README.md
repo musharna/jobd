@@ -227,7 +227,7 @@ Now an agent can "run this overnight," check on it next session, and route GPU w
 
 Three optional YAML files under `JOBD_CONFIG_DIR` (defaults shipped in `config/`):
 
-- **`projects.yaml`** — per-project base priority and submit defaults (preemptibility, wall/idle timeouts, host pins, capability requirements). See [docs/plans/projects-yaml.md](https://github.com/musharna/jobd/blob/main/docs/projects-yaml.md) for the full resolution model.
+- **`projects.yaml`** — per-project base priority and submit defaults (preemptibility, wall/idle timeouts, host pins, capability requirements). Entries may also declare `roots:` so a job typed with an unregistered run label is priced by the project whose directory it runs in. See [docs/projects-yaml.md](https://github.com/musharna/jobd/blob/main/docs/projects-yaml.md) for the full resolution model and [docs/events.md](https://github.com/musharna/jobd/blob/main/docs/events.md) for the event catalog.
 - **`profiles.yaml`** — named resource bundles (`--profile gpu-train-large`) the matcher uses to size a job.
 - **`classifier.yaml`** — rules that auto-suggest a profile from the command string.
 

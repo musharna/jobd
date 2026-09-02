@@ -189,3 +189,17 @@ def test_events_endpoint_skips_unparseable_ts_when_filtering(client, logs_dir):
     rows = resp.json()
     assert len(rows) == 1
     assert rows[0]["event"] == "recent"
+
+
+def test_events_endpoint_project_filter_folds_like_submit(client, logs_dir):
+    """audit 2026-09-02 C-1: broker-emitted rows carry the CANONICAL project
+    (submit folds `Project_A` onto `project-a`), so an exact-match filter on
+    the typed spelling returned nothing for every post-fold event."""
+    _write_event(logs_dir, _row(event="e", project="project-a", job_id=1))
+    _write_event(logs_dir, _row(event="e", project="project-c", job_id=2))
+    resp = client.get("/events", params={"project": "Project_A"})
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert [r["job_id"] for r in rows] == [1]
+    # Positive control: an unregistered name still matches only itself.
+    assert client.get("/events", params={"project": "project-c"}).json()[0]["job_id"] == 2

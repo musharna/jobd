@@ -38,6 +38,7 @@ from jobd.broker.state import (
     _reject_stale_worker,
 )
 from jobd.broker.submit import submit_job
+from jobd.config import canonical_project_name
 from jobd.db import Job, Worker
 from jobd.matcher import eligible_workers
 from jobd.models import (
@@ -108,8 +109,12 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 # Either name: the identity that priced the job, or the label
                 # the submitter typed. A human filtering by the label they used
                 # must still find their run after cwd supplied a different
-                # identity for it.
-                conds.append(or_(Job.project == project, Job.project_label == project))
+                # identity for it. The identity is matched FOLDED, the same way
+                # submit folded it: rows are stored under the registered
+                # spelling, so a filter on `JEPAGAME` that compared raw strings
+                # split one project into two views (audit 2026-09-02 C-1).
+                canon = canonical_project_name(state["projects"], project)
+                conds.append(or_(Job.project.in_({canon, project}), Job.project_label == project))
             if warnings_only:
                 conds.append(Job.warning.is_not(None))
             if array_id is not None:

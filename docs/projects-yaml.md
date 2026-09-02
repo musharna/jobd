@@ -1,8 +1,13 @@
-# Plan: Per-project defaults file (`projects.yaml` enforcement)
+# `projects.yaml` — per-project priorities, defaults, and roots
 
-Design notes for the per-project `defaults:` feature. Read alongside the
-live source files (`src/jobd/app.py`, `src/jobd/config.py`,
-`src/jobd/models.py`, `src/job_cli/cli.py`).
+Sections 1–9 are the original design notes for the per-project `defaults:`
+feature (2026-07) and are kept as the rationale record: their `path:line`
+references and effort estimates are historical, and submit now lives in
+`src/jobd/broker/submit.py` with the precedence cascade in
+`src/jobd/config.py:resolve_effective_config`. Section 10 is the current
+specification for `roots:` (cwd-derived project identity, shipped v0.5.42).
+Read alongside the live source: `src/jobd/config.py`, `src/jobd/models.py`,
+`src/job_cli/cli.py`.
 
 ---
 
@@ -12,7 +17,7 @@ live source files (`src/jobd/app.py`, `src/jobd/config.py`,
 
 `projects.yaml` already lives on the broker host at the path passed to
 `build_app(projects_path=...)`. In production this resolves to
-`/app/config/projects.yaml` (controlled by `JOBD_CONFIG_DIR` in `main.py:13`).
+`/app/config/projects.yaml` (controlled by `JOBD_CONFIG_DIR`, read in `main.py`).
 In the Docker stack this maps to `/srv/jobd/config/projects.yaml`
 on the broker host, bind-mounted into the container.
 
@@ -756,11 +761,13 @@ debugging:
   the job that was priced as `beta` — though the rendered table column
   shows `project`, the scheduling identity.
 - `matched_root` — the root that supplied the identity — is **not** on the
-  Job row. It is computed at resolution time and surfaced in exactly two
+  Job row. It is computed at resolution time and surfaced in three
   places: the `POST /resolve` response (so `job submit --explain` prints
-  it, alongside the typed label) and the `cwd_identity_applied` event
-  recorded when rule 2 fires. It is `None`/absent whenever cwd was not
-  consulted.
+  it, alongside the typed label), the `validation.effective_matched_root`
+  field of a `job submit --dry-run` plan, and the `cwd_identity_applied`
+  event recorded when rule 2 fires. It is `None`/absent whenever cwd was
+  not consulted. The roots a broker has loaded are listed by
+  `GET /projects` / `job projects list`.
 
 ### The roots shipped in this file
 

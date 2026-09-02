@@ -30,6 +30,24 @@ from jobd.mcp.tools import (
 LIVE = os.environ.get("RUN_LIVE_JOBD") == "1"
 JOBD_URL = os.environ.get("JOBD_URL", "http://127.0.0.1:8765")
 
+# The keys `jobd_list` promises in each summary row. Hand-maintained here on
+# purpose — this is the wire contract as an agent sees it, asserted against a
+# real broker. It is pinned against jobd.mcp.tools._LIST_SUMMARY_FIELDS by
+# test_tools.py so a field added to the source cannot drift away from the
+# contract while this file sits deselected. (2026-09-02: project_label was
+# added to the source and only the live copy went stale, because the live
+# suite is the one that never runs on a laptop.)
+LIST_SUMMARY_KEYS = {
+    "job_id",
+    "project",
+    "project_label",
+    "state",
+    "host",
+    "exit_code",
+    "queued_at",
+    "started_at",
+}
+
 
 def _broker_reachable() -> bool:
     try:
@@ -104,15 +122,7 @@ def test_live_submit_status_list_jobget_cancel_full_round_trip():
         ids = {j["job_id"] for j in lst["jobs"]}
         assert job_id in ids, f"submitted job_id {job_id} not in list: {ids}"
         # summary shape — only the keys jobd_list promises.
-        assert set(lst["jobs"][0].keys()) == {
-            "job_id",
-            "project",
-            "state",
-            "host",
-            "exit_code",
-            "queued_at",
-            "started_at",
-        }
+        assert set(lst["jobs"][0].keys()) == LIST_SUMMARY_KEYS
 
         # Full record — exercises xlate_job_info on /jobs/<id> (the broker's
         # full info, incl. scheduling internals). jobd_status is the only tool

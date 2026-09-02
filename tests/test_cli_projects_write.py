@@ -116,3 +116,23 @@ def test_an_old_broker_that_folded_says_so_rather_than_crashing(capsys):
     out = _echo("PROJECT_B", {"project-b": {"priority": 90}}, capsys)
     assert "90" not in out, f"must not attribute another project's priority: {out!r}"
     assert "does not report" in out
+
+
+def test_a_project_name_with_a_slash_cannot_reach_another_route(cli, app, sample_projects_yaml):
+    """audit 2026-09-02: the CLI spliced the name into the URL path unencoded,
+    so `job projects set ../reload 5` POSTed to `/reload` -- the config reload
+    ran and the command then reported a write that never happened. The name
+    must be percent-encoded so it can only ever address `/projects/<name>`."""
+    # If a reload fires, this edit becomes visible on GET /projects.
+    sample_projects_yaml.write_text(
+        "projects:\n  project-b: { priority: 99 }\n  _default: { priority: 40 }\n"
+    )
+    result = cli.invoke(cli_mod.app, ["projects", "set", "../reload", "5"])
+    assert result.exit_code != 0, result.output
+    with TestClient(app) as c:
+        assert c.get("/projects").json()["project-b"]["priority"] == 80, (
+            "the write escaped to /reload"
+        )
+    # Positive control in the same test: a legitimate write still lands.
+    out = _run(cli, "set", "project-b", "5")
+    assert "project-b -> 5" in out

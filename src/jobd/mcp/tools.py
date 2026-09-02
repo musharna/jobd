@@ -155,6 +155,9 @@ def jobd_submit(client: JobdClient, args: dict) -> dict:
         "job_id": resp["job_id"],
         "state": resp["state"],
         "project": resp.get("project"),
+        # null when it equals `project`; set when the broker scheduled the job
+        # under a different identity than the agent typed (fold or cwd root).
+        "project_label": resp.get("project_label"),
         "host_pin": resp.get("host_pin"),
         "queued_at": resp.get("queued_at"),
     }
@@ -268,6 +271,10 @@ def jobd_preempt(client: JobdClient, args: dict) -> dict:
 _LIST_SUMMARY_FIELDS = (
     "job_id",
     "project",
+    # The name as typed, when it differs from `project` (the broker's filter
+    # matches either, so a row can come back under an identity the agent never
+    # typed; without this column the substitution is invisible here).
+    "project_label",
     "state",
     "host",
     "exit_code",

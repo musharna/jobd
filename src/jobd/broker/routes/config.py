@@ -109,13 +109,20 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         # Re-read the git baseline AND re-apply the runtime overrides overlay, so
         # a `git pull` of projects.yaml takes effect without discarding priorities
         # set at runtime via `job projects set/nudge` (audit 2026-07-12).
-        projects, base_priorities = load_effective_projects(
-            state["paths"]["projects"], state["paths"]["project_overrides"]
-        )
-        state["projects"] = projects
-        state["base_priorities"] = base_priorities
-        state["profiles"] = load_profiles(state["paths"]["profiles"])
-        state["classifier"] = load_classifier_rules(state["paths"]["classifier"])
+        #
+        # Under the writers' lock: set/nudge mutate `state["projects"]` and then
+        # persist FROM `state["projects"]`; a swap between those two reads made
+        # the overlay be written from the new dict and the mutation vanish
+        # (audit 2026-09-02 L-1). The loads run inside the lock too, so a
+        # failed load leaves state untouched and the lock released.
+        with projects_mutation_lock:
+            projects, base_priorities = load_effective_projects(
+                state["paths"]["projects"], state["paths"]["project_overrides"]
+            )
+            state["projects"] = projects
+            state["base_priorities"] = base_priorities
+            state["profiles"] = load_profiles(state["paths"]["profiles"])
+            state["classifier"] = load_classifier_rules(state["paths"]["classifier"])
         return {"reloaded": True}
 
     @router.post("/resolve", response_model=ResolvedConfig)

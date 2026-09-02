@@ -123,3 +123,8 @@ extend-immutable-calls = ["typer.Argument", "typer.Option"]
 [tool.ruff.lint.per-file-ignores]
 # Nested `with patch.object(...)` is a readable, idiomatic test pattern.
 "tests/**" = ["SIM117"]
+
+[tool.coverage.report]
+# Branch-coverage floor enforced by ci.yml's coverage leg (the workflow flag
+# must agree; tests/test_deploy_lint.py checks). Measured 86.8% on 2026-09-02.
+fail_under = 83

@@ -59,7 +59,9 @@ jobs:
 
       - name: Tests (excluding live broker)
         if: matrix.python-version != '3.12'
-        run: uv run pytest -m "not live" -q
+        # -rs: print each skip's reason. Real-execution tests that need a
+        # systemd --user scope skip on GitHub runners; silent skips hid that.
+        run: uv run pytest -m "not live" -q -rs
 
       # One matrix leg also enforces a coverage floor (term-missing report,
       # no external uploader). BRANCH coverage — line coverage alone lets an
@@ -70,7 +72,7 @@ jobs:
       # slowest step buys nothing.
       - name: Tests with coverage gate (excluding live broker)
         if: matrix.python-version == '3.12'
-        run: uv run pytest -m "not live" -q --cov=src/jobd --cov=src/job_cli --cov-branch --cov-report=term-missing --cov-fail-under=83
+        run: uv run pytest -m "not live" -q -rs --cov=src/jobd --cov=src/job_cli --cov-branch --cov-report=term-missing --cov-fail-under=83
 
       # mypy is clean and now gates the build: type regressions fail CI.
       - name: Types (mypy)

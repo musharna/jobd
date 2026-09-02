@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import typer
 
@@ -568,11 +569,16 @@ def _print_resolved(resolved: dict) -> None:
     # the surface built for that question unable to answer it. Rendered only
     # when rule 2 fired: `matched_root` is None whenever cwd was not consulted.
     matched_root = resolved.get("matched_root")
+    # Not `label`: that name is already bound to a `str` by the row loop
+    # above, and rebinding it to an `Any | None` is a type error.
+    submitted_as = resolved.get("project_label")
     if matched_root:
-        # Not `label`: that name is already bound to a `str` by the row loop
-        # above, and rebinding it to an `Any | None` is a type error.
-        submitted_as = resolved.get("project_label")
         typer.echo(f"  identity from cwd: root {matched_root} (submitted as {submitted_as})")
+    elif submitted_as and submitted_as != resolved.get("project"):
+        # Rule 1 alone changed the name (`PROJECT-C` -> `project-c`). Without
+        # this line the dry run showed only the registered spelling and never
+        # what was typed (audit 2026-09-02).
+        typer.echo(f"  identity by spelling: registered name (submitted as {submitted_as})")
 
 
 def _stream_wait(job_id: int) -> None:
@@ -1142,6 +1148,9 @@ def projects_list():
                         bits.append(f"needs={list(req['needs'])}")
                 if bits:
                     extras = "  defaults: " + " ".join(bits)
+            roots = entry.get("roots") if isinstance(entry, dict) else None
+            if roots:
+                extras += "  roots=" + ",".join(roots)
             typer.echo(f"{name:>30}  {pri:>3}{extras}")
 
 
@@ -1150,7 +1159,9 @@ def projects_set(name: str, priority: int):
     """Set a project's priority (0-100). Persists as a runtime override; the
     projects.yaml baseline stays git-owned."""
     with _client() as c:
-        r = c.post(f"/projects/{name}", json={"priority": priority})
+        # Percent-encoded: spliced raw, `../reload` normalised to `/reload` and
+        # ran the config reload instead of a write (audit 2026-09-02).
+        r = c.post(f"/projects/{quote(name, safe='')}", json={"priority": priority})
         r.raise_for_status()
         _echo_project_write(name, r.json())
 
@@ -1160,7 +1171,7 @@ def projects_nudge(name: str, delta: int):
     """Adjust a project's priority by DELTA (may be negative), clamped to 0-100.
     Persists as a runtime override."""
     with _client() as c:
-        r = c.post(f"/projects/{name}/nudge", json={"delta": delta})
+        r = c.post(f"/projects/{quote(name, safe='')}/nudge", json={"delta": delta})
         r.raise_for_status()
         _echo_project_write(name, r.json())
 

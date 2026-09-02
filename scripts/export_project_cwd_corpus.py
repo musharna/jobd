@@ -25,7 +25,12 @@ signal.signal(
 )
 signal.alarm(60)
 
-DB = os.environ.get("JOBD_DB", "/home/user/jobd/data/jobd.db")
+DB = os.environ.get("JOBD_DB")
+if not DB:
+    # No default: the only sensible one was the maintainer's own path, and a
+    # script that silently opens someone else's database is worse than one
+    # that asks. Fail loud.
+    sys.exit("set JOBD_DB=/path/to/jobd.db (read-only open) before running this export")
 rows = (
     sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     .execute("SELECT project, cwd, COUNT(*) FROM jobs GROUP BY project, cwd ORDER BY project, cwd")

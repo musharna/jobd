@@ -463,3 +463,32 @@ def test_no_local_overlay_is_a_noop(tmp_path):
     tracked = load_projects(tmp_path / "projects.yaml")
     assert set(eff) == set(tracked)
     assert [str(r) for r in eff["alpha"].roots] == ["/srv/example/alpha"]
+
+
+def test_roots_without_a_priority_is_a_load_error_not_a_silent_drop(tmp_path):
+    """audit 2026-09-02 C-2: `load_projects` skipped any entry lacking
+    `priority` BEFORE `_parse_roots` ran, so a project declared as
+    `beta: {roots: [...]}` vanished with no log line -- exactly the
+    invisible removal the roots validation promises to prevent."""
+    p = tmp_path / "projects.yaml"
+    p.write_text("projects:\n  beta:\n    roots: ['/home/user/beta']\n")
+    with pytest.raises(ValueError, match="priority"):
+        load_projects(p)
+
+
+def test_default_may_not_declare_roots(tmp_path):
+    """`_default` is skipped by `project_from_cwd`, so a root on it was
+    validated, accepted, and then silently never consulted."""
+    p = tmp_path / "projects.yaml"
+    p.write_text("projects:\n  _default:\n    priority: 40\n    roots: ['/home']\n")
+    with pytest.raises(ValueError, match="_default"):
+        load_projects(p)
+
+
+def test_a_leading_double_slash_in_a_root_is_collapsed(tmp_path):
+    """POSIX lets `//x` mean something other than `/x`, and `os.path.normpath`
+    preserves it, so `//home/x` was accepted as a root that could never match
+    a cwd of `/home/x/...` -- a silently dead root."""
+    p = tmp_path / "projects.yaml"
+    p.write_text("projects:\n  beta:\n    priority: 78\n    roots: ['//home/user/x']\n")
+    assert load_projects(p)["beta"].roots == ["/home/user/x"]

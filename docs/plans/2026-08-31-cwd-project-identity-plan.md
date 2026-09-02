@@ -1,5 +1,10 @@
 # cwd-derived project identity — Implementation Plan
 
+> **Historical.** Executed and shipped in v0.5.42 (2026-09-01). The checkboxes
+> below were not maintained during execution and do not reflect status. For
+> what actually shipped, read `docs/projects-yaml.md` §10 and the 0.5.42
+> section of `CHANGELOG.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let a job's scheduling identity be derived from its `cwd` when the typed `--project` name is not a registered project, so the 241 measured jobs that ran at `_default` 40 inside a registered project's directory get that project's priority.
@@ -1121,7 +1126,7 @@ signal.signal(
 )
 signal.alarm(60)
 
-DB = os.environ.get("JOBD_DB", "/home/user/jobd/data/jobd.db")
+DB = os.environ["JOBD_DB"]  # e.g. /srv/jobd/data/jobd.db on the broker host
 rows = sqlite3.connect(f"file:{DB}?mode=ro", uri=True).execute(
     "SELECT project, cwd, COUNT(*) FROM jobs GROUP BY project, cwd ORDER BY project, cwd"
 ).fetchall()
