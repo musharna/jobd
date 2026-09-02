@@ -1005,14 +1005,39 @@ def ping(
     start = time.monotonic()
     error: str | None = None
     payload: dict[str, Any] | None = None
+    kind: str | None = None
+    hint: str = ""
+    # Did the broker send us bytes? A 401 is not "unreachable" — conflating the
+    # two is what made this command mislead its own author on 2026-09-02.
+    answered = False
 
     try:
         with JobdClient(base_url=BASE, timeout=(timeout, timeout)) as c:
             r = c.get("/health")
+            answered = True
             payload = r.json()
     except BrokerUnreachable as e:
         error = str(e)
-    except (BrokerServerError, BrokerRefusal) as e:
+        kind = e.kind
+        hint = e.hint
+    except BrokerServerError as e:
+        answered = True
+        kind = "server_error"
+        hint = (
+            "the broker answered, so the network path and the process are both fine — "
+            "this is a fault inside the broker; check its logs"
+        )
+        error = f"broker error: {e}"
+    except BrokerRefusal as e:
+        answered = True
+        kind = "refusal"
+        if e.status_code in (401, 403):
+            hint = (
+                "the broker answered and rejected the credential, so it is running and "
+                "reachable — set JOBD_API_TOKEN to the token the broker was started with"
+            )
+        else:
+            hint = "the broker answered and refused the request"
         error = f"broker error: {e}"
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
@@ -1023,11 +1048,13 @@ def ping(
     if json_output:
         result = {
             "broker": BASE,
-            "reachable": error is None,
+            "reachable": answered,
             "healthy": healthy,
             "latency_ms": elapsed_ms,
             "version": (payload or {}).get("version"),
             "error": error,
+            "kind": kind,
+            "hint": hint or None,
         }
         typer.echo(json.dumps(result))
     else:
@@ -1037,9 +1064,15 @@ def ping(
             typer.echo(f"version: {(payload or {}).get('version', '?')}")
             typer.echo(f"latency: {elapsed_ms}ms")
         else:
-            typer.secho("health:  unreachable", fg="red", err=True)
+            if answered:
+                typer.secho("health:  reachable, but not healthy", fg="yellow", err=True)
+            else:
+                typer.secho(f"health:  unreachable ({kind or 'network'})", fg="red", err=True)
             typer.echo(f"latency: {elapsed_ms}ms")
-            typer.echo(f"error:   {error}", err=True)
+            if error:
+                typer.echo(f"error:   {error}", err=True)
+            if hint:
+                typer.echo(f"hint:    {hint}", err=True)
 
     if not healthy:
         raise typer.Exit(code=2)
@@ -1418,7 +1451,12 @@ def main() -> None:
         app()
     except BrokerUnreachable as e:
         typer.secho(f"broker unreachable at {BASE}: {e}", fg="red", err=True)
-        typer.secho("  is the broker running? check with `job ping`.", fg="red", err=True)
+        # "is the broker running?" is actively wrong advice for a dropped packet,
+        # which is the case where the broker is fine and the path is not.
+        if e.hint:
+            typer.secho(f"  {e.hint}", fg="red", err=True)
+        else:
+            typer.secho("  is the broker running? check with `job ping`.", fg="red", err=True)
         raise SystemExit(2) from None
     except BrokerServerError as e:
         typer.secho(f"broker error ({e.status_code}) at {BASE}: {e}", fg="red", err=True)

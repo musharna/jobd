@@ -9,14 +9,32 @@ from __future__ import annotations
 
 import os
 import signal as _signal
+import socket
+import ssl
 import time as _time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import httpx
 
 
 class BrokerUnreachable(Exception):
-    """Network failure — DNS, connect refused, TLS, connect timeout."""
+    """Network failure — DNS, connect refused, TLS, connect timeout.
+
+    Carries `kind` and `hint` because the operator's next move diverges sharply
+    by cause, and the raw exception text does not say which happened. A refused
+    connection means the host answered and the broker is down. A connect
+    timeout means the packets were dropped, which is a firewall or a tailnet
+    ACL far more often than a broker fault.
+
+    On 2026-09-02 that distinction cost a debugging session: `job ping` printed
+    a flat "unreachable" for an ACL drop, and a broker that was healthy,
+    serving, and freshly upgraded was reported to the user as down.
+    """
+
+    def __init__(self, message: str, *, kind: str = "network", hint: str = "") -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.hint = hint
 
 
 class BrokerServerError(Exception):
@@ -34,6 +52,85 @@ class BrokerRefusal(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.detail = detail
+
+
+# kind -> what the network just told you. Phrased as an observation the
+# operator can act on, not as generic "check your connection" advice.
+_UNREACHABLE_HINTS: dict[str, str] = {
+    "dns": (
+        "the host name did not resolve, so nothing was dialled — check JOBD_URL for a "
+        "typo, and whether this machine's resolver (or tailnet MagicDNS) is up"
+    ),
+    "refused": (
+        "the host answered and actively refused the connection, so the network path is "
+        "fine and the broker is almost certainly not running — or is listening on a "
+        "different port or interface than JOBD_URL names"
+    ),
+    "timeout": (
+        "the connection was dropped rather than refused, which points at a firewall, a "
+        "tailnet ACL, or routing — not at the broker. If the host answers ping but this "
+        "port times out, the broker is likely healthy and simply unreachable from here"
+    ),
+    "read_timeout": (
+        "the connection was established and then went quiet, so the broker is running "
+        "but did not answer in time — wedged, overloaded, or blocked on a slow query"
+    ),
+    "tls": (
+        "the TLS handshake failed — check the scheme in JOBD_URL and the certificate "
+        "the broker is serving"
+    ),
+    # Deliberately empty: this means "we could not tell". Inventing advice here
+    # would be worse than saying nothing.
+    "network": "",
+}
+
+
+def _cause_chain(exc: BaseException, *, depth: int = 8) -> Iterator[BaseException]:
+    """Walk __cause__/__context__. httpx wraps the OSError that actually carries
+    the errno several layers down, and which layer varies by transport and by
+    httpx version — so match on the chain rather than on the top-level type."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and depth > 0 and id(cur) not in seen:
+        seen.add(id(cur))
+        yield cur
+        cur = cur.__cause__ or cur.__context__
+        depth -= 1
+
+
+def classify_connect_failure(exc: BaseException) -> str:
+    """Name the network failure behind an httpx transport error.
+
+    Returns a key of `_UNREACHABLE_HINTS`. Type checks first (they are exact),
+    then the cause chain (errno-bearing), then message text as a last resort —
+    a wrong guess here is worse than `network`, so each fallback is narrower
+    than the one before it.
+    """
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "timeout"
+    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+        return "read_timeout"
+
+    for e in _cause_chain(exc):
+        if isinstance(e, socket.gaierror):
+            return "dns"
+        if isinstance(e, ConnectionRefusedError):
+            return "refused"
+        if isinstance(e, ssl.SSLError):
+            return "tls"
+        if isinstance(e, TimeoutError):
+            return "timeout"
+
+    text = str(exc).lower()
+    if any(s in text for s in ("name or service not known", "name resolution", "getaddrinfo")):
+        return "dns"
+    if "connection refused" in text:
+        return "refused"
+    if "certificate" in text or "ssl" in text:
+        return "tls"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    return "network"
 
 
 class JobdClient:
@@ -70,7 +167,12 @@ class JobdClient:
             httpx.ReadTimeout,
             httpx.NetworkError,
         ) as e:
-            raise BrokerUnreachable(f"{type(e).__name__}: {e} (JOBD_URL={self.base_url})") from e
+            kind = classify_connect_failure(e)
+            raise BrokerUnreachable(
+                f"{type(e).__name__}: {e} (JOBD_URL={self.base_url})",
+                kind=kind,
+                hint=_UNREACHABLE_HINTS.get(kind, ""),
+            ) from e
         if 500 <= r.status_code < 600:
             raise BrokerServerError(
                 f"broker {r.status_code}: {r.text[:500]}", status_code=r.status_code
