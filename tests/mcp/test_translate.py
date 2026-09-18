@@ -205,6 +205,8 @@ _MCP_SAMPLE: dict[str, object] = {
     "max_wall_s": 60,
     "idle_timeout_s": 30,
     "scheduling_timeout_s": 900,
+    "max_retries": 3,
+    "retry_delay_s": 45,
     "checkpoint_grace_s": 10,
     "count": 1,
     "sweep": [],

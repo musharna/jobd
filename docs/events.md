@@ -18,6 +18,7 @@ bucket, so an alert written against it never fires.
 | `job_dispatched` | The dispatcher assigned the job to a worker. |
 | `job_started` | The worker reported the workload running. |
 | `job_completed` | The workload reached a terminal state the worker reported (completed / failed / exit code carried in the payload). |
+| `job_retry_scheduled` | A job submitted with `max_retries` exited non-zero on its own and was put back in the queue. Payload: `exit_code` of the failed attempt, `attempt` (retries used), `max_retries`, `retry_delay_s`, the `worker` it failed on. Not terminal — `job_completed` follows only when an attempt ends the job. |
 | `job_cancelled` | The job was cancelled by request or by a dependency cascade. |
 | `job_orphaned` | Its worker died or restarted while it was in flight; the job is parked for possible resurrection. |
 | `job_resurrected` | An orphaned job was re-queued after its worker came back. |

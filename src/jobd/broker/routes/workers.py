@@ -283,7 +283,17 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 # parked worker. See _deps_satisfied_bulk on why this is *fresher*
                 # than the loop it replaces, not just cheaper.
                 satisfied_ids = _deps_satisfied_bulk(all_queued, session)
-                queued: list[Job] = [j for j in all_queued if j.id in satisfied_ids]
+                # A retried job waiting out its retry_delay_s is queued but not
+                # yet offerable. Parked long-polls re-check every
+                # _LONGPOLL_RECHECK_S, so it is picked up within that of the delay
+                # ending without a wake of its own.
+                now_naive = datetime.now(UTC).replace(tzinfo=None)
+                queued: list[Job] = [
+                    j
+                    for j in all_queued
+                    if j.id in satisfied_ids
+                    and (j.not_before is None or j.not_before.replace(tzinfo=None) <= now_naive)
+                ]
                 worker_row = session.execute(
                     select(Worker).where(Worker.host == q.host)
                 ).scalar_one_or_none()
@@ -381,6 +391,8 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                         # can never inherit a stale cancel/preempt an unguarded
                         # writer stamped mid-requeue (audit 2026-07-05 A1).
                         signal=None,
+                        # A retry's hold is spent once it is claimed.
+                        not_before=None,
                     )
                 )
                 session.commit()

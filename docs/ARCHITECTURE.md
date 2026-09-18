@@ -62,7 +62,7 @@ handlers holding real business logic, and they moved out. The remaining routes a
                       ┌──────────── cancelled ◀── user, or a cascade from a failed parent
                       │
   queued ──▶ assigned ──▶ running ──▶ completed
-     │           │           │    └──▶ failed
+     │           │           │    └──▶ failed ──▶ queued   (only with --retries, plain non-zero exit)
      │           │           └──────▶ preempted     (SIGTERM + grace, for checkpointing jobs)
      │           │           └──────▶ orphaned      (its worker died mid-run)
      │           └──────────────────▶ queued        (refused at admission, or worker died)
@@ -242,5 +242,10 @@ Recorded because "why isn't there an X" is a fair question, and the answer is us
 - **No wake-coalescing.** The dispatcher broadcasts a wake to all parked workers, and all
   but one lose the race. At four workers that costs nothing measurable, and coalescing
   risks dispatch *stalls* — a worse failure than a wasted query.
-- **No retry/backoff queue.** A failed job stays failed. Retry policy is the caller's, and
-  a broker that silently re-runs your job is a broker that runs it twice.
+- **No implicit retry.** A failed job stays failed. Retry policy is the caller's, and a
+  broker that silently re-runs your job is a broker that runs it twice. So retry is
+  per-job and opt-in (`--retries N`, default 0), and narrow: only a workload that exited
+  non-zero on its own is re-queued. A timeout, a preempt, a cancel or a worker-side fault
+  is a verdict the broker already reached; a second run would repeat it or hide a broken
+  host. There is still no backoff *queue* — a retried job is an ordinary queued job with
+  a `not_before`.

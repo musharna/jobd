@@ -152,6 +152,22 @@ def submit(
         "Hatchet; use for short capability-mismatch smokes that would "
         "otherwise queue forever.",
     ),
+    retries: int = typer.Option(
+        0,
+        "--retries",
+        min=0,
+        max=20,
+        help="re-run the job up to N times if it exits non-zero on its own. "
+        "Default 0: a failed job stays failed. Never retries a timeout, preempt, "
+        "cancel, or a worker-side fault.",
+    ),
+    retry_delay: int = typer.Option(
+        0,
+        "--retry-delay",
+        min=0,
+        max=86400,
+        help="seconds to wait before each retry (with --retries)",
+    ),
     vram_required: float | None = typer.Option(
         None,
         "--vram-required",
@@ -244,6 +260,11 @@ def submit(
         body["checkpoint_grace_s"] = checkpoint_grace
     if scheduling_timeout_s is not None:
         body["scheduling_timeout_s"] = scheduling_timeout_s
+    if retry_delay and not retries:
+        raise typer.BadParameter("--retry-delay does nothing without --retries")
+    if retries:
+        body["max_retries"] = retries
+        body["retry_delay_s"] = retry_delay
     if vram_required is not None:
         body["vram_gb"] = vram_required
     if stdin_mode:
@@ -750,6 +771,9 @@ def _render_status(j: dict) -> str:
         f"  exit_code={j.get('exit_code')}",
         f"  cmd: {' '.join(j['cmd'])[:100]}",
     ]
+    if j.get("max_retries"):
+        held = f"  next attempt not before {j['not_before']}" if j.get("not_before") else ""
+        lines.append(f"  retries  ={j.get('attempt', 0)}/{j['max_retries']} used{held}")
     if j.get("warning"):
         lines.append(f"  ⚠ {j['warning']}")
     lines.extend(_eta_lines(j))
