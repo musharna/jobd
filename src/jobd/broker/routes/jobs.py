@@ -12,7 +12,7 @@ import asyncio
 import codecs
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from sqlalchemy import func, or_, select
@@ -36,6 +36,7 @@ from jobd.broker.state import (
     _cascade_on_parent_terminal,
     _emit_cascade_cancellations,
     _reject_stale_worker,
+    _requeue_or_honor_cancel,
 )
 from jobd.broker.submit import submit_job
 from jobd.config import canonical_project_name
@@ -233,6 +234,65 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 session.refresh(job)
             return _to_info(job)
 
+    def _retry_failed_attempt(session, job: Job, exit_code: int | None) -> JobInfo | None:
+        """Put a failed attempt back in the queue. None = lost the row to a
+        concurrent transition; the caller falls through to the terminal path,
+        whose own compare-and-swap then decides."""
+        now = datetime.now(UTC)
+        attempt = (job.attempt or 0) + 1
+        not_before = now + timedelta(seconds=job.retry_delay_s or 0)
+        failed_on = job.worker
+        outcome = _requeue_or_honor_cancel(
+            session,
+            job.id,
+            (JobState.ASSIGNED, JobState.RUNNING),
+            now=now,
+            state=JobState.QUEUED,
+            worker=None,
+            started_at=None,
+            attempt=attempt,
+            not_before=not_before if job.retry_delay_s else None,
+            # The scheduling_timeout clock starts when the job may run again,
+            # not while it is deliberately held back.
+            last_enqueued_at=not_before,
+            reset_queue_clock=False,
+        )
+        if outcome == "lost":
+            return None
+        session.refresh(job)
+        if outcome == "cancelled":  # a cancel landed between our read and the write
+            cascaded = _cascade_on_parent_terminal(session, job)
+            session.commit()
+            _emit_event(
+                logs_dir,
+                "job_cancelled",
+                source="broker",
+                job_id=job.id,
+                project=job.project,
+                prior_state=JobState.RUNNING.value,
+                by="user",
+                via="retry",
+            )
+            _emit_cascade_cancellations(logs_dir, cascaded, job.id, JobState.CANCELLED.value)
+        else:
+            session.commit()
+            _emit_event(
+                logs_dir,
+                "job_retry_scheduled",
+                source="broker",
+                job_id=job.id,
+                project=job.project,
+                exit_code=exit_code,
+                attempt=attempt,
+                max_retries=job.max_retries,
+                retry_delay_s=job.retry_delay_s or 0,
+                worker=failed_on,
+            )
+        # Not terminal, so no cascade; but a slot is free and a job is queued.
+        _wake_dispatchers()
+        session.refresh(job)
+        return _to_info(job)
+
     @router.post("/jobs/{job_id}/complete", response_model=JobInfo)
     def complete_job(
         job_id: int, payload: CompletePayload, x_jobd_worker: str | None = Header(default=None)
@@ -273,6 +333,22 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                     status_code=400,
                     detail=f"final_state {final_state!r} is not a terminal state",
                 )
+            # Opt-in retry (JobSubmit.max_retries). Exactly one report qualifies:
+            # the workload exited non-zero on its own -- FAILED with no
+            # termination_reason. A reason means the broker or worker reached a
+            # verdict (timeout, launcher/exec fault, shutdown) that a second run
+            # would only repeat or mask; cancelled/preempted are other states. A
+            # pending cancel is the user's word that this job is over.
+            if (
+                final is JobState.FAILED
+                and termination_reason is None
+                and job.signal != "cancel"
+                and (job.attempt or 0) < (job.max_retries or 0)
+                and job.state in (JobState.ASSIGNED.value, JobState.RUNNING.value)
+            ):
+                retried = _retry_failed_attempt(session, job, exit_code)
+                if retried is not None:
+                    return retried
             # Terminal is terminal: a job already in a terminal state ignores a
             # late or duplicate /complete (worker retry, or the user cancelled /
             # the sweeper orphaned it first). Idempotent no-op — don't overwrite

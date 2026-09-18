@@ -109,6 +109,13 @@ class Job(Base):
     # report omitted this claimed job. Reset on every report that includes it;
     # at RECONCILE_MISS_THRESHOLD the job gets the worker-died disposition.
     reconcile_misses: Mapped[int] = mapped_column(Integer, default=0)
+    # Opt-in retry (JobSubmit.max_retries). `attempt` counts retries consumed;
+    # `not_before` holds a requeued attempt out of the matcher until its delay
+    # has passed. NULL-tolerant: ALTER-added columns read NULL on old rows.
+    max_retries: Mapped[int] = mapped_column(Integer, default=0)
+    retry_delay_s: Mapped[int] = mapped_column(Integer, default=0)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    not_before: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     @property
     def requires(self) -> JobRequires | None:
@@ -209,6 +216,10 @@ _JOB_ADDS = [
     ("reconcile_misses", "INTEGER DEFAULT 0"),
     ("env_scrubbed_at", "DATETIME"),
     ("project_label", "VARCHAR(100)"),
+    ("max_retries", "INTEGER DEFAULT 0"),
+    ("retry_delay_s", "INTEGER DEFAULT 0"),
+    ("attempt", "INTEGER DEFAULT 0"),
+    ("not_before", "DATETIME"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),

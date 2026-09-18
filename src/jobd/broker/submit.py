@@ -277,6 +277,8 @@ def submit_job(
                 idle_timeout_s=idle_timeout_s,
                 checkpoint_grace_s=checkpoint_grace_s,
                 scheduling_timeout_s=req.scheduling_timeout_s,
+                max_retries=req.max_retries,
+                retry_delay_s=req.retry_delay_s,
                 submitted_via=req.submitted_via,
                 array_index=i if is_array else None,
                 array_size=member_count if is_array else None,

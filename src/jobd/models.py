@@ -136,6 +136,15 @@ class JobSubmit(BaseModel):
     # that genuinely want a stuck-queue guard opt in via an explicit value;
     # bounds match max_wall_s so an opted-in timeout can't exceed 1 week.
     scheduling_timeout_s: int | None = Field(default=None, ge=1, le=7 * 24 * 3600)
+    # Opt-in retry. 0 (the default) keeps the broker's rule that a failed job
+    # stays failed. With N > 0 a workload that exits non-zero ON ITS OWN is put
+    # back in the queue up to N times; anything the broker or worker decided
+    # (timeout, preempt, cancel, launcher/exec fault) is never retried. The
+    # policy is the caller's, stated per job -- the broker never re-runs a job
+    # nobody asked it to.
+    max_retries: int = Field(default=0, ge=0, le=20)
+    # Seconds a retried job waits before it may be claimed again.
+    retry_delay_s: int = Field(default=0, ge=0, le=24 * 3600)
     # Per-job preemption grace window (seconds). When the worker observes
     # signal=preempt, it SIGTERMs the child and waits up to this many seconds
     # for the workload to checkpoint and exit cleanly before SIGKILL. Capped
@@ -234,6 +243,12 @@ class JobInfo(BaseModel):
     idle_timeout_s: int | None = None
     checkpoint_grace_s: int | None = None
     scheduling_timeout_s: int | None = None
+    # Retries consumed so far / allowed; not_before is set while a retry waits
+    # out its delay.
+    attempt: int = 0
+    max_retries: int = 0
+    retry_delay_s: int = 0
+    not_before: datetime | None = None
     termination_reason: str | None = None
     # Job-array grouping (all None for a standalone job). array_id is the first
     # member's job id; array_index is 0-based; array_size is the member count.
@@ -414,6 +429,7 @@ KNOWN_EVENTS = frozenset(
         "job_dispatched",
         "job_started",
         "job_completed",
+        "job_retry_scheduled",
         "job_cancelled",
         "job_orphaned",
         "job_resurrected",
