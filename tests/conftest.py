@@ -18,6 +18,24 @@ def _bypass_auth_for_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _test_scope_namespace():
+    """Name every scope a test creates in a namespace no real broker has.
+
+    The worker's startup sweep kills its own namespace, and the namespace is
+    derived from the broker URL (JOBD_URL when exported). Tests that launch
+    real systemd scopes must not land in a production worker's namespace.
+    """
+    import os
+
+    import jobd.worker.job_worker as job_worker
+
+    before = job_worker._scope_ns
+    job_worker.set_scope_namespace(f"http://jobd-test-suite.invalid:{os.getpid()}")
+    yield
+    job_worker._scope_ns = before
+
+
+@pytest.fixture(autouse=True)
 def _steady_state_broker():
     """Present the sweeper with a broker that has been up and observing.
 
