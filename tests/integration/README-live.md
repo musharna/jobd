@@ -23,6 +23,15 @@ JOBD_LIVE=1 pytest tests/integration/test_broker_concurrency_live.py -v
 | `test_cancel_running_job_terminates_child`                   | cancel-latency / **H3** signal path | `/cancel` on a genuinely-running job terminates the real child and lands the job `cancelled` promptly                                               |
 | `test_stale_worker_reports_rejected_by_live_broker`          | **M2**                              | the live broker 409s `/complete` + `/log` carrying a foreign `X-Jobd-Worker` and leaves the running job uncorrupted; the owner's report still works |
 
+`test_adopt_live.py` (same gate) covers process adoption (`docs/adoption.md`) with a real
+broker, worker, `job` CLI and a `sleep 30` none of them started: the job is `running` while
+the process lives and holds the single slot against a queued job, ends
+`orphaned`/`adopted_exit_unobserved` when it is killed, a wrong start time is refused
+(`adopt_pid_mismatch`) with the true identity as the in-test positive control, and
+`job cancel` SIGTERMs the PID. Its worker runs with a PATH holding only `true`, so it
+cannot run the startup stale-scope sweep against a real worker's `jobd-*.scope` units on
+the same machine.
+
 The worker is launched with `JOBD_WORKER_WATCHDOG_KILL_GRACE_S=3` (a new env knob
 on the H1 fix) so the escalation test runs in seconds instead of the 60s default.
 
