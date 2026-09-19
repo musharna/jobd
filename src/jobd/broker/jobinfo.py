@@ -124,6 +124,8 @@ def _to_info(job: Job, eta_ctx: dict | None = None, *, redact_env: bool = True) 
         retry_delay_s=job.retry_delay_s or 0,
         not_before=job.not_before,
         termination_reason=job.termination_reason,
+        adopt_pid=job.adopt_pid,
+        adopt_start_ticks=job.adopt_start_ticks,
         array_id=job.array_id,
         array_index=job.array_index,
         array_size=job.array_size,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sys
 import time
 from collections.abc import Callable
@@ -14,7 +15,7 @@ from urllib.parse import quote
 
 import typer
 
-from jobd import __version__
+from jobd import __version__, procident
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
 from jobd.config import project_key
 from jobd.models import TERMINAL_FAIL_STATES, TERMINAL_STATES
@@ -885,6 +886,49 @@ def cancel(job_id: int):
     with _client() as c:
         job = c.cancel(job_id)
         typer.echo(json.dumps(job, default=str))
+
+
+@app.command()
+def adopt(
+    pid: int = typer.Option(..., "--pid", help="PID of the already-running process, on THIS host"),
+    project: str = typer.Option(..., "--project", help="project to list/price the job under"),
+    gpu: bool = typer.Option(False, "--gpu", help="the process uses the GPU"),
+    vram_gb: float = typer.Option(
+        0.0, "--vram-gb", help="GPU memory to reserve for it (implies --gpu)"
+    ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="worker name of THIS host [default: $JOBD_WORKER_HOST, else the hostname]",
+    ),
+):
+    """Register a process you already started (nohup, tmux, ...) as a jobd job.
+
+    Run it on the host where the process lives. Nothing is launched: that host's
+    worker watches the PID, and the job is `running` until the process exits.
+    jobd did not fork it, so its exit code is unknowable — it ends `orphaned`
+    (adopted_exit_unobserved), never `completed`; use --depends-on-any-exit to
+    queue work behind it. No logs are captured. `job cancel` SIGTERMs the PID.
+    See docs/adoption.md.
+    """
+    try:
+        ident = procident.read_identity(pid)
+    except (procident.AdoptUnsupported, ProcessLookupError, PermissionError, ValueError) as e:
+        typer.secho(f"cannot adopt pid {pid}: {e}", fg="red", err=True)
+        raise typer.Exit(code=1) from None
+    body = {
+        "pid": ident.pid,
+        "start_ticks": ident.start_ticks,
+        "host": host or os.environ.get("JOBD_WORKER_HOST") or socket.gethostname(),
+        "project": project,
+        "cmd": ident.cmd,
+        "cwd": ident.cwd,
+        "gpu": gpu,
+        "vram_gb": vram_gb,
+        "submitted_via": "cli",
+    }
+    with _client() as c:
+        typer.echo(json.dumps(c.adopt(body), default=str))
 
 
 @app.command()

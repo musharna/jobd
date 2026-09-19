@@ -27,6 +27,7 @@ from tests.route_table import broker_route_set
 # Broker routes deliberately absent from MCP, and why. A route here is a decision;
 # a route missing from BOTH this map and the tool list is a bug.
 _NOT_ON_MCP: dict[str, str] = {
+    "POST /adopt": "host-local: `job adopt` reads /proc on the host that owns the pid; an MCP server is not on that host.",
     # --- worker-plane: the worker daemon calls these, never an agent. ---
     "POST /next-job": "worker-plane: the dispatch long-poll. An agent claiming jobs would steal work.",
     "POST /heartbeat": "worker-plane: capacity ad from the worker daemon.",

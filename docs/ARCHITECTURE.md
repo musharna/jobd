@@ -67,7 +67,14 @@ handlers holding real business logic, and they moved out. The remaining routes a
      │           │           └──────▶ orphaned      (its worker died mid-run)
      │           └──────────────────▶ queued        (refused at admission, or worker died)
      └──────────────────────────────▶ scheduling_timeout
+
+  (job adopt) ──────────▶ running ──▶ orphaned      (adopted process exited; exit code unknowable)
+                                  └──▶ cancelled / failed (refused: not the process named)
 ```
+
+An **adopted** job ([adoption.md](adoption.md)) is a process jobd did not start. It enters
+at `running`, is never `queued` or `assigned`, and so is out of reach of every requeue
+path — by construction, because requeueing it would *launch* its recorded command.
 
 **Every transition is a compare-and-swap on the state it expects to find.** Not because
 concurrency is theoretically hard, but because a worker that is briefly presumed dead can
