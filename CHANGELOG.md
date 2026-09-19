@@ -4,6 +4,29 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.46] — 2026-09-19
+
+### Fixed
+
+- **A starting worker killed the running jobs of every other jobd worker under
+  the same user.** The startup sweep exists to kill workloads a crashed
+  predecessor left behind, but a scope was named `jobd-<id>.scope` and the sweep
+  took every such unit in the session as its own. Starting a second worker for a
+  different broker (an isolated test broker, the `JOBD_LIVE` suite) SIGKILLed
+  the production worker's jobs, and two brokers issuing the same job id collided
+  on one unit name. Scopes are now `jobd-<ns>-<id>.scope`, where `<ns>` is
+  derived from the broker URL, and the sweep is limited to its own `<ns>`.
+  Scopes it leaves alone are named in a warning. One consequence on upgrade: a
+  scope left behind by a worker older than this release has no namespace and is
+  no longer swept; the warning names it and gives the command to stop it. A
+  normal restart drains first, so this only matters after a crash.
+  `systemctl --user status jobd-<id>.scope` becomes `jobd-<ns>-<id>.scope`; the
+  worker logs the unit name when it starts a job.
+
+### Added
+
+- **`job adopt --pid N`: register a process you already started as a job.** A GPU process launched outside the broker (`nohup`, tmux, a notebook) was invisible to it except as anonymous `unregistered_vram_gb`. Run `job adopt --pid N --project P [--gpu | --vram-gb N]` on the host where it lives and that host's worker watches the PID — launching nothing — so the process holds a slot, can be waited on, depended on (`--depends-on-any-exit`) and cancelled, and its VRAM counts as the job's rather than as foreign load. The process is identified by PID **and** `/proc` start time, so a recycled PID is refused (`adopt_pid_mismatch`); a process owned by another user is refused too (`adopt_uid_mismatch`), because the worker could not signal it. **The exit code of a non-child is not observable**, so an adopted job never ends `completed`: when the process exits it ends `orphaned` with `termination_reason=adopted_exit_unobserved`. No output is captured. Linux only. New `POST /adopt`, `job_adopted` event, and two nullable `jobs` columns (`adopt_pid`, `adopt_start_ticks`) added by the usual in-place migration; workers advertise support with a `jobd-adopt` tag and the broker refuses adoption onto one that does not. Design and limits: `docs/adoption.md`.
+
 ## [0.5.45] — 2026-09-18
 
 ### Added
