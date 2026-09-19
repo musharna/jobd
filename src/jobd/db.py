@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -116,6 +117,13 @@ class Job(Base):
     retry_delay_s: Mapped[int] = mapped_column(Integer, default=0)
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     not_before: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Adoption (docs/adoption.md): both NULL for every job jobd launched. Set
+    # together on a job created by POST /adopt — the foreign pid being watched
+    # and its /proc start time (clock ticks since boot), which is what makes the
+    # pid name one process. A row carrying adopt_pid is NEVER dispatched: its
+    # cmd_json is a label read from /proc, not something to run.
+    adopt_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    adopt_start_ticks: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     @property
     def requires(self) -> JobRequires | None:
@@ -220,6 +228,8 @@ _JOB_ADDS = [
     ("retry_delay_s", "INTEGER DEFAULT 0"),
     ("attempt", "INTEGER DEFAULT 0"),
     ("not_before", "DATETIME"),
+    ("adopt_pid", "INTEGER"),
+    ("adopt_start_ticks", "BIGINT"),
 ]
 _WORKER_ADDS = [
     ("arch", "VARCHAR(30) DEFAULT 'unknown'"),

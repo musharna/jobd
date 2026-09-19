@@ -15,6 +15,7 @@ bucket, so an alert written against it never fires.
 | Event | Meaning |
 |---|---|
 | `job_submitted` | A job row was created (one per array member). |
+| `job_adopted` | An already-running process was registered as a job (`job adopt`, [adoption.md](adoption.md)). The job is created `running`, so no `job_submitted` / `job_dispatched` / `job_started` precede it. Payload: `worker`, `pid`, `start_ticks`, `vram_gb`. |
 | `job_dispatched` | The dispatcher assigned the job to a worker. |
 | `job_started` | The worker reported the workload running. |
 | `job_completed` | The workload reached a terminal state the worker reported (completed / failed / exit code carried in the payload). |

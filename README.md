@@ -146,10 +146,13 @@ job status ID | A<id> [--watch]             # one job, or an array's aggregate
 job logs ID [-n BYTES]                      # tail captured output
 job wait ID                                 # block until terminal
 job cancel ID  /  job preempt ID            # stop a job
+job adopt --pid N -p PROJ [--gpu]           # register a process you already started (Linux)
 job workers                                 # fleet snapshot + health
 job projects list | set NAME PRI | nudge NAME DELTA
 job audit [--project P] [--since 24h]       # event history
 ```
+
+`job adopt` makes a process started outside jobd (`nohup`, tmux) visible to the broker: it holds a slot and its VRAM until it exits, and nothing is launched. Its exit code is unknowable, so it ends `orphaned`, never `completed` — see [docs/adoption.md](https://github.com/musharna/jobd/blob/main/docs/adoption.md).
 
 `job submit --explain` dry-runs the resolution (priority, profile, project defaults, host pin) and prints the effective config without enqueuing anything.
 

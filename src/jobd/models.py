@@ -206,6 +206,31 @@ class JobSubmit(BaseModel):
         return self
 
 
+class JobAdopt(BaseModel):
+    """Body of POST /adopt: register a process that is ALREADY running on `host`
+    as a job (docs/adoption.md). Deliberately not a JobSubmit: nothing is
+    launched, so none of the launch/queue knobs (env, retries, timeouts,
+    preemption, arrays, dependencies) apply, and `extra="forbid"` says so rather
+    than ignoring them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pid: int = Field(..., ge=1)
+    # /proc/<pid>/stat field 22. With `pid` it names one process; the worker
+    # refuses the adoption if the pid it finds started at any other tick.
+    start_ticks: int = Field(..., ge=0)
+    # The worker host the process lives on. The job is bound to it.
+    host: str = Field(..., min_length=1)
+    project: str
+    # Read from /proc by the CLI. A label for humans and the ETA/history views —
+    # jobd never executes it.
+    cmd: list[str] = Field(..., min_length=1)
+    cwd: str
+    gpu: bool = False
+    vram_gb: float = Field(default=0, ge=0)
+    submitted_via: Literal["cli", "mcp"] | None = None
+
+
 class JobInfo(BaseModel):
     id: int
     project: str
@@ -250,6 +275,10 @@ class JobInfo(BaseModel):
     retry_delay_s: int = 0
     not_before: datetime | None = None
     termination_reason: str | None = None
+    # Set only on an adopted job (docs/adoption.md): the foreign pid the worker
+    # watches and its /proc start time. The worker reads both from here.
+    adopt_pid: int | None = None
+    adopt_start_ticks: int | None = None
     # Job-array grouping (all None for a standalone job). array_id is the first
     # member's job id; array_index is 0-based; array_size is the member count.
     array_id: int | None = None
@@ -426,6 +455,9 @@ KNOWN_EVENTS = frozenset(
     {
         # job lifecycle (broker)
         "job_submitted",
+        # An already-running process was registered as a job (POST /adopt). It
+        # is created RUNNING, so no job_submitted/dispatched/started precede it.
+        "job_adopted",
         "job_dispatched",
         "job_started",
         "job_completed",

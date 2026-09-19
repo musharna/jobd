@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
+from jobd.broker.adopt import adopted_jobs_for_host, adoption_fills_host
 from jobd.broker.constants import _LONGPOLL_RECHECK_S
 from jobd.broker.context import BrokerDeps
 from jobd.broker.events import _emit_event
@@ -141,6 +142,9 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                     restored,
                 ) = _reconcile_worker_in_flight(session, hb.host, set(hb.in_flight_job_ids))
             session.commit()
+            # docs/adoption.md: the response is the delivery channel for adopted
+            # jobs. Older workers ignore the body entirely.
+            adopted = adopted_jobs_for_host(session, hb.host)
         if is_first_heartbeat:
             _emit_event(
                 logs_dir,
@@ -206,7 +210,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         # `restored` children, which go back to QUEUED and are dispatchable now.
         if requeued or orphan_records or cancelled_records or restored:
             _wake_dispatchers()
-        return {"ok": True}
+        return {"ok": True, "adopted": adopted}
 
     @router.get("/workers", response_model=list[WorkerInfo])
     def list_workers():
@@ -272,7 +276,11 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 all_queued = (
                     session.execute(
                         select(Job)
-                        .where(Job.state == JobState.QUEUED)
+                        # adopt_pid IS NULL: an adopted job's cmd is a label read
+                        # from /proc and must never be launched. /adopt never
+                        # creates one QUEUED; this holds the invariant even if
+                        # some future path requeues one (docs/adoption.md).
+                        .where(Job.state == JobState.QUEUED, Job.adopt_pid.is_(None))
                         .order_by(Job.priority.desc(), Job.submitted_at.asc())
                     )
                     .scalars()
@@ -297,6 +305,8 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 worker_row = session.execute(
                     select(Worker).where(Worker.host == q.host)
                 ).scalar_one_or_none()
+                if adoption_fills_host(session, worker_row, q.host):
+                    return None
                 aliases: list[str] = ["any", "any-gpu"] if q.free_vram_gb > 0 else ["any"]
                 arch = q.arch
                 os_ = q.os

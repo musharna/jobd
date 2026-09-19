@@ -30,8 +30,10 @@ import psutil
 
 from jobd import __version__ as _jobd_version
 from jobd import cgroup_walk as _cgroup_walk
+from jobd import procident as _procident
 from jobd import subreaper as _subreaper
 
+from . import adopt as _adopt
 from .capabilities import detect as _detect_caps
 
 # subreaper + cgroup_walk ship in the jobd package alongside this worker module,
@@ -205,13 +207,17 @@ def _allocations_total() -> tuple[float, float, int]:
     return v, r, c
 
 
+def _in_flight_entry(job: dict) -> dict[str, float]:
+    return {
+        "vram_gb": effective_vram_request_gb_from_job(job),
+        "ram_gb": float(job.get("ram_gb") or 0),
+        "cpus": int(job.get("cpus") or 0),
+    }
+
+
 def _register_in_flight(job: dict) -> None:
     with _in_flight_lock:
-        _in_flight[int(job["id"])] = {
-            "vram_gb": effective_vram_request_gb_from_job(job),
-            "ram_gb": float(job.get("ram_gb") or 0),
-            "cpus": int(job.get("cpus") or 0),
-        }
+        _in_flight[int(job["id"])] = _in_flight_entry(job)
 
 
 def _unregister_in_flight(job_id: int) -> None:
@@ -448,6 +454,7 @@ def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
     back to the tracked_pids we already have (never fewer than the old behavior).
     """
     owned = _tracked_pids_snapshot(tracked_pids)
+    owned.update(_adopted_descendant_pids())
     if not _REAPER_OK:
         return owned
     with _in_flight_lock:
@@ -460,6 +467,114 @@ def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
         except Exception as e:  # best-effort; never block a heartbeat
             log.error("cgroup-walk owned-pid resolve failed for job %s: %s", jid, e)
     return owned
+
+
+# Adopted jobs (docs/adoption.md): job_id -> the foreign pid being watched. An
+# adopted process has no jobd scope cgroup, so its forked children — where a GPU
+# job's CUDA contexts often live — are found by walking the process tree instead.
+_adopted_roots: dict[int, int] = {}
+# Adopted jobs this worker already reported terminal. A heartbeat response
+# computed before that report landed can still list the job; without this the
+# worker would start a second watcher for a job that is over.
+_adopt_done: set[int] = set()
+
+
+def _adopted_descendant_pids() -> set[int]:
+    """Live descendants of every adopted pid (the roots themselves are already in
+    `tracked_pids`). A process that exits mid-walk simply contributes nothing."""
+    with _in_flight_pids_lock:
+        roots = list(_adopted_roots.values())
+    out: set[int] = set()
+    for root in roots:
+        try:
+            out.update(c.pid for c in psutil.Process(root).children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return out
+
+
+def _watch_adopted_job(
+    client: httpx.Client, job: dict, tracked_pids: set[int], stop_event: threading.Event
+) -> None:
+    """Thread body for one adopted job. The in-flight reservation was taken by
+    `_start_adopted_watchers`; this owns releasing it. Launches nothing."""
+    job_id = int(job["id"])
+    pid = int(job["adopt_pid"])
+    _tracked_pids_add(tracked_pids, pid)
+    _register_in_flight_pid(job_id, pid)
+    with _in_flight_pids_lock:
+        _adopted_roots[job_id] = pid
+
+    def _poll_signal() -> str | None:
+        try:
+            r = client.get(f"/jobs/{job_id}/signal", timeout=5.0)
+        except httpx.HTTPError as e:
+            log.error("adopted job %s: GET /signal failed: %s", job_id, e)
+            return None
+        return r.json().get("signal") if r.status_code == 200 else None
+
+    outcome: _adopt.AdoptOutcome | None
+    try:
+        outcome = _adopt.watch(
+            pid,
+            int(job["adopt_start_ticks"]),
+            poll_signal=_poll_signal,
+            stop=stop_event,
+            grace_s=WATCHDOG_KILL_GRACE_S,
+            interval_s=SIGNAL_POLL_INTERVAL_S,
+        )
+    except _adopt.AdoptRefused as e:
+        log.warning("adopted job %s refused: %s", job_id, e)
+        outcome = _adopt.AdoptOutcome("failed", e.reason)
+    except Exception:
+        log.exception("adopted job %s: watcher crashed", job_id)
+        outcome = _adopt.AdoptOutcome("failed", "worker_exec_error")
+    finally:
+        with _in_flight_pids_lock:
+            _adopted_roots.pop(job_id, None)
+        _unregister_in_flight_pid(job_id)
+        _tracked_pids_discard(tracked_pids, pid)
+    try:
+        if outcome is not None:
+            log.info("adopted job %s (pid %s) ended: %s", job_id, pid, outcome)
+            _post_complete_with_retry(
+                client,
+                job_id,
+                {
+                    "exit_code": None,
+                    "final_state": outcome.final_state,
+                    "termination_reason": outcome.termination_reason,
+                },
+            )
+    finally:
+        with _in_flight_lock:
+            if outcome is not None:
+                _adopt_done.add(job_id)
+            _in_flight.pop(job_id, None)
+
+
+def _start_adopted_watchers(
+    client: httpx.Client, adopted: list[dict], tracked_pids: set[int], stop_event: threading.Event
+) -> list[int]:
+    """Start a watcher for each adopted job the broker lists for this host that
+    is not already watched. Called from the heartbeat thread with the
+    `/heartbeat` response's `adopted` list — which is also how a restarted worker
+    re-learns the jobs it was watching. Returns the job ids newly taken on."""
+    started: list[int] = []
+    for job in adopted:
+        job_id = int(job["id"])
+        with _in_flight_lock:
+            if job_id in _in_flight or job_id in _adopt_done:
+                continue
+            _in_flight[job_id] = _in_flight_entry(job)
+        threading.Thread(
+            target=_watch_adopted_job,
+            args=(client, job, tracked_pids, stop_event),
+            daemon=True,
+            name=f"adopt-{job_id}",
+        ).start()
+        started.append(job_id)
+    return started
 
 
 def _sweep_reparented_orphans_if_solo(job_id: int, tracked_pids: set[int]) -> None:
@@ -717,6 +832,12 @@ def _detect_mount_roots() -> list[str]:
     return found
 
 
+def _adopt_tags() -> list[str]:
+    """Advertise adoption support, so the broker never hands an adopted job to a
+    worker that would not understand it (older, or not on Linux)."""
+    return [_procident.ADOPT_WORKER_TAG] if sys.platform.startswith("linux") else []
+
+
 def resource_snapshot(tracked_pids: set[int]) -> dict:
     # Snapshot the tracked-pid set under its lock so a concurrent job-thread
     # add/discard can't tear the copy the NVML foreign-VRAM accounting reads.
@@ -757,7 +878,7 @@ def resource_snapshot(tracked_pids: set[int]) -> dict:
         "arch": _CAPS.arch,
         "os": _CAPS.os,
         "gpu": _CAPS.gpu,
-        "tags": list(_CAPS.tags),
+        "tags": [*_CAPS.tags, *_adopt_tags()],
         "mount_roots": _detect_mount_roots(),
         "max_concurrent": _max_concurrent_jobs(),
         "running": _running_count(),
@@ -791,7 +912,11 @@ def heartbeat_loop(client: httpx.Client, tracked_pids: set[int], stop_event: thr
     while not stop_event.is_set():
         try:
             snap = resource_snapshot(tracked_pids)
-            client.post("/heartbeat", json=snap, timeout=10.0)
+            r = client.post("/heartbeat", json=snap, timeout=10.0)
+            if r.status_code == 200:
+                _start_adopted_watchers(
+                    client, r.json().get("adopted") or [], tracked_pids, stop_event
+                )
         except Exception as e:
             log.error("heartbeat error: %s", e)
         stop_event.wait(HEARTBEAT_INTERVAL_S)

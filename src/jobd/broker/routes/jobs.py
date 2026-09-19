@@ -19,6 +19,7 @@ from sqlalchemy import func, or_, select
 from sse_starlette.sse import EventSourceResponse
 
 from jobd.broker.admission import refuse_admission as refuse_admission_service
+from jobd.broker.adopt import adopt_job
 from jobd.broker.constants import (
     _AUTO_PREEMPT_WARNING_PREFIX,
     LIST_LIMIT_MAX,
@@ -46,6 +47,7 @@ from jobd.models import (
     TERMINAL_STATES,
     AdmissionRefusal,
     CompletePayload,
+    JobAdopt,
     JobInfo,
     JobRequires,
     JobState,
@@ -81,6 +83,11 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             logs_dir=logs_dir,
             wake_dispatchers=_wake_dispatchers,
         )
+
+    @router.post("/adopt", response_model=JobInfo)
+    def adopt(req: JobAdopt):
+        # Register an already-running process as a job. See jobd.broker.adopt.
+        return adopt_job(req, session_factory=SessionLocal, state=state, logs_dir=logs_dir)
 
     @router.get("/jobs", response_model=list[JobInfo])
     def list_jobs(
