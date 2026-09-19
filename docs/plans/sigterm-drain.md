@@ -167,8 +167,12 @@ from ever firing:
 
 On worker start, enumerate user units matching `jobd-*.scope` and kill
 leftovers from a previous incarnation, so a Phase-2-requeued idempotent job
-can't double-execute against a still-running old scope. Assumes one worker
-per user session (current deployment model — document it). Defer until
+can't double-execute against a still-running old scope. The first version
+assumed one worker per user session and killed every `jobd-<id>.scope`; that
+assumption was never checked, and a second worker under the same uid (a test
+broker) killed the production worker's running jobs. Since 0.5.46 the unit is
+`jobd-<ns>-<id>.scope`, `<ns>` derived from the broker URL, and the sweep is
+limited to its own `<ns>`. Defer until
 Phase 2 lands; without requeue-on-reconcile it has no double-execution to
 prevent.
 

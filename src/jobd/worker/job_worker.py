@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -313,21 +314,50 @@ def _graceful_shutdown(client, job_threads: list[threading.Thread]) -> dict:
     return summary
 
 
-_STALE_SCOPE_RE = re.compile(r"^jobd-\d+\.scope$")
+_DEFAULT_JOBD_URL = "http://127.0.0.1:8765"
+_ANY_JOBD_SCOPE_RE = re.compile(r"^jobd-(?:[0-9a-f]{8}-)?\d+\.scope$")
+
+
+def scope_namespace(jobd_url: str) -> str:
+    """Eight hex characters naming the broker a scope belongs to.
+
+    Ownership has to be readable off the unit itself: the startup sweep kills
+    scopes, and a name holding only the job id cannot say whose job it is.
+    """
+    normalised = jobd_url.strip().rstrip("/").lower()
+    return hashlib.sha256(normalised.encode()).hexdigest()[:8]
+
+
+_scope_ns = scope_namespace(os.environ.get("JOBD_URL", _DEFAULT_JOBD_URL))
+
+
+def set_scope_namespace(jobd_url: str) -> None:
+    """Bind this worker's scope names to its broker. Called once, from main(),
+    before the sweep and before any job is launched."""
+    global _scope_ns
+    _scope_ns = scope_namespace(jobd_url)
+
+
+def scope_unit_name(job_id: int) -> str:
+    return f"jobd-{_scope_ns}-{job_id}.scope"
 
 
 def _sweep_stale_scopes() -> list[str]:
-    """Kill leftover jobd-<id>.scope units from a previous worker incarnation
+    """Kill leftover jobd-<ns>-<id>.scope units from a previous worker incarnation
     (SIGTERM-drain Phase 3, docs/plans/sigterm-drain.md).
 
     Scopes live outside the worker service's cgroup, so workloads survive an
     undrained worker death. The broker's heartbeat reconcile then requeues
     their (idempotent) jobs — and a re-dispatch would double-execute against
     the still-running old workload. Sweeping at startup, before the first
-    poll, closes that window. Any jobd-*.scope alive before this worker has
-    dispatched anything is by definition stale: one jobd worker per user
-    session (current deployment model).
+    poll, closes that window.
+
+    Only scopes in this worker's own namespace are stale by definition. A scope
+    from another broker's worker under the same uid is a job that is running
+    right now, and an un-namespaced jobd-<id>.scope (made before 0.5.46) cannot
+    be attributed to anyone, so both are left alone and named in a warning.
     """
+    own_scope_re = re.compile(rf"^jobd-{_scope_ns}-\d+\.scope$")
     systemctl = shutil.which("systemctl")
     if systemctl is None:
         return []
@@ -352,10 +382,13 @@ def _sweep_stale_scopes() -> list[str]:
         log.error("stale-scope sweep: list-units failed: %s", e)
         return []
     swept: list[str] = []
+    not_ours: list[str] = []
     for line in out.splitlines():
         fields = line.split()
         unit = fields[0] if fields else ""
-        if not _STALE_SCOPE_RE.match(unit):
+        if not own_scope_re.match(unit):
+            if _ANY_JOBD_SCOPE_RE.match(unit):
+                not_ours.append(unit)
             continue
         try:
             scope_path = _cgroup_walk.resolve_user_scope_path(unit)
@@ -373,6 +406,15 @@ def _sweep_stale_scopes() -> list[str]:
             continue
         swept.append(unit)
         log.info("stale-scope sweep: killed %s (%s pid(s))", unit, len(killed))
+    if not_ours:
+        log.warning(
+            "stale-scope sweep: left %d jobd scope(s) alone that are not in this "
+            "worker's namespace (%s): %s. If one is a leftover from a worker older "
+            "than 0.5.46, stop it with `systemctl --user kill --signal=KILL <unit>`.",
+            len(not_ours),
+            _scope_ns,
+            ", ".join(not_ours),
+        )
     return swept
 
 
@@ -422,7 +464,7 @@ def _in_flight_pid_map() -> dict[str, list[int]]:
         pids = [pid]
         if _REAPER_OK:
             try:
-                scope_path = _cgroup_walk.resolve_user_scope_path(f"jobd-{jid}.scope")
+                scope_path = _cgroup_walk.resolve_user_scope_path(scope_unit_name(jid))
                 if scope_path is not None:
                     pids.extend(p for p in _cgroup_walk.list_scope_pids(scope_path) if p != pid)
             except Exception as e:
@@ -461,7 +503,7 @@ def _effective_owned_pids(tracked_pids: set[int]) -> set[int]:
         job_ids = list(_in_flight.keys())
     for jid in job_ids:
         try:
-            scope_path = _cgroup_walk.resolve_user_scope_path(f"jobd-{jid}.scope")
+            scope_path = _cgroup_walk.resolve_user_scope_path(scope_unit_name(jid))
             if scope_path is not None:
                 owned.update(_cgroup_walk.list_scope_pids(scope_path))
         except Exception as e:  # best-effort; never block a heartbeat
@@ -1135,7 +1177,7 @@ def _wrap_in_scope(cmd: list[str], job: dict, job_id: int) -> tuple[list[str], s
     systemd_run = shutil.which("systemd-run")
     if job.get("fast_path") or systemd_run is None:
         return cmd, None
-    scope_unit = f"jobd-{job_id}.scope"
+    scope_unit = scope_unit_name(job_id)
     mem_max = os.environ.get("JOBD_WORKER_MEM_MAX", "14G")
     swap_max = os.environ.get("JOBD_WORKER_SWAP_MAX", "4G")
     full_cmd = [
@@ -1697,8 +1739,9 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
 def main():
     _setup_logging()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--jobd-url", default=os.environ.get("JOBD_URL", "http://127.0.0.1:8765"))
+    parser.add_argument("--jobd-url", default=os.environ.get("JOBD_URL", _DEFAULT_JOBD_URL))
     args = parser.parse_args()
+    set_scope_namespace(args.jobd_url)
 
     # Audit 2026-05-18 (runtime-zombies S4): set PR_SET_CHILD_SUBREAPER so
     # orphaned descendants whose direct parent dies get reparented to us
