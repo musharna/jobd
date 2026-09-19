@@ -31,14 +31,14 @@ def _reset_worker_registries():
 def test_in_flight_pid_map_unions_proc_pid_and_scope_pids(tmp_path, monkeypatch):
     _reset_worker_registries()
     try:
-        scope_dir = tmp_path / "jobd-7001.scope"
+        scope_dir = tmp_path / job_worker.scope_unit_name(7001)
         scope_dir.mkdir()
         (scope_dir / "cgroup.procs").write_text("4242\n4243\n")
         monkeypatch.setattr(job_worker, "_REAPER_OK", True)
         monkeypatch.setattr(
             job_worker._cgroup_walk,
             "resolve_user_scope_path",
-            lambda unit: scope_dir if unit == "jobd-7001.scope" else None,
+            lambda unit: scope_dir if unit == job_worker.scope_unit_name(7001) else None,
         )
         job_worker._register_in_flight_pid(7001, 999)
         assert job_worker._in_flight_pid_map() == {"7001": [999, 4242, 4243]}

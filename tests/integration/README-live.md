@@ -29,8 +29,9 @@ the process lives and holds the single slot against a queued job, ends
 `orphaned`/`adopted_exit_unobserved` when it is killed, a wrong start time is refused
 (`adopt_pid_mismatch`) with the true identity as the in-test positive control, and
 `job cancel` SIGTERMs the PID. Its worker runs with a PATH holding only `true`, so it
-cannot run the startup stale-scope sweep against a real worker's `jobd-*.scope` units on
-the same machine.
+cannot run the startup stale-scope sweep at all. Since 0.5.46 the sweep only touches
+scopes in its own broker's namespace (`jobd-<ns>-<id>.scope`), so a test worker can no
+longer kill a real worker's jobs on the same machine; before that it could.
 
 The worker is launched with `JOBD_WORKER_WATCHDOG_KILL_GRACE_S=3` (a new env knob
 on the H1 fix) so the escalation test runs in seconds instead of the 60s default.

@@ -330,7 +330,7 @@ def test_run_job_non_fast_path_uses_named_scope(tmp_path, monkeypatch):
         "--scope",
         "--quiet",
         "--same-dir",
-        "--unit=jobd-9101.scope",
+        f"--unit={job_worker.scope_unit_name(9101)}",
         "-p",
         "MemoryMax=14G",
         "-p",
@@ -442,7 +442,10 @@ def test_run_job_cancel_signals_scope_unit_not_pid(tmp_path, monkeypatch):
     run_job(client, job, set())
 
     assert any(
-        c[0] == "systemctl" and "--user" in c and "kill" in c and c[-1] == "jobd-9201.scope"
+        c[0] == "systemctl"
+        and "--user" in c
+        and "kill" in c
+        and c[-1] == job_worker.scope_unit_name(9201)
         for c in systemctl_calls
     ), f"expected systemctl --user kill on scope, got {systemctl_calls}"
     assert proc_signals == [], (
@@ -570,9 +573,9 @@ def test_run_job_idle_timeout_kills_silent_workload(tmp_path, monkeypatch):
     elapsed = time.monotonic() - t0
 
     assert elapsed < 4.0, f"idle watchdog should fire promptly, took {elapsed:.1f}s"
-    assert any("kill" in c and c[-1] == "jobd-9301.scope" for c in systemctl_calls), (
-        f"expected systemctl kill on scope unit, got {systemctl_calls}"
-    )
+    assert any(
+        "kill" in c and c[-1] == job_worker.scope_unit_name(9301) for c in systemctl_calls
+    ), f"expected systemctl kill on scope unit, got {systemctl_calls}"
     completes = [p for p in client.posts if p[0].endswith("/complete")]
     assert len(completes) == 1
     body = completes[0][1]
@@ -789,7 +792,7 @@ def test_run_job_watchdog_escalates_to_sigkill_when_sigterm_ignored(tmp_path, mo
     kill_calls = [
         c
         for c in systemctl_calls
-        if any(a == "--signal=KILL" for a in c) and c[-1] == "jobd-9401.scope"
+        if any(a == "--signal=KILL" for a in c) and c[-1] == job_worker.scope_unit_name(9401)
     ]
     assert kill_calls, f"watchdog must escalate to SIGKILL on the scope unit, got {systemctl_calls}"
     completes = [p for p in client.posts if p[0].endswith("/complete")]
@@ -1190,14 +1193,14 @@ def test_effective_owned_pids_unions_scope_cgroup_pids(tmp_path, monkeypatch):
     union both — read from a real cgroup.procs file."""
     _reset_in_flight()
     try:
-        scope_dir = tmp_path / "jobd-9300.scope"
+        scope_dir = tmp_path / job_worker.scope_unit_name(9300)
         scope_dir.mkdir()
         (scope_dir / "cgroup.procs").write_text("4242\n4243\n")
         monkeypatch.setattr(job_worker, "_REAPER_OK", True)
         monkeypatch.setattr(
             job_worker._cgroup_walk,
             "resolve_user_scope_path",
-            lambda unit: scope_dir if unit == "jobd-9300.scope" else None,
+            lambda unit: scope_dir if unit == job_worker.scope_unit_name(9300) else None,
         )
         job_worker._register_in_flight({"id": 9300, "vram_gb": 8, "ram_gb": 0, "cpus": 0})
         # 999 = the systemd-run client pid we Popen'd; 4242/4243 = real workload.
@@ -1227,14 +1230,14 @@ def test_own_scope_job_not_counted_as_foreign_vram(tmp_path, monkeypatch):
     unregistered. RTX 5090 real-exec confirmed NVML reports the child pid."""
     _reset_in_flight()
     try:
-        scope_dir = tmp_path / "jobd-9302.scope"
+        scope_dir = tmp_path / job_worker.scope_unit_name(9302)
         scope_dir.mkdir()
         (scope_dir / "cgroup.procs").write_text("5000\n")  # the real CUDA pid
         monkeypatch.setattr(job_worker, "_REAPER_OK", True)
         monkeypatch.setattr(
             job_worker._cgroup_walk,
             "resolve_user_scope_path",
-            lambda unit: scope_dir if unit == "jobd-9302.scope" else None,
+            lambda unit: scope_dir if unit == job_worker.scope_unit_name(9302) else None,
         )
         monkeypatch.setattr(job_worker, "nvidia_processes", lambda: [(5000, 8192)])
         monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 24.0)
@@ -1825,9 +1828,9 @@ def test_run_job_first_output_timeout_kills_silent_start(tmp_path, monkeypatch):
     elapsed = time.monotonic() - t0
 
     assert elapsed < 4.0, f"first-output watchdog should fire promptly, took {elapsed:.1f}s"
-    assert any("kill" in c and c[-1] == "jobd-9401.scope" for c in systemctl_calls), (
-        f"expected systemctl kill on scope unit, got {systemctl_calls}"
-    )
+    assert any(
+        "kill" in c and c[-1] == job_worker.scope_unit_name(9401) for c in systemctl_calls
+    ), f"expected systemctl kill on scope unit, got {systemctl_calls}"
     completes = [p for p in client.posts if p[0].endswith("/complete")]
     assert len(completes) == 1
     body = completes[0][1]

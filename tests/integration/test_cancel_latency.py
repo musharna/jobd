@@ -96,6 +96,7 @@ def test_cancel_latency_under_5s_via_scope_kill(tmp_path):
     /signal returns 'cancel', the worker MUST kill the workload within
     a few seconds via `systemctl --user kill`. Pre-fix, this took ~60s
     because SIGTERM-to-pid was a no-op on the systemd-run client."""
+    from jobd.worker import job_worker
     from jobd.worker.job_worker import run_job
 
     job_id = 99100 + int(time.time()) % 1000
@@ -128,7 +129,7 @@ def test_cancel_latency_under_5s_via_scope_kill(tmp_path):
     # Belt-and-suspenders: the scope unit should be cleaned up by systemd
     # after the workload exits. If it lingers, that's a separate problem.
     sub = subprocess.run(
-        ["systemctl", "--user", "is-active", f"jobd-{job_id}.scope"],
+        ["systemctl", "--user", "is-active", job_worker.scope_unit_name(job_id)],
         capture_output=True,
         timeout=5,
     )
