@@ -34,8 +34,12 @@ In `~/.claude.json` `mcpServers`:
 
 ## Errors
 
-- Transport failures (broker unreachable, 5xx) → MCP `isError=true` with hint mentioning `JOBD_URL`.
-- Broker 4xx refusals → tool result `{error: {kind, message, hint}}`. Kinds: `invalid_submit`, `unknown_parent`, `cwd_outside_mount_roots`, `no_eligible_worker`, `not_found`, `conflict`, `unknown`.
+- Arguments are validated against each tool's `inputSchema` before the tool runs; every schema is closed (`additionalProperties: false`). A missing, mistyped, unknown or misplaced key → `isError=true` with `{error: {kind: "invalid_arguments", message, hint}}` — never a silent drop.
+- Transport failures (any httpx transport error: connect, timeouts incl. write/pool, protocol) → `isError=true`, text naming the failure kind plus a hint.
+- Any other failure inside the server (or an unparseable broker reply) → `isError=true` with kind `internal_error`; an unregistered tool name → `unknown_tool`. All are recorded in the call log's `error_kind`.
+- Broker 4xx refusals → tool result `{error: {kind, message, hint}}`. Kinds: `invalid_submit`, `unknown_parent`, `parent_failed`, `cwd_outside_mount_roots`, `bad_request`, `not_found`, `conflict`, `auth_failed`, `forbidden`, `invalid_arguments`, `unknown`. 404/409 hints name the tool's resource (job vs worker).
+
+`gpu` on `jobd_submit` is a pin flag, like the CLI's `--gpu`: `true` requires a GPU worker; `false` or omitted means no preference. Forbidding GPU workers (CLI `--no-gpu`) is not exposed over MCP.
 
 ## Tests
 
