@@ -509,3 +509,13 @@ def test_every_accepted_extra_key_reaches_the_broker_body():
         body = xlate_submit_payload(_build_submit_payload(args))
         where = body.get("requires", {}) if key in ("arch", "os", "idempotent") else body
         assert renamed.get(key, key) in where, f"extra.{key} accepted but not forwarded: {body}"
+
+
+def test_xlate_job_info_passes_signal_through_and_never_invents_it():
+    """jobd_status's `signal` is the broker's JobInfo.signal. The translator
+    used to setdefault it to None, which reported "no pending signal" for every
+    job while the broker omitted the field — so the gap could not show."""
+    from jobd.mcp.translate import xlate_job_info
+
+    assert xlate_job_info({"id": 1, "state": "running", "signal": "cancel"})["signal"] == "cancel"
+    assert "signal" not in xlate_job_info({"id": 1, "state": "running"})

@@ -1709,6 +1709,43 @@ def test_complete_clears_pending_signal(client):
     assert client.get(f"/jobs/{job['id']}/signal").json()["signal"] is None
 
 
+def test_job_info_reports_pending_signal(client):
+    """GET /jobs/{id} carries job.signal through its lifecycle: None while
+    running, 'cancel' once a cancel is queued, None again after /complete.
+    JobInfo used to omit the column, so every status read reported no pending
+    signal even while the worker was about to SIGTERM the job."""
+    job = _submit(client).json()
+    _heartbeat(client)
+    _next_job(client)
+    client.post(f"/jobs/{job['id']}/started")
+    before = client.get(f"/jobs/{job['id']}").json()
+    assert "signal" in before and before["signal"] is None
+
+    client.post(f"/jobs/{job['id']}/cancel")
+    assert client.get(f"/jobs/{job['id']}").json()["signal"] == "cancel"
+    listed = {j["id"]: j for j in client.get("/jobs").json()}
+    assert listed[job["id"]]["signal"] == "cancel"
+
+    client.post(
+        f"/jobs/{job['id']}/complete",
+        json={"exit_code": -15, "final_state": "cancelled"},
+    )
+    assert client.get(f"/jobs/{job['id']}").json()["signal"] is None
+
+
+def test_job_info_reports_pending_preempt(client):
+    """The same field carries 'preempt' for a preempted preemptible job."""
+    _heartbeat(client)
+    job = client.post(
+        "/submit",
+        json={"cmd": ["sleep", "999"], "cwd": "/tmp", "project": "project-a", "preemptible": True},
+    ).json()
+    _next_job(client)
+    client.post(f"/jobs/{job['id']}/started")
+    assert client.post(f"/jobs/{job['id']}/preempt").status_code == 200
+    assert client.get(f"/jobs/{job['id']}").json()["signal"] == "preempt"
+
+
 def test_complete_is_idempotent_on_terminal_job(client):
     """P3.2: a second /complete on an already-terminal job is a no-op — the
     recorded outcome is NOT overwritten (worker retries / late posts can't

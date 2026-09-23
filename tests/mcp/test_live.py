@@ -113,7 +113,7 @@ def test_live_submit_status_list_jobget_cancel_full_round_trip():
         assert st["job_id"] == job_id  # renamed from id
         assert "host" in st  # renamed from worker (None when queued)
         assert "duration_s" in st  # synthesized — None when not finished
-        assert "signal" in st  # synthesized — None unless cancel ran
+        assert "signal" in st  # the broker's pending cancel/preempt, None here
 
         # List — exercises wrap_jobs (bare list → {jobs, counts}).
         lst = jobd_list(client, {"project": "jobd-mcp-live-test"})
