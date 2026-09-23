@@ -4,10 +4,6 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed
-
-- **`jobd_status` and `GET /jobs/{id}` report a pending cancel/preempt signal.** `JobInfo` omitted the `signal` column, and jobd-mcp filled the gap with `signal: null` for every job, so a job about to be SIGTERMed read as having nothing pending. `JobInfo.signal` now carries the broker's value (`"cancel"`, `"preempt"` or `null`), and jobd-mcp passes it through instead of inventing it.
-
 ## [0.5.47] — 2026-09-23
 
 ### Fixed
