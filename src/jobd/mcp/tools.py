@@ -31,10 +31,12 @@ _TERMINAL = TERMINAL_STATES
 
 
 def _build_submit_payload(args: dict) -> dict:
-    """Merge first-class fields with extra (extra never overrides explicit fields).
+    """Flatten first-class fields and `extra` into one MCP-flat payload.
 
-    Returns the MCP-flat payload; `xlate_submit_payload` converts it to
-    the broker JobSubmit body at the seam.
+    `args` has already been validated against SUBMIT_INPUT (server._dispatch),
+    so every key here is one the schema declares and the two key sets are
+    disjoint. `xlate_submit_payload` converts the result to the broker
+    JobSubmit body at the seam.
     """
     payload = {
         "command": args["command"],
@@ -187,12 +189,19 @@ def jobd_submit(client: JobdClient, args: dict) -> dict:
             return out
 
     logs = client.logs(base["job_id"], tail_bytes=8192)
+    # The wait=true reply is a SUPERSET of the async reply: it used to be
+    # rebuilt from scratch, which dropped `warning` and `project_label`, and it
+    # returned an 8 KiB tail with no sign the log was longer (audit 2026-09-22
+    # M4). The log_* fields mirror jobd_logs' size_bytes/returned_bytes/truncated.
     out = {
-        "job_id": base["job_id"],
+        **base,
         "state": info["state"],
         "exit_code": info.get("exit_code"),
         "duration_s": info.get("duration_s"),
         "log_tail": logs.get("tail", ""),
+        "log_size_bytes": logs.get("size_bytes"),
+        "log_returned_bytes": logs.get("returned_bytes"),
+        "log_truncated": logs.get("truncated"),
     }
     if clamped:
         out["clamped"] = True
@@ -225,21 +234,21 @@ def jobd_logs(client: JobdClient, args: dict) -> dict:
 
 
 def jobd_cancel(client: JobdClient, args: dict) -> dict:
-    """Cancel a job. signal_sent synthesized: 'cancel' if prior state was running or
-    assigned, else None.
+    """Cancel a job; `reason` is recorded on the broker's job_cancelled event.
 
-    The broker's JobInfo response has no `signal` field; the cancel flow
-    is async (worker polls /signal endpoint and SIGTERMs). For MCP
-    consumers, surface the signal we know was queued. We accept `assigned`
-    in addition to `running` because the broker queues SIGTERM identically
-    for both — a job dispatched but not yet through its `/started` POST is
-    still SIGTERM-cancellable.
+    signal_sent is read off the broker's OWN cancel reply, not inferred from a
+    status read taken before the call (audit 2026-09-22 L11: a job that
+    finished between that read and the cancel was reported as signalled). The
+    broker's cancel handler either moves a queued job straight to cancelled,
+    or stamps signal='cancel' on a running/assigned one in the same
+    transaction that produced the reply — so a reply still running/assigned
+    means a cancel signal is pending (the worker SIGTERMs on its next poll),
+    and anything else means no signal was queued. prior_state is informational.
     """
     job_id = args["job_id"]
     prior = _status(client, job_id)
-    client.cancel(job_id, reason=args.get("reason"))
-    after = _status(client, job_id)
-    signal_sent = "cancel" if prior["state"] in ("running", "assigned") else None
+    after = xlate_job_info(client.cancel(job_id, reason=args.get("reason")))
+    signal_sent = "cancel" if after["state"] in ("running", "assigned") else None
     return {
         "job_id": job_id,
         "prior_state": prior["state"],

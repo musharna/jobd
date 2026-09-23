@@ -1,0 +1,1 @@
+- **Cancel reasons are recorded.** `POST /jobs/{id}/cancel` accepts an optional `{"reason": ...}` body and stores it on the `job_cancelled` event; `job cancel --reason` and `jobd_cancel reason` send it. The MCP tool and the client had accepted a reason the broker silently discarded.

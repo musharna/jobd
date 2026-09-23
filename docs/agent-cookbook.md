@@ -24,11 +24,13 @@ its own context via a status call.
 The agent's context is expensive; a training run is hours long. The pattern is
 submit → detach → poll on a widening cadence:
 
-1. `jobd_submit` with the resource truth: `{"cmd": ["python", "train.py"],
-   "project": "myproj", "requires": {"gpu": true}, "vram_gb": 16,
-   "max_wall_s": 14400, "idle_timeout_s": 900}`. The response carries the job
-   id **and an ETA estimate** (p50/p90 from history) — use it to set the first
-   check-in instead of guessing.
+1. `jobd_submit` with the resource truth: `{"command": "python train.py",
+   "project": "myproj", "cwd": "/abs/path", "gpu": true, "extra": {"vram_gb": 16,
+   "max_wall_s": 14400, "idle_timeout_s": 900}}`. Arguments are validated
+   against the tool's schema — an unknown or misplaced key is rejected with
+   `invalid_arguments`, never silently dropped. The response carries the job
+   id; `jobd_status` on it carries an **ETA estimate** (p50/p90 from history) —
+   use it to set the first check-in instead of guessing.
 2. `jobd_status` at the ETA's p50, then p90, then on a backoff. The status
    includes `state`, `worker`, timing, and any `warning` the broker stamped
    (e.g. why it's still queued).
@@ -67,7 +69,7 @@ is a plain conditional, not a distributed-systems puzzle.
 
 ## Pattern 3 — sweeps, then collect
 
-`jobd_submit` accepts `count` (N members, `{i}` substituted) or `sweep` axes
+`jobd_submit` accepts `extra.count` (N members, `{i}` substituted) or `extra.sweep` axes
 (`[{"key": "lr", "values": ["0.1", "0.01"]}]`, cartesian product). Submit the
 array, then `jobd_list` filtered to the array to watch members complete;
 failed members carry their own logs. Dependencies (`depends_on`) let an agent

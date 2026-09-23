@@ -880,11 +880,16 @@ def status(
 
 
 @app.command()
-def cancel(job_id: int):
+def cancel(
+    job_id: int,
+    reason: str | None = typer.Option(
+        None, "--reason", help="why; recorded on the job_cancelled event (job events)"
+    ),
+):
     """Cancel a job. A queued job goes straight to cancelled; a running one is
     signalled, and its worker SIGTERMs the workload (SIGKILL after a grace)."""
     with _client() as c:
-        job = c.cancel(job_id)
+        job = c.cancel(job_id, reason=reason)
         typer.echo(json.dumps(job, default=str))
 
 

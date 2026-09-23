@@ -13,6 +13,7 @@ import socket
 import ssl
 import time as _time
 from collections.abc import Callable, Iterator
+from urllib.parse import quote
 
 import httpx
 
@@ -75,6 +76,11 @@ _UNREACHABLE_HINTS: dict[str, str] = {
         "the connection was established and then went quiet, so the broker is running "
         "but did not answer in time — wedged, overloaded, or blocked on a slow query"
     ),
+    "protocol": (
+        "the connection was established but the broker closed it or answered with "
+        "malformed HTTP mid-request — typically the broker crashing or restarting while "
+        "serving this call, or a proxy in the path. Check the broker's log before retrying"
+    ),
     "tls": (
         "the TLS handshake failed — check the scheme in JOBD_URL and the certificate "
         "the broker is serving"
@@ -110,6 +116,8 @@ def classify_connect_failure(exc: BaseException) -> str:
         return "timeout"
     if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
         return "read_timeout"
+    if isinstance(exc, httpx.ProtocolError):
+        return "protocol"
 
     for e in _cause_chain(exc):
         if isinstance(e, socket.gaierror):
@@ -161,12 +169,13 @@ class JobdClient:
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         try:
             r = self._client.request(method, f"{self.base_url}{path}", **kwargs)
-        except (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.ReadTimeout,
-            httpx.NetworkError,
-        ) as e:
+        # TransportError is the base of EVERY httpx failure to complete an
+        # exchange (timeouts incl. Write/Pool, network, protocol, proxy). The old
+        # hand-picked tuple let RemoteProtocolError, WriteTimeout and PoolTimeout
+        # escape as raw httpx exceptions, which the MCP layer then reported as a
+        # bare "Internal server error" (audit 2026-09-22 M5). Catch the class;
+        # classify_connect_failure names the member.
+        except httpx.TransportError as e:
             kind = classify_connect_failure(e)
             raise BrokerUnreachable(
                 f"{type(e).__name__}: {e} (JOBD_URL={self.base_url})",
@@ -278,7 +287,9 @@ class JobdClient:
         return self._request("GET", "/workers").json()
 
     def delete_worker(self, host: str) -> dict:
-        return self._request("DELETE", f"/workers/{host}").json()
+        # Path segments are caller data: unencoded, `gt76#x` became the URL
+        # fragment and DELETEd worker `gt76` (audit 2026-09-22 L10).
+        return self._request("DELETE", f"/workers/{quote(host, safe='')}").json()
 
     # NOTE: no `job_get`. It was a second name for `status()` — same GET
     # /jobs/{id}, same response — and having two spellings of one call is what

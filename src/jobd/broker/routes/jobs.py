@@ -46,6 +46,7 @@ from jobd.matcher import eligible_workers
 from jobd.models import (
     TERMINAL_STATES,
     AdmissionRefusal,
+    CancelRequest,
     CompletePayload,
     JobAdopt,
     JobInfo,
@@ -92,7 +93,10 @@ def build_router(deps: BrokerDeps) -> APIRouter:
     @router.get("/jobs", response_model=list[JobInfo])
     def list_jobs(
         response: Response,
-        state_filter: str | None = None,
+        # Typed, not a free string: an unknown state name (a typo, a stale
+        # name) used to match nothing and return an honest-looking empty page
+        # to every client (audit 2026-09-22 M6). Now it is a 422.
+        state_filter: JobState | None = None,
         project: str | None = None,
         warnings_only: bool = False,
         array_id: int | None = None,
@@ -112,7 +116,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         with SessionLocal() as session:
             conds = []
             if state_filter:
-                conds.append(Job.state == state_filter)
+                conds.append(Job.state == state_filter.value)
             if project:
                 # Either name: the identity that priced the job, or the label
                 # the submitter typed. A human filtering by the label they used
@@ -404,7 +408,8 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             return _to_info(job)
 
     @router.post("/jobs/{job_id}/cancel", response_model=JobInfo)
-    def cancel_job(job_id: int):
+    def cancel_job(job_id: int, req: CancelRequest | None = None):
+        reason = req.reason if req is not None else None
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if job is None:
@@ -450,6 +455,8 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             session.commit()
             session.refresh(job)
             if cancel_event_kw is not None:
+                if reason:
+                    cancel_event_kw["reason"] = reason
                 _emit_event(
                     logs_dir,
                     "job_cancelled",
