@@ -288,6 +288,9 @@ class JobInfo(BaseModel):
     retry_delay_s: int = 0
     not_before: datetime | None = None
     termination_reason: str | None = None
+    # A cancel/preempt the worker has not honoured yet ('cancel' | 'preempt');
+    # None once it completes the job or when nothing is pending.
+    signal: str | None = None
     # Set only on an adopted job (docs/adoption.md): the foreign pid the worker
     # watches and its /proc start time. The worker reads both from here.
     adopt_pid: int | None = None

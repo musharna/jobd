@@ -82,8 +82,8 @@ def xlate_job_info(broker: dict) -> dict:
     """Translate a broker JobInfo dict to the MCP-facing shape.
 
     Preserves passthrough fields. Adds `duration_s` (None unless both
-    started_at and finished_at are present) and `signal: None` (broker's
-    JobInfo has no signal field; jobd_cancel synthesizes it separately).
+    started_at and finished_at are present). `signal` is the broker's own
+    field, passed through.
     """
     out = dict(broker)
     for src, dst in _JOB_RENAMES:
@@ -95,7 +95,6 @@ def xlate_job_info(broker: dict) -> dict:
         out["duration_s"] = (finished - started).total_seconds()
     else:
         out["duration_s"] = None
-    out.setdefault("signal", None)
     return out
 
 

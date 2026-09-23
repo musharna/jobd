@@ -35,7 +35,6 @@ def test_xlate_job_info_renames_id_worker_submitted_at():
     assert "id" not in out
     assert "worker" not in out
     assert "submitted_at" not in out
-    assert out["signal"] is None  # broker has no signal field
 
 
 def test_xlate_job_info_computes_duration_when_both_timestamps_present():
