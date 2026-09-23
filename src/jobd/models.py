@@ -206,6 +206,19 @@ class JobSubmit(BaseModel):
         return self
 
 
+class CancelRequest(BaseModel):
+    """Optional body of POST /jobs/{id}/cancel.
+
+    `reason` is recorded on the job_cancelled event. The body used to be
+    ignored by the broker while both the client and the MCP tool accepted a
+    reason — a parameter that was silently discarded (audit 2026-09-22 L7).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class JobAdopt(BaseModel):
     """Body of POST /adopt: register a process that is ALREADY running on `host`
     as a job (docs/adoption.md). Deliberately not a JobSubmit: nothing is
