@@ -141,8 +141,13 @@ def xlate_submit_payload(mcp: dict) -> dict:
         "host_pin": mcp.get("host", "any"),
     }
     requires: dict[str, Any] = {}
-    if mcp.get("gpu") is not None:
-        requires["gpu"] = bool(mcp["gpu"])
+    # MCP `gpu` is a PIN flag, like the CLI's `--gpu`: true pins to a GPU
+    # worker, false/absent express no preference. The broker's requires.gpu is
+    # tri-state (None = any, True = must, False = must NOT), and forwarding an
+    # explicit false as False made every job that echoed the schema's own
+    # default unroutable on an all-GPU fleet (audit 2026-09-22 H1).
+    if mcp.get("gpu") is True:
+        requires["gpu"] = True
     if mcp.get("needs"):
         requires["needs"] = list(mcp["needs"])
     if mcp.get("idempotent"):
