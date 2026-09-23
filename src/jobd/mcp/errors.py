@@ -15,12 +15,18 @@ from jobd.client import BrokerRefusal
 # validation + matcher.cwd_routability) — audit 2026-07-05 A7 found the old
 # "unknown parent job" / "no eligible worker" rules matched nothing the broker
 # ever emits, while the actual mount-root hard-fails fell through to "unknown".
-_RULES: list[tuple[int, re.Pattern, str, str]] = [
+# A hint is either one string, or a {resource: hint} dict for statuses whose
+# meaning depends on what the tool acts on — a 404 from jobd_worker_delete is a
+# missing WORKER, and telling an agent to look for it with jobd_list (a job
+# listing) was wrong (audit 2026-09-22 L12). Every dict must cover RESOURCES.
+RESOURCES = ("job", "worker")
+
+_RULES: list[tuple[int, re.Pattern, str, str | dict[str, str]]] = [
     (
         400,
         re.compile(r"cwd .* is under /mnt/c/", re.I),
         "cwd_outside_mount_roots",
-        "Pass --host laptop in extra (or move cwd off /mnt/c/).",
+        "Pass host='laptop' (a top-level jobd_submit argument), or move cwd off /mnt/c/.",
     ),
     (
         400,
@@ -28,8 +34,9 @@ _RULES: list[tuple[int, re.Pattern, str, str]] = [
         # host_pin='…'" / "cwd '…' is under no known worker's mount_roots".
         re.compile(r"cwd .* is under no (mount_root|known worker)", re.I),
         "cwd_outside_mount_roots",
-        "No worker advertises a mount root covering this cwd. Pass --host "
-        "<a-host-that-has-it> in extra, or stage the data under a shared path.",
+        "No worker advertises a mount root covering this cwd. Pass host=<a host "
+        "that has it> (top-level jobd_submit argument), or stage the data under a "
+        "shared path.",
     ),
     (
         400,
@@ -67,13 +74,20 @@ _RULES: list[tuple[int, re.Pattern, str, str]] = [
         404,
         re.compile(r".*"),
         "not_found",
-        "Job id does not exist. List recent jobs with jobd_list.",
+        {
+            "job": "Job id does not exist. List recent jobs with jobd_list.",
+            "worker": "No worker is registered under that host. List them with jobd_workers.",
+        },
     ),
     (
         409,
         re.compile(r".*"),
         "conflict",
-        "State conflict — the job may already be terminal.",
+        {
+            "job": "State conflict — the job may already be terminal.",
+            "worker": "The worker is still online. Stop its process (or wait for the "
+            "heartbeat sweeper to mark it offline), then retry; jobd_workers shows its state.",
+        },
     ),
     # --- Transport/auth/validation statuses. -------------------------------------
     # These are status-level, not detail-level: the broker's message is not worth
@@ -120,8 +134,13 @@ _DELIBERATELY_UNMAPPED: dict[int, str] = {
 }
 
 
-def map_broker_refusal(e: BrokerRefusal) -> dict:
-    """Return {kind, message, hint} for a BrokerRefusal."""
+def map_broker_refusal(e: BrokerRefusal, *, resource: str = "job") -> dict:
+    """Return {kind, message, hint} for a BrokerRefusal.
+
+    `resource` names what the calling tool's ids refer to (server._TOOLS).
+    """
+    if resource not in RESOURCES:
+        raise ValueError(f"unknown resource {resource!r}; expected one of {RESOURCES}")
     detail = e.detail or ""
     # A REAL FastAPI 422 carries `detail` as a list of error dicts, not a
     # string — regex.search() then raises TypeError, so a malformed tool body
@@ -132,7 +151,8 @@ def map_broker_refusal(e: BrokerRefusal) -> dict:
         detail = json.dumps(detail)
     for status, regex, kind, hint in _RULES:
         if e.status_code == status and regex.search(detail):
-            return {"kind": kind, "message": detail, "hint": hint}
+            text = hint[resource] if isinstance(hint, dict) else hint
+            return {"kind": kind, "message": detail, "hint": text}
     return {
         "kind": "unknown",
         "message": detail,

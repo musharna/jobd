@@ -117,7 +117,7 @@ def test_no_stale_entries_in_the_parity_map(broker_routes):
 
 def test_every_mapped_tool_actually_exists():
     """_ON_MCP must name real tools — otherwise the coverage it claims is imaginary."""
-    registered = {name for name, _, _, _ in _TOOLS}
+    registered = {name for name, *_ in _TOOLS}
     claimed = set(_ON_MCP.values())
     missing = claimed - registered
     assert not missing, (
@@ -128,7 +128,7 @@ def test_every_mapped_tool_actually_exists():
 
 def test_every_registered_tool_covers_a_route():
     """And the converse: a tool that maps to nothing is a tool nobody can justify."""
-    registered = {name for name, _, _, _ in _TOOLS}
+    registered = {name for name, *_ in _TOOLS}
     orphans = registered - set(_ON_MCP.values())
     assert not orphans, (
         f"these MCP tools are registered but cover no broker route in _ON_MCP: "
