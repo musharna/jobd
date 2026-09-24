@@ -37,6 +37,16 @@ class WorkerSnapshot:
     mount_roots: list[str] = field(default_factory=list)
 
 
+def _effective_vram_gb(w: WorkerSnapshot) -> float:
+    """VRAM a new job can use on `w`. free_vram_gb is NVML's device-wide free,
+    so a foreign process's VRAM is already out of it; unregistered_vram_gb is
+    those same bytes, reported for diagnosis only. Subtracting it again (#144)
+    closed a card to all GPU work whenever a resident model held more than
+    about half of it. A card the foreign process has filled still drops out:
+    its free VRAM is ~0, below GPU_IMPLICIT_FLOOR_GB."""
+    return w.free_vram_gb - SAFETY_MARGIN_VRAM_GB
+
+
 class QueuedJob(Protocol):
     # Read-only members (declared as properties) so the protocol stays
     # covariance-friendly: a concrete row type whose fields are SQLAlchemy
@@ -121,7 +131,7 @@ def fits_on_worker(job: QueuedJob, w: WorkerSnapshot) -> bool:
         return False
     effective_request = effective_vram_request_gb(job)
     if effective_request > 0:
-        effective_vram = w.free_vram_gb - w.unregistered_vram_gb - SAFETY_MARGIN_VRAM_GB
+        effective_vram = _effective_vram_gb(w)
         if effective_request > effective_vram:
             return False
     if job.ram_gb > w.free_ram_gb - SAFETY_MARGIN_RAM_GB:
@@ -177,7 +187,7 @@ def _first_failing_predicate(j: QueuedJob, w: WorkerSnapshot) -> str | None:
         return "host_pin"
     effective_request = effective_vram_request_gb(j)
     if effective_request > 0:
-        effective_vram = w.free_vram_gb - w.unregistered_vram_gb - SAFETY_MARGIN_VRAM_GB
+        effective_vram = _effective_vram_gb(w)
         if effective_request > effective_vram:
             return "vram"
     if j.ram_gb > w.free_ram_gb - SAFETY_MARGIN_RAM_GB:
@@ -361,7 +371,7 @@ def gpu_contention_warning(
         return None
     saturated: list[tuple[str, float]] = []
     for w in elig:
-        effective_vram = w.free_vram_gb - w.unregistered_vram_gb - SAFETY_MARGIN_VRAM_GB
+        effective_vram = _effective_vram_gb(w)
         if effective_vram < GPU_IMPLICIT_FLOOR_GB:
             saturated.append((w.host, w.unregistered_vram_gb))
     if len(saturated) < len(elig):
