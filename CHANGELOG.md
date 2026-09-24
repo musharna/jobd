@@ -4,6 +4,12 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.49] — 2026-09-24
+
+### Fixed
+
+- **A GPU with a resident non-jobd model is no longer closed to all GPU work (#144).** The matcher subtracted foreign-process VRAM from `free_vram_gb`, which is NVML's device-wide free and already excludes it, so the same bytes were counted twice: a card with an ollama model holding 22.9 of 32 GB refused a 4 GB job with 8.5 GB genuinely free. Placement, `explain_skip` and the submit-time contention warning now use free VRAM minus the 1 GB safety margin, matching the worker's own admission gate. A card a foreign process has filled still drops out (its free VRAM is below the 2 GB implicit floor), and `unregistered_vram_gb` stays in the worker ad and the warning text for diagnosis.
+
 ## [0.5.48] — 2026-09-23
 
 ### Fixed
