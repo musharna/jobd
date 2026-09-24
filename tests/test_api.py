@@ -2553,16 +2553,16 @@ def test_submit_gpu_contention_warning_fires_when_all_gpu_workers_saturated(clie
         client,
         "desktop",
         gpu=True,
-        free_vram_gb=16.0,
-        unregistered_vram_gb=16.0,
+        free_vram_gb=0.5,
+        unregistered_vram_gb=31.5,
         tags=["cuda"],
     )
     _heartbeat_caps(
         client,
         "laptop",
         gpu=True,
-        free_vram_gb=12.0,
-        unregistered_vram_gb=11.0,
+        free_vram_gb=1.0,
+        unregistered_vram_gb=23.0,
         tags=["cuda"],
     )
     j = client.post(
@@ -2587,8 +2587,8 @@ def test_submit_gpu_contention_silent_when_one_worker_has_headroom(client):
         client,
         "desktop",
         gpu=True,
-        free_vram_gb=16.0,
-        unregistered_vram_gb=16.0,
+        free_vram_gb=0.5,
+        unregistered_vram_gb=31.5,
         tags=["cuda"],
     )
     _heartbeat_caps(
@@ -2611,14 +2611,43 @@ def test_submit_gpu_contention_silent_when_one_worker_has_headroom(client):
     assert j["warning"] is None
 
 
+def test_resident_foreign_model_does_not_close_the_card(client):
+    """#144 end to end: a worker whose card has 8.5 GB free next to a 22.9 GB
+    resident model (NVML free already excludes it) takes a 4 GB GPU job, with
+    no contention warning. Control: an 8 GB job, queued first at a higher
+    priority, still doesn't fit (8 > 8.5 - 1) and stays queued."""
+    ad = {"free_vram_gb": 8.5, "unregistered_vram_gb": 22.9, "free_ram_gb": 8, "idle_cpus": 4}
+    _heartbeat_caps(client, "ollama-box", gpu=True, tags=["cuda"], **ad)
+
+    def submit(vram, prio):
+        return client.post(
+            "/submit",
+            json={
+                "cmd": ["nvidia-smi"],
+                "cwd": "/tmp",
+                "project": "project-a",
+                "requires": {"gpu": True},
+                "vram_gb": vram,
+                "priority": prio,
+            },
+        ).json()
+
+    big = submit(8, 90)
+    small = submit(4, 50)
+    assert small["warning"] is None
+    got = client.post("/next-job", json={"host": "ollama-box", **ad})
+    assert got.status_code == 200 and got.json()["id"] == small["id"]
+    assert client.get(f"/jobs/{big['id']}").json()["state"] == "queued"
+
+
 def test_submit_gpu_contention_silent_when_no_gpu_required(client):
     """A CPU-only job is unaffected by GPU foreign-process contention."""
     _heartbeat_caps(
         client,
         "desktop",
         gpu=True,
-        free_vram_gb=16.0,
-        unregistered_vram_gb=16.0,
+        free_vram_gb=0.5,
+        unregistered_vram_gb=31.5,
         tags=["cuda"],
     )
     j = client.post(

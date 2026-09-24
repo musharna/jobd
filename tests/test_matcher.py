@@ -7,6 +7,7 @@ from jobd.matcher import (
     GPU_IMPLICIT_FLOOR_GB,
     WorkerSnapshot,
     effective_vram_request_gb,
+    explain_skip,
     fits_on_worker,
     gpu_contention_warning,
     pick_next_job,
@@ -107,11 +108,25 @@ def test_fits_on_worker_vram_too_small():
     assert fits_on_worker(j, w) is False
 
 
-def test_fits_on_worker_unregistered_subtracted():
-    w = worker(free_vram=20.0, unreg_vram=15.0)
-    j = FakeJob(1, 80, datetime.now(UTC), "desktop", vram_gb=10, ram_gb=16, cpus=6)
-    # effective = 20 - 15 - safety(1) = 4, need 10 → fails
-    assert fits_on_worker(j, w) is False
+def test_foreign_vram_is_not_subtracted_twice():
+    """#144: free_vram_gb is NVML's device-wide free, which already excludes a
+    foreign process's VRAM; unregistered_vram_gb is those same bytes. The
+    matcher subtracted them again, so a card with a large resident model
+    (ollama, 22.9 GB of 32) refused every GPU job with 8.5 GB genuinely free."""
+    w = worker(free_vram=8.5, unreg_vram=22.9)
+    j = FakeJob(1, 80, datetime.now(UTC), "desktop", vram_gb=4, ram_gb=4, cpus=2)
+    assert fits_on_worker(j, w) is True
+    assert explain_skip([j], w) == []
+    assert fits_on_worker(_fake(requires=JobRequires(gpu=True)), w) is True
+    assert gpu_contention_warning(JobRequires(gpu=True), "any", [w]) is None
+    # Control: what doesn't fit in the free VRAM still doesn't (8 > 8.5 - 1),
+    # and a card the foreign process has filled is still refused and warned on.
+    too_big = FakeJob(2, 80, datetime.now(UTC), "desktop", vram_gb=8, ram_gb=4, cpus=2)
+    assert fits_on_worker(too_big, w) is False
+    assert [r for _, r in explain_skip([too_big], w)] == ["vram"]
+    full = worker(free_vram=0.5, unreg_vram=31.0)
+    assert fits_on_worker(_fake(requires=JobRequires(gpu=True)), full) is False
+    assert gpu_contention_warning(JobRequires(gpu=True), "any", [full]) is not None
 
 
 def test_fits_on_worker_host_pin_mismatch():
@@ -274,10 +289,10 @@ def test_selector_os_any_matches_all():
 
 
 def test_implicit_gpu_floor_blocks_fully_loaded_worker():
-    # 32 GB GPU, 16 GB held by foreign process → effective = 16-16-1 = -1 GB.
-    # Previously: job.vram_gb=0 short-circuited the VRAM check → routed.
-    # Now: implicit 2 GB floor for `gpu=True` jobs → does not route.
-    w = worker2(free_vram=16.0, unreg_vram=16.0)
+    # 32 GB GPU, 31.5 GB held by a foreign process → NVML free 0.5 GB,
+    # effective = 0.5-1 < 0. Previously: job.vram_gb=0 short-circuited the
+    # VRAM check → routed. Now: implicit 2 GB floor for `gpu=True` jobs.
+    w = worker2(free_vram=0.5, unreg_vram=31.5)
     j = _fake(requires=JobRequires(gpu=True))
     assert fits_on_worker(j, w) is False
 
@@ -292,16 +307,16 @@ def test_implicit_gpu_floor_allows_idle_worker():
 def test_implicit_floor_does_not_apply_when_gpu_not_required():
     # No `gpu=True` selector → no implicit GPU floor, no VRAM check at all
     # (job.vram_gb=0). A CPU-only job doesn't care about foreign GPU load.
-    w = worker2(free_vram=16.0, unreg_vram=16.0)
+    w = worker2(free_vram=0.5, unreg_vram=31.5)
     j = _fake(requires=JobRequires(gpu=None))
     assert fits_on_worker(j, w) is True
 
 
 def test_explicit_vram_overrides_implicit_floor():
     # If the user asks for 8 GB explicitly, that's the gate — not the 2 GB
-    # implicit floor. 16 GB free, 12 GB foreign → effective = 16-12-1 = 3 GB.
-    # 8 > 3 → reject (explicit ask wins over implicit floor).
-    w = worker2(free_vram=16.0, unreg_vram=12.0)
+    # implicit floor. 4 GB free (a foreign process holds 28) → effective =
+    # 4-1 = 3 GB. 8 > 3 → reject (explicit ask wins over implicit floor).
+    w = worker2(free_vram=4.0, unreg_vram=28.0)
     j = _fake(requires=JobRequires(gpu=True), vram=8.0)
     assert fits_on_worker(j, w) is False
 
@@ -315,8 +330,8 @@ def test_explicit_vram_overrides_implicit_floor():
 
 
 def _saturated(host: str) -> WorkerSnapshot:
-    # 16 GB total, 16 GB foreign — effective VRAM well below the 2 GB floor.
-    return worker2(host=host, free_vram=16.0, unreg_vram=16.0)
+    # 16 GB card, 15.5 GB foreign → NVML free 0.5, well below the 2 GB floor.
+    return worker2(host=host, free_vram=0.5, unreg_vram=15.5)
 
 
 def _idle(host: str) -> WorkerSnapshot:
