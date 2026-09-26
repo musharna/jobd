@@ -12,10 +12,10 @@ def test_filtering_by_the_label_finds_the_job(rooted_client):
         json={
             "cmd": ["true"],
             "cwd": "/home/user/beta/sweeps",
-            "project": "pillar2a1_sweep",
+            "project": "stage2_sweep",
         },
     )
-    rows = rooted_client.get("/jobs", params={"project": "pillar2a1_sweep"}).json()
+    rows = rooted_client.get("/jobs", params={"project": "stage2_sweep"}).json()
     assert len(rows) == 1
     assert rows[0]["project"] == "beta"
 
@@ -26,7 +26,7 @@ def test_filtering_by_the_identity_finds_the_same_job(rooted_client):
         json={
             "cmd": ["true"],
             "cwd": "/home/user/beta/sweeps",
-            "project": "pillar2a1_sweep",
+            "project": "stage2_sweep",
         },
     )
     rows = rooted_client.get("/jobs", params={"project": "beta"}).json()
@@ -41,7 +41,7 @@ def test_an_unrelated_project_filter_still_matches_nothing(rooted_client):
         json={
             "cmd": ["true"],
             "cwd": "/home/user/beta/sweeps",
-            "project": "pillar2a1_sweep",
+            "project": "stage2_sweep",
         },
     )
     assert rooted_client.get("/jobs", params={"project": "gamma"}).json() == []
@@ -62,7 +62,7 @@ def test_filtering_by_a_different_spelling_of_the_identity_finds_the_job(rooted_
         json={
             "cmd": ["true"],
             "cwd": "/home/user/beta/sweeps",
-            "project": "pillar2a1_sweep",
+            "project": "stage2_sweep",
         },
     )
     # A third spelling nobody typed: only folding can find these.

@@ -1194,7 +1194,7 @@ def _echo_project_write(typed: str, body: dict) -> None:
     """Echo the project the server ACTUALLY wrote, not the one that was typed.
 
     The server folds a spelling onto the registered project, so `job projects
-    set arf_promoter 65` re-prices `arf-promoter` and the typed name is absent
+    set leaf_assay 65` re-prices `leaf-assay` and the typed name is absent
     from the returned table. This used to index that table by the typed name and
     die with KeyError after the write had already landed -- the write succeeded
     and the CLI reported a crash. Reading the resolved name the server reports

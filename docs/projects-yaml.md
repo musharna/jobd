@@ -625,8 +625,8 @@ reload` is sufficient.
 
 `--project` is free text, chosen once at submit time and typed by a human
 every time after. A directory does not change; the spelling a person types
-for it does — `pillar2a1_sweep`, `arf-promoter`, `gamma-stage4b` are
-all real, one-off run labels for jobs that in every other sense belong to
+for it does — `stage2_sweep`, `leaf-assay`, `gamma-rerun` are
+typical one-off run labels for jobs that in every other sense belong to
 one long-running project. Each of those typos-that-aren't-typos used to fall
 through to `_default`, at `_default`'s priority, with no warning anyone
 reads twice. `roots:` gives a project a second way to be recognized: not by
@@ -757,7 +757,7 @@ debugging:
 - `project` and `project_label` are both persisted on the Job row and
   returned in `JobInfo` (`project_label` is `null` when the two agree, so
   the field reads as "something was substituted here"). `job list --project`
-  matches **either**, so `job list --project pillar2a1_sweep` still finds
+  matches **either**, so `job list --project stage2_sweep` still finds
   the job that was priced as `beta` — though the rendered table column
   shows `project`, the scheduling identity.
 - `matched_root` — the root that supplied the identity — is **not** on the

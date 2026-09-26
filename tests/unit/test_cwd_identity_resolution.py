@@ -42,12 +42,12 @@ def test_rule1_still_wins_when_the_name_needed_folding():
 
 def test_rule2_an_unregistered_label_takes_its_identity_from_cwd():
     eff = resolve_effective_config(
-        _req("pillar2a1_sweep", "/home/user/beta/sweeps"), _projects(), None
+        _req("stage2_sweep", "/home/user/beta/sweeps"), _projects(), None
     )
     assert eff.project == "beta"
     assert eff.priority.value == 78
     assert eff.matched_root == "/home/user/beta"
-    assert eff.project_label == "pillar2a1_sweep"
+    assert eff.project_label == "stage2_sweep"
     assert eff.unknown_project_warning is None
 
 
@@ -55,7 +55,7 @@ def test_rule2_supplies_project_defaults_too_not_just_priority():
     """Identity means the whole entry, not only the number."""
     projects = _projects()
     projects["beta"].defaults.max_wall_s = 3600
-    eff = resolve_effective_config(_req("pillar2a1_sweep", "/home/user/beta"), projects, None)
+    eff = resolve_effective_config(_req("stage2_sweep", "/home/user/beta"), projects, None)
     assert eff.max_wall_s.value == 3600
     assert eff.max_wall_s.source == "project_default"
 
@@ -74,7 +74,7 @@ def test_the_typed_label_is_preserved_in_every_branch():
     projects = _projects()
     for name, cwd in [
         ("gamma", "/home/user/beta"),
-        ("pillar2a1_sweep", "/home/user/beta"),
+        ("stage2_sweep", "/home/user/beta"),
         ("whatever", "/tmp"),
     ]:
         eff = resolve_effective_config(_req(name, cwd), projects, None)

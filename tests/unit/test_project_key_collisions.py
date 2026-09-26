@@ -29,9 +29,9 @@ def test_an_ambiguous_fold_degrades_to_exact_matching_and_says_so(caplog):
 def test_loading_a_table_with_colliding_names_warns(tmp_path, caplog):
     projects = tmp_path / "projects.yaml"
     projects.write_text(
-        "projects:\n  arf-promoter: { priority: 60 }\n  arf_promoter: { priority: 50 }\n"
+        "projects:\n  leaf-assay: { priority: 60 }\n  leaf_assay: { priority: 50 }\n"
     )
     with caplog.at_level(logging.WARNING, logger="jobd.config"):
         load_effective_projects(projects, tmp_path / "overrides.yaml")
     assert "differ only by case or -/_" in caplog.text
-    assert "arf-promoter" in caplog.text and "arf_promoter" in caplog.text
+    assert "leaf-assay" in caplog.text and "leaf_assay" in caplog.text

@@ -123,7 +123,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 # must still find their run after cwd supplied a different
                 # identity for it. The identity is matched FOLDED, the same way
                 # submit folded it: rows are stored under the registered
-                # spelling, so a filter on `JEPAGAME` that compared raw strings
+                # spelling, so a filter on `MYPROJECT` that compared raw strings
                 # split one project into two views (audit 2026-09-02 C-1).
                 canon = canonical_project_name(state["projects"], project)
                 conds.append(or_(Job.project.in_({canon, project}), Job.project_label == project))

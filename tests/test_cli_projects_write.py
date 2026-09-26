@@ -5,7 +5,7 @@ registered project, and tests/test_api.py asserts that fold at the endpoint --
 including, literally, `assert "PROJECT-B" not in body`. That assertion states
 the crash precondition and stops one layer short of the only consumer: the CLI
 went on indexing the returned table by the name the *user typed*, so
-`job projects set arf_promoter 65` wrote `arf-promoter` and then died with
+`job projects set leaf_assay 65` wrote `leaf-assay` and then died with
 KeyError on the echo. The write had already landed; the operator saw a
 traceback and had no idea whether it had.
 

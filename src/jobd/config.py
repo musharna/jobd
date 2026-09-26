@@ -424,7 +424,7 @@ def project_key(name: str) -> str:
     """Fold a project name to the key used for spelling-insensitive matching.
 
     Case and `-`/`_` only. Deliberately NOT fuzzy: `kappa` is not folded
-    onto `kappa-fm`, nor `arf-promoter` onto `arf_promoter_analysis`.
+    onto `kappa-fm`, nor `leaf-assay` onto `leaf_assay_analysis`.
     Those differ by a SUFFIX, and treating them as the same project would be a
     guess that silently routes work at another project's priority — the exact
     failure this matching is meant to end, inverted. If two such names really
