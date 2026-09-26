@@ -4,6 +4,18 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.50] — 2026-09-26
+
+### Fixed
+
+- **README claims now match the code.** The default bind is `127.0.0.1` and the runtime control is the tailnet source-IP check (the `JOBD_HOST` rule is a CI lint on the Docker deployment, not enforced by the broker); the optional self-update scripts do reach PyPI, the GitHub API and GHCR; preemption gives a grace window and a `JOBD_CHECKPOINT_DIR`, and resuming means resubmitting; VRAM routing tracks GPU index 0 only, and the multislot `free_vram` formula and the `# CONCURRENT_OK` opt-out are spelled out; `job submit --stdin` and MCP `jobd_submit` run their command through `bash -c`; the CI-tested marks say CI has no GPU runner and skips systemd-scope tests; `JOBD_CONFIG_DIR` defaults to the Docker path and `config/` is not in the wheel. The comparison table separates Modal (cloud-only) from SkyPilot/dstack and no longer claims Ray cannot run arbitrary commands.
+- **`server.json` declares `JOBD_API_TOKEN`** as an optional secret input for the MCP server.
+- **Example hooks:** `jobd-block-gpu.sh` suggests the real `--vram-required` flag (it named a nonexistent `--vram-gb`); `jobd-nudge.sh` drops its site-specific wrapper/host rules for two opt-in variables, `JOBD_NUDGE_WRAPPERS` and `JOBD_NUDGE_SSH_HOST_PAT`.
+
+### Removed
+
+- **`docs/plans/` is gone.** The six internal design, plan and deploy notes are removed from the tree (they remain in git history); the SIGTERM-drain phases the code comments refer to are now described in `docs/runbook.md`, "Drain / restart a worker".
+
 ## [0.5.49] — 2026-09-24
 
 ### Fixed
