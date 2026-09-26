@@ -350,6 +350,31 @@ def cwd_routability(
     )
 
 
+def mnt_c_pin_error(cwd: str, host_pin: str, all_known_workers: list[WorkerSnapshot]) -> str | None:
+    """Refusal text when a Windows-mount cwd is not pinned to a single host.
+
+    Every WSL host has its own /mnt/c, so the path exists on several workers
+    but means a different directory on each — mount_roots can't tell them
+    apart (they all advertise /mnt/c). The submitter must name the machine
+    whose C: drive holds it. "any" and any pin that matches more than one
+    known worker (a pool alias such as "any-gpu") don't; a pin that matches no
+    known worker is left to the routing checks, like cwd_routability does.
+    Root cause of the 2026-04-22 storm: an unpinned /mnt/c job landed on a
+    host without that directory and every process exited 127.
+    """
+    if not cwd.startswith("/mnt/c/"):
+        return None
+    matching = [w for w in all_known_workers if host_pin in (w.host, *w.host_aliases)]
+    if host_pin != "any" and len(matching) <= 1:
+        return None
+    return (
+        f"cwd {cwd!r} is under /mnt/c/ (a Windows mount: each WSL host has its own) "
+        f"but host_pin={host_pin!r} can route to more than one host. Pass --host "
+        f"<the machine whose C: drive holds it>, or stage the data under a "
+        f"cross-host path like /tmp or a project-scoped dir."
+    )
+
+
 def gpu_contention_warning(
     requires: JobRequires | None,
     host_pin: str,

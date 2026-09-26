@@ -550,6 +550,29 @@ def test_cwd_routability_empty_mount_roots_is_unknown_no_reject():
     assert cwd_routability("/anything/at/all", "legacy", workers) is None
 
 
+def test_mnt_c_pin_error_requires_a_single_host():
+    # Every WSL host has its own /mnt/c, so the pin must name ONE machine.
+    from jobd.matcher import mnt_c_pin_error
+
+    workers = [
+        _wmr("laptop", ["/home", "/mnt/c"], ["any", "any-gpu"]),
+        _wmr("desktop", ["/home", "/mnt/c"], ["any", "any-gpu", "desktop-wsl"]),
+    ]
+    cwd = "/mnt/c/Users/u/proj"
+    # refused: no pin, and a pool alias both hosts carry
+    for pin in ("any", "any-gpu"):
+        msg = mnt_c_pin_error(cwd, pin, workers)
+        assert msg is not None and "/mnt/c/" in msg and repr(pin) in msg
+    # allowed: any single host, by name or by a host-specific alias — no host
+    # name is special (the old rule allowed only "laptop"/"MSI"/"any-laptop")
+    for pin in ("laptop", "desktop", "desktop-wsl"):
+        assert mnt_c_pin_error(cwd, pin, workers) is None
+    # unknown pin: left to routing, like cwd_routability's unknown-host defer
+    assert mnt_c_pin_error(cwd, "not-registered", workers) is None
+    # only /mnt/c/ paths are in scope
+    assert mnt_c_pin_error("/home/u/proj", "any", workers) is None
+
+
 def test_cwd_routability_worktree_under_home_NOT_caught_by_A():
     # Documents the A/B split: every worker advertises /home, so the prefix
     # probe passes a worktree cwd. B (worker-side isdir) is what catches it.
