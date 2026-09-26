@@ -146,7 +146,7 @@ if [[ "$CMD" =~ \#[[:space:]]*VRAM=([0-9]+) ]]; then
 		cat >&2 <<MSG
 [jobd-block] # VRAM=${REQ_GB}GB — probe FAILED (could not reach the GPU host's nvidia-smi).
 Failing closed: cannot verify headroom, refusing to launch. Retry once the
-host is reachable, or use 'job submit --gpu --vram-gb=${REQ_GB}' which has
+host is reachable, or use 'job submit --gpu --vram-required ${REQ_GB}' which has
 its own admission gate.
 MSG
 		exit 2

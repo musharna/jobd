@@ -22,9 +22,11 @@
   <img src="https://raw.githubusercontent.com/musharna/jobd/main/docs/assets/demo.svg" alt="jobd in action: job fleet status shows four workers and their versions; a GPU job routes to the worker with enough free VRAM and streams back; a stdin batch submits two jobs at once; job logs -f follows one to completion" width="100%">
 </p>
 
+<p align="center"><sub>Demo recorded on jobd v0.5.30; output on later versions may differ.</sub></p>
+
 You have a couple of boxes with GPUs — a workstation, a server, maybe a laptop — wired together over [Tailscale](https://tailscale.com/) or a LAN. You want to fire off training runs, data pipelines, and long batch jobs from anywhere, have them land on whichever machine actually has the VRAM free, survive across sessions, and get preempted cleanly when something more important shows up. You don't have a cloud, a Kubernetes cluster, or a Slurm install, and you don't want one.
 
-jobd is that missing piece: a small broker that turns a handful of personal machines into a single queue — and an LLM agent can drive it directly.
+jobd is that missing piece: a lightweight, single-process broker that turns a handful of personal machines into a single queue — and an LLM agent can drive it directly.
 
 ```bash
 # from any machine on your tailnet:
@@ -32,15 +34,18 @@ job submit --project myproj --gpu --vram-required 16 --wait -- python train.py
 # → routed to whichever worker has ≥16 GB VRAM free, streamed back to your terminal
 ```
 
+VRAM routing tracks one GPU per host: the worker reports free memory on GPU index 0 only.
+
 ## Why it exists
 
 Most schedulers assume a datacenter. The lightweight ones that don't (a bare `nohup`, a tmux session, an ssh-and-pray script) give you nothing: no queue, no VRAM-aware routing, no preemption, no record of what ran where. jobd fills the gap between "ssh in and run it" and "stand up Slurm":
 
-- **VRAM-fit routing.** The broker matches each job against live worker capacity (free VRAM / RAM / CPUs, capability tags, arch/OS) and dispatches to a worker that actually fits — instead of you guessing which box is free.
-- **Preempt + checkpoint.** A higher-priority job can preempt a running one: the worker sends `SIGTERM`, the workload gets a grace window to checkpoint, then `SIGKILL`. A preempted job reaches a terminal `preempted` state with a durable checkpoint to resume from — it isn't silently re-run. (See [docs/preemption.md](https://github.com/musharna/jobd/blob/main/docs/preemption.md).)
+- **VRAM-fit routing.** The broker matches each job against live worker capacity (free VRAM / RAM / CPUs, capability tags, arch/OS) and dispatches to a worker that actually fits — instead of you guessing which box is free. One GPU per host is tracked (GPU index 0).
+- **Preempt + checkpoint window.** A higher-priority job can preempt a running one: the worker sends `SIGTERM`, the workload gets a grace window, then `SIGKILL`. jobd gives each job a per-job `JOBD_CHECKPOINT_DIR` to write into during that window; saving the checkpoint is the workload's job. A preempted job ends in the terminal `preempted` state and is not re-run automatically — to resume, you submit a new job pointed at the old checkpoint. (See [docs/preemption.md](https://github.com/musharna/jobd/blob/main/docs/preemption.md).)
 - **Survives sessions.** Submit, close your laptop, check back tomorrow. Jobs live in the broker, not your shell.
-- **Agent-native.** Ships a first-class [MCP](https://modelcontextprotocol.io/) server so an LLM agent (Claude Code, etc.) can submit, monitor, and babysit jobs as tool calls — the thing most schedulers bolt on as an afterthought, if at all.
-- **Yours.** One broker process you run on a machine you own. No accounts, no egress, no per-GPU-hour billing. Tailnet-bound by default.
+- **Agent-native.** Ships a first-class [MCP](https://modelcontextprotocol.io/) server so an LLM agent (Claude Code, etc.) can submit, monitor, and babysit jobs as tool calls.
+- **Yours.** One broker process you run on a machine you own. No accounts, no telemetry, no per-GPU-hour billing; the broker and worker talk only to each other and to your clients. The optional self-update scripts do go online to fetch releases: `scripts/update-worker.sh` (which `job fleet add` installs on a timer) installs from PyPI, and `scripts/deploy-broker.sh` queries the GitHub API and pulls the image from GHCR.
+- **Loopback by default, tailnet-only beyond it.** The broker binds `127.0.0.1` unless you set `JOBD_HOST`. A request from any address that is neither loopback nor in Tailscale's CGNAT range (`100.64.0.0/10`) gets a `403` (`JOBD_DISABLE_TAILNET_ACL=1` turns that check off).
 
 ## Why not just use…?
 
@@ -48,13 +53,14 @@ Most schedulers assume a datacenter. The lightweight ones that don't (a bare `no
 | ------------------------------------------------------------------------------ | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **`nohup` / `tmux` / ssh-and-pray**                                            | Runs a command on one box                                   | No queue, no VRAM-aware routing, no preemption, no record of what ran where                                    |
 | **[task-spooler](https://manpages.ubuntu.com/manpages/noble/man1/tsp.1.html)** | A real job queue — on a single machine                      | jobd queues across _all_ your machines and routes by live VRAM/CPU fit                                         |
-| **[Pueue](https://github.com/Nukesor/pueue)**                                  | The best single-machine command queue daemon                | Pueue's own README declares distributed execution out of scope — jobd is that missing layer, plus GPU awareness |
+| **[Pueue](https://github.com/Nukesor/pueue)**                                  | A mature single-machine command queue daemon                | Pueue's own README declares distributed execution out of scope — jobd is that missing layer, plus GPU awareness |
 | **[HyperQueue](https://github.com/It4innovations/hyperqueue)**                 | Multi-machine task scheduling with HPC roots, single binary | HQ counts GPUs but doesn't track VRAM, and has no preemption/checkpoint contract or agent interface             |
 | **Slurm**                                                                      | Datacenter-grade scheduling                                 | Heavy to stand up and operate for 2–3 personal boxes; jobd is one process + a poller per host                  |
-| **SkyPilot / Modal / dstack**                                                  | Provision and run on clouds + your own machines             | SkyPilot's "existing machines" mode installs a k3s cluster on your boxes; dstack wants Docker + passwordless sudo on every host. jobd is one process + a poller — no containers, no sudo, no K8s |
-| **Ray**                                                                        | A distributed-compute framework                             | jobd is a job _queue_, not a programming model — submit any command, no code changes, GPU-fit routing built in |
+| **SkyPilot / dstack**                                                          | Provision and run on clouds + your own machines             | SkyPilot's "existing machines" mode installs a Kubernetes cluster (k3s) on your boxes; dstack wants Docker + passwordless sudo on every host. jobd is one process + a poller — no containers, no sudo, no K8s |
+| **Modal**                                                                      | Serverless GPU compute on Modal's cloud                     | Cloud-only: it runs on Modal's machines, not yours                                                              |
+| **Ray**                                                                        | A distributed-compute framework; Ray Jobs also runs any shell command on a Ray cluster | You first stand up and run a Ray cluster; jobd is one broker process + a poller per host, with live VRAM-fit routing and a checkpoint window on preemption |
 
-Closest in spirit are Pueue and task-spooler (single-machine by design) and HyperQueue (multi-machine, HPC-shaped). jobd's niche is the 2–5-GPU homelab: multi-machine **live VRAM-fit** routing + **preempt/checkpoint** + a **native MCP interface** — a combination none of the above offers — with nothing heavier than a Python process per host.
+Closest in spirit are Pueue and task-spooler (single-machine by design) and HyperQueue (multi-machine, HPC-shaped). jobd's niche is the 2–5-GPU homelab: multi-machine **live VRAM-fit** routing (one GPU per host tracked) + **preempt/checkpoint window** + a **native MCP interface** — a combination we haven't found in the tools above — with nothing heavier than a Python process per host.
 
 ## Architecture
 
@@ -84,7 +90,7 @@ flowchart TD
 Workers **poll** the broker (pull model — no inbound connection to a worker); the broker matches each job against live capacity and hands it back on the poll. One broker process, one poller per host.
 
 - **Broker** — a FastAPI + SQLite service. Holds the queue, runs the matcher, resolves per-project priorities and defaults, exposes a small HTTP API and an SSE stream. Single source of truth.
-- **Workers** — lightweight polling agents, one per host. Each advertises live capacity via heartbeat, claims jobs it can run, executes them (`shell=False`, no shell-injection surface), streams logs back, and honors preemption signals.
+- **Workers** — lightweight polling agents, one per host. Each advertises live capacity via heartbeat, claims jobs it can run, executes them (`shell=False`: the argv you submit is run as-is, not through a shell — except `job submit --stdin` and the MCP `jobd_submit` tool, which take a command string and run it as `bash -c <string>`), streams logs back, and honors preemption signals.
 - **Clients** — the `job` CLI, the `jobd-mcp` MCP server, or anything that speaks the HTTP API.
 
 ## Install
@@ -95,7 +101,7 @@ pip install "jobd[mcp]"        # adds the MCP server
 pip install "jobd[worker]"     # adds the worker daemon (jobd-worker)
 ```
 
-Requires Python ≥ 3.11. Everything ships in the one `jobd` package: the broker (`jobd`), the CLI (`job`), the MCP server (`jobd-mcp`), and the worker (`jobd-worker`). The worker's runtime deps (httpx, psutil, pyyaml, nvidia-ml-py) live behind the `[worker]` extra since they're only needed on machines that actually run jobs. `scripts/install-worker.sh` sets a worker up under `~/jobd-worker` with its own venv and a generated config.
+Requires Python ≥ 3.11. Everything ships in the one `jobd` package: the broker (`jobd`), the CLI (`job`), the MCP server (`jobd-mcp`), and the worker (`jobd-worker`). The worker's extra runtime deps (psutil, nvidia-ml-py) live behind the `[worker]` extra since they're only needed on machines that actually run jobs. `scripts/install-worker.sh` sets a worker up under `~/jobd-worker` with its own venv and a generated config.
 
 ## Quickstart (single host)
 
@@ -131,9 +137,9 @@ Python 3.11+ everywhere.
 | -------------------------------------- | ------- | ----------- | -------------------- |
 | **Broker** (`jobd`)                    | ✅      | ☑️          | ☑️ (WSL recommended) |
 | **CLI** (`job`) / **MCP** (`jobd-mcp`) | ✅      | ☑️          | ☑️                   |
-| **Worker** (`jobd-worker`)             | ✅ full | ⚠️ degraded | ⚠️ degraded          |
+| **Worker** (`jobd-worker`)             | ✅ full | ⚠️ degraded | untested             |
 
-✅ = CI-tested (the test matrix runs on Linux). ☑️ = pure-Python and expected to work, but not exercised by CI — please file an issue if something is broken there.
+✅ = CI-tested on Linux (Ubuntu), with limits: CI has no GPU runner, so the NVIDIA/VRAM paths are tested only against mocks, and the tests that need a systemd `--user` scope skip on GitHub's runners. ☑️ = pure-Python and expected to work, but not exercised by CI — please file an issue if something is broken there.
 
 The **worker** runs its best on Linux with a systemd user instance: memory caps, process reaping, and preemption use `systemd-run --user` scopes and cgroups. On non-systemd hosts the worker still executes jobs, but silently drops those guarantees — fine for a single trusted box, not for hard resource isolation. GPU features need NVIDIA + `nvidia-ml-py`. The broker, CLI, and MCP server are pure-Python and portable.
 
@@ -182,7 +188,7 @@ job submit -p train --sweep lr=0.1,0.01 --sweep seed=1,2,3 \
 
 ## Coming from pueue or task-spooler?
 
-The verbs map directly — what changes is that the queue spans every machine you own:
+Most verbs map directly — what changes is that the queue spans every machine you own. The last row is only a rough equivalent: jobd has no named groups with their own parallelism limit.
 
 | You ran…                          | With jobd                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------- |
@@ -192,9 +198,9 @@ The verbs map directly — what changes is that the queue spans every machine yo
 | `pueue log <id>`                  | `job logs <id>`                                                             |
 | commands piped to `simple_gpu_scheduler` | `... \| job submit -p <project> --stdin` — one job per line, fleet-wide |
 | `pueue kill <id>`                 | `job cancel <id>`                                                           |
-| `pueue group` / parallelism limits| projects + priorities (`projects.yaml`); per-worker slots via `JOBD_WORKER_MAX_CONCURRENT_JOBS` |
+| `pueue group` / parallelism limits| approximately: projects + priorities (`projects.yaml`); per-worker slots via `JOBD_WORKER_MAX_CONCURRENT_JOBS` |
 
-What you gain on top: jobs route to whichever machine actually has the VRAM/CPU free, survive any single box rebooting, can be preempted with a checkpoint window instead of killed, and are drivable by an LLM agent over MCP. What you lose: nothing — a one-machine deployment (broker + one worker on the same host) behaves like a network-reachable pueue.
+What you gain on top: jobs route to whichever machine actually has the VRAM/CPU free, live in the broker rather than in one machine's shell, can be preempted with a checkpoint window instead of killed, and are drivable by an LLM agent over MCP. What you lose: there is no pause/resume, stash, or edit of a queued job (cancel and resubmit instead), and if a worker dies mid-job, a running job not marked idempotent ends `orphaned` rather than being re-run. A one-machine deployment (broker + one worker on the same host) otherwise behaves like a network-reachable pueue.
 
 ## MCP / agent integration
 
@@ -228,7 +234,7 @@ Now an agent can "run this overnight," check on it next session, and route GPU w
 
 ## Configuration
 
-Three optional YAML files under `JOBD_CONFIG_DIR` (defaults shipped in `config/`):
+Three optional YAML files under `JOBD_CONFIG_DIR` (default `/app/config`, the Docker image's path — set it when you run from pip). Example files live in this repo's `config/` directory; they are not included in the pip package, and `docker-compose.yml` mounts them into the container:
 
 - **`projects.yaml`** — per-project base priority and submit defaults (preemptibility, wall/idle timeouts, host pins, capability requirements). Entries may also declare `roots:` so a job typed with an unregistered run label is priced by the project whose directory it runs in. See [docs/projects-yaml.md](https://github.com/musharna/jobd/blob/main/docs/projects-yaml.md) for the full resolution model and [docs/events.md](https://github.com/musharna/jobd/blob/main/docs/events.md) for the event catalog.
 - **`profiles.yaml`** — named resource bundles (`--profile gpu-train-large`) the matcher uses to size a job.
@@ -246,7 +252,7 @@ By default each worker runs **one job at a time** (`JOBD_WORKER_MAX_CONCURRENT_J
 JOBD_WORKER_MAX_CONCURRENT_JOBS=3 jobd-worker
 ```
 
-The matcher is resource-aware, so this is **not** blind N-up oversubscription. Each in-flight job reserves its `vram_gb` / `ram_gb` / `cpus` footprint, and the worker's heartbeat advertises only what's left (`free_vram = raw − Σ in-flight`). The broker won't place a job that doesn't fit the remaining headroom. The practical payoff: **a CPU-only job and a GPU job run at the same time** — the CPU job reserves 0 VRAM, so it never blocks the GPU slot, and vice-versa. Two GPU jobs co-run only if both fit live VRAM (the `/next-job` admission gate is the final safety net against an overstated ad).
+The matcher is resource-aware, so this is **not** blind N-up oversubscription. Each in-flight job reserves its `vram_gb` / `ram_gb` / `cpus` footprint, and the worker's heartbeat advertises only what's left. For VRAM, NVML's free figure already counts memory a running job has allocated, so only the not-yet-allocated part of the reservations is subtracted: `free_vram = nvml_free − max(0, Σ in-flight vram_gb − VRAM held by this worker's jobs)`, where `nvml_free` is GPU index 0 only. RAM and CPUs subtract the full reservations. The broker won't place a job that doesn't fit the remaining headroom. The practical payoff: **a CPU-only job and a GPU job run at the same time** — the CPU job reserves 0 VRAM, so it never blocks the GPU slot, and vice-versa. Two GPU jobs co-run only if both fit live VRAM: before starting a job it was handed, the worker re-reads free VRAM and refuses the job if it no longer fits. A job whose command contains the literal marker `# CONCURRENT_OK` skips that last check — use it when you know the requested VRAM is overstated.
 
 `job workers` reports each worker's slot usage — `running` jobs out of `max_concurrent` — alongside the live resource ad:
 
@@ -270,12 +276,13 @@ The sweeper deletes jobs in a terminal state whose `finished_at` is older than t
 
 ## Security
 
-The broker has **no TCP-layer auth beyond a shared bearer token**, so it is meant to run on a trusted network (loopback or a Tailscale tailnet), never on a public interface. Two stacked controls:
+The broker has **no TCP-layer auth beyond a shared bearer token**, so it is meant to run on a trusted network (loopback or a Tailscale tailnet), never on a public interface. Three stacked controls:
 
-1. **Interface binding** — `JOBD_HOST` must be `127.0.0.1` or a Tailscale CGNAT address (`100.64.0.0/10`), never `0.0.0.0`. A CI lint (`tests/test_deploy_lint.py`) enforces this on the Docker deployment.
-2. **Bearer token** — set `JOBD_API_TOKEN` (≥32 random bytes) on every broker/worker/CLI/MCP host. The broker refuses to start without it unless you explicitly set `JOBD_ALLOW_NO_AUTH=1`. **`JOBD_ALLOW_NO_AUTH=1` is for a loopback-only broker (`JOBD_HOST=127.0.0.1`) — for local dev/tests.** Combined with a non-loopback `JOBD_HOST` it exposes an unauthenticated RCE endpoint to your whole tailnet; the broker logs a startup warning if you do this. Don't.
+1. **Interface binding** — set `JOBD_HOST` to `127.0.0.1` (the default) or a Tailscale CGNAT address (`100.64.0.0/10`), not `0.0.0.0`. The broker itself does not enforce this: it starts on any bind address, and only warns (or refuses) when a non-loopback bind is combined with no-auth. The only check on the bind value is a CI lint (`tests/test_deploy_lint.py`) on the shipped Docker deployment; control 2 is what holds at runtime.
+2. **Source-IP check (runtime)** — whatever the bind, the broker answers `403` to any request whose source address is neither loopback nor in `100.64.0.0/10` (`src/jobd/auth.py`). `JOBD_DISABLE_TAILNET_ACL=1` turns this off.
+3. **Bearer token** — set `JOBD_API_TOKEN` (≥32 random bytes) on every broker/worker/CLI/MCP host. The broker refuses to start without it unless you explicitly set `JOBD_ALLOW_NO_AUTH=1`. **`JOBD_ALLOW_NO_AUTH=1` is for a loopback-only broker (`JOBD_HOST=127.0.0.1`) — for local dev/tests.** Combined with a non-loopback `JOBD_HOST` it exposes an unauthenticated RCE endpoint to your whole tailnet; the broker logs a startup warning if you do this. Don't.
 
-**Three endpoints are exempt from both controls** — `/livez`, `/readyz` and `/metrics` answer with no bearer token *and* no source-IP check, because a generic HTTP monitor cannot send a token. `/metrics` is the one that matters: it publishes the broker version, job counts by state, and **every worker's hostname and version**. No commands, cwd, env or project names — but it does fingerprint the fleet. That is why the `JOBD_HOST` bind above is load-bearing rather than defence-in-depth: port-forward the broker and you publish that inventory. Full table: [Unauthenticated surface](https://github.com/musharna/jobd/blob/main/docs/security.md#unauthenticated-surface).
+**Three endpoints are exempt from the source-IP check and the token** — `/livez`, `/readyz` and `/metrics` answer with no bearer token *and* no source-IP check, because a generic HTTP monitor cannot send a token. `/metrics` is the one that matters: it publishes the broker version, job counts by state, and **every worker's hostname and version**. No commands, cwd, env or project names — but it does fingerprint the fleet. That is why, for these three, the `JOBD_HOST` bind above is load-bearing rather than defence-in-depth: port-forward the broker and you publish that inventory. Full table: [Unauthenticated surface](https://github.com/musharna/jobd/blob/main/docs/security.md#unauthenticated-surface).
 
 Full threat model, env-var reference, and token rotation: **[docs/security.md](https://github.com/musharna/jobd/blob/main/docs/security.md)**.
 

@@ -22,7 +22,7 @@ Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 ExecStart=%h/jobd-worker/.venv/bin/jobd-worker
 Restart=on-failure
 RestartSec=10
-# SIGTERM drain (docs/plans/sigterm-drain.md): TERM only the worker process
+# SIGTERM drain (docs/runbook.md, "Drain / restart a worker"): TERM only the worker process
 # at stop — the default control-group mode would also TERM fast-path job
 # children at t=0, racing the drain and mislabeling them `failed` instead of
 # `preempted`. The cgroup-wide KILL at TimeoutStopSec remains the backstop.

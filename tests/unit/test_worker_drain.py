@@ -1,4 +1,4 @@
-"""SIGTERM drain (docs/plans/sigterm-drain.md Phase 1).
+"""SIGTERM drain (docs/runbook.md, "Drain / restart a worker" Phase 1).
 
 The worker's shutdown path must signal in-flight workloads through run_job's
 preempt machinery, join job threads with a bounded deadline, and post a

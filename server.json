@@ -35,6 +35,12 @@
           "name": "JOBD_URL",
           "description": "Base URL of the jobd broker the MCP server talks to. Defaults to http://127.0.0.1:8765.",
           "isRequired": false
+        },
+        {
+          "name": "JOBD_API_TOKEN",
+          "description": "Bearer token; must match the broker's JOBD_API_TOKEN. Required unless the broker runs with JOBD_ALLOW_NO_AUTH=1.",
+          "isRequired": false,
+          "isSecret": true
         }
       ]
     }

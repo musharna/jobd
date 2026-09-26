@@ -26,7 +26,7 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 - **Every httpx transport failure is a transport error.** `JobdClient` caught a hand-picked tuple of httpx exceptions; `RemoteProtocolError`, `WriteTimeout` and `PoolTimeout` escaped raw and surfaced from the MCP as a bare "Internal server error" logged as a success. It now catches `httpx.TransportError`, with a new `protocol` failure kind.
 - **jobd-mcp classifies failures by origin, not by builtin exception type.** Unknown tools raise their own exception (a `ValueError` catch had labelled bad values and non-JSON broker replies `unknown_tool`); anything unexpected is `internal_error` with the exception type, a traceback on stderr, and an `error_kind` in the call log.
 - **`jobd_cancel` reports `signal_sent` from the broker's cancel reply** instead of a status read taken before the call, so a job that finished in between is no longer reported as signalled.
-- **`jobd_worker_delete` URL-encodes the host** — `gt76#x` was sent as `/workers/gt76` and deleted worker `gt76`.
+- **`jobd_worker_delete` URL-encodes the host** — `broker-host#x` was sent as `/workers/broker-host` and deleted worker `broker-host`.
 - **404/409 hints name the tool's resource** — a worker-delete 404 no longer tells the agent to look for a job id with `jobd_list`.
 - **`GET /jobs?state_filter=` rejects unknown state names with 422** instead of returning an empty page to every client.
 

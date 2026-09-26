@@ -353,32 +353,34 @@ def test_l7_cancel_reason_is_recorded_in_the_cancel_event(app, tmp_path):
 
 @respx.mock
 def test_l10_worker_delete_encodes_host():
-    hashed = respx.delete(f"{BROKER}/workers/gt76%23x").mock(
-        return_value=httpx.Response(200, json={"ok": True, "deleted": "gt76#x"})
+    hashed = respx.delete(f"{BROKER}/workers/broker-host%23x").mock(
+        return_value=httpx.Response(200, json={"ok": True, "deleted": "broker-host#x"})
     )
-    bare = respx.delete(f"{BROKER}/workers/gt76").mock(
-        return_value=httpx.Response(200, json={"ok": True, "deleted": "gt76"})
+    bare = respx.delete(f"{BROKER}/workers/broker-host").mock(
+        return_value=httpx.Response(200, json={"ok": True, "deleted": "broker-host"})
     )
     c = JobdClient(base_url=BROKER)
-    assert c.delete_worker("gt76#x")["deleted"] == "gt76#x"
-    assert hashed.called and not bare.called, "fragment char truncated the path to /workers/gt76"
+    assert c.delete_worker("broker-host#x")["deleted"] == "broker-host#x"
+    assert hashed.called and not bare.called, (
+        "fragment char truncated the path to /workers/broker-host"
+    )
     # positive control
-    assert c.delete_worker("gt76")["deleted"] == "gt76"
+    assert c.delete_worker("broker-host")["deleted"] == "broker-host"
     assert bare.called
 
 
 def test_l10_worker_delete_encoded_host_against_real_broker(app):
     c = _real_broker_client(app)
     tc = c._client
-    _hb(tc, "gt76")
+    _hb(tc, "broker-host")
     tc.app  # noqa: B018 — keep the app alive
-    # gt76 is online, so a delete that reached it would 409; the '#x' host does
+    # broker-host is online, so a delete that reached it would 409; the '#x' host does
     # not exist, so the correct answer is 404 naming the whole host.
     from jobd.client import BrokerRefusal
 
     with pytest.raises(BrokerRefusal) as ei:
-        c.delete_worker("gt76#x")
-    assert ei.value.status_code == 404 and "gt76#x" in ei.value.detail, ei.value.detail
+        c.delete_worker("broker-host#x")
+    assert ei.value.status_code == 404 and "broker-host#x" in ei.value.detail, ei.value.detail
 
 
 # --- L11: signal_sent reflects what the broker did, not the pre-read state -----

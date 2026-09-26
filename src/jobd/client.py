@@ -287,8 +287,8 @@ class JobdClient:
         return self._request("GET", "/workers").json()
 
     def delete_worker(self, host: str) -> dict:
-        # Path segments are caller data: unencoded, `gt76#x` became the URL
-        # fragment and DELETEd worker `gt76` (audit 2026-09-22 L10).
+        # Path segments are caller data: unencoded, `broker-host#x` became the URL
+        # fragment and DELETEd worker `broker-host` (audit 2026-09-22 L10).
         return self._request("DELETE", f"/workers/{quote(host, safe='')}").json()
 
     # NOTE: no `job_get`. It was a second name for `status()` — same GET

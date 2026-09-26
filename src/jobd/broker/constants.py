@@ -17,7 +17,7 @@ OFFLINE_AFTER_SECONDS = 120
 # from one of these, so it can't clobber a concurrent terminal transition (e.g.
 # a sweeper-set ORPHANED) — the complement of models.TERMINAL_STATES.
 NON_TERMINAL_STATES: tuple[JobState, ...] = tuple(s for s in JobState if s not in TERMINAL_STATES)
-# SIGTERM-drain Phase 2 (docs/plans/sigterm-drain.md): heartbeat reconcile.
+# SIGTERM-drain Phase 2 (docs/runbook.md, "Drain / restart a worker"): heartbeat reconcile.
 # A claimed (ASSIGNED/RUNNING) job must be absent from this many CONSECUTIVE
 # in_flight_job_ids reports, and be at least this old since its claim, before
 # it gets the worker-died disposition. The age floor plus the debounce cover
