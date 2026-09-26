@@ -2,26 +2,36 @@
 
 Written after the 2026-08-19 scrub was undone twelve days later by ordinary
 feature work: a scrub is a state, not a commit, and nothing was checking the
-state. Patterns are assembled from fragments so this file passes its own scan.
+state.
+
+The identifiers are not in the repository -- spelling them out, even in
+fragments, would publish them. They are read, one per line, from the
+environment variable JOBD_PRIVACY_FORBIDDEN (CI sets it from the
+PRIVACY_FORBIDDEN repository secret) or else from
+~/.config/jobd/privacy-forbidden.txt. With neither, both scan tests FAIL rather
+than pass on an empty list. Hits are reported by entry number (#k), never by
+the matched text, so a CI log cannot print what it found.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
-FORBIDDEN = [
-    "/home/" + "mjarnold",
-    "/Users/" + "a2b32",
-    "100.113." + "204.41",
-    "100.91." + "179.102",
-    "tail" + "86d19d",
-    "mjarnold" + "gt76",
-    "Claude-" + "Session:",
-    "noreply@" + "anthropic.com",
-]
+_ENV = "JOBD_PRIVACY_FORBIDDEN"
+_FILE = Path.home() / ".config/jobd/privacy-forbidden.txt"
+_raw = os.environ.get(_ENV) or (_FILE.read_text(encoding="utf-8") if _FILE.is_file() else "")
+FORBIDDEN = [line.strip() for line in _raw.splitlines() if line.strip()]
+
+
+def _require_list() -> None:
+    if not FORBIDDEN:
+        pytest.fail(f"no forbidden list: set {_ENV} or write {_FILE} (one identifier per line)")
 
 
 def scan(paths: list[Path]) -> list[str]:
@@ -33,11 +43,9 @@ def scan(paths: list[Path]) -> list[str]:
         except (IsADirectoryError, FileNotFoundError):
             continue
         for i, line in enumerate(data.split(b"\n"), 1):
-            for n in needles:
+            for k, n in enumerate(needles, 1):
                 if n in line:
-                    hits.append(
-                        f"{p.relative_to(ROOT) if p.is_relative_to(ROOT) else p}:{i}: {n.decode()}"
-                    )
+                    hits.append(f"{p.relative_to(ROOT) if p.is_relative_to(ROOT) else p}:{i}: #{k}")
     return hits
 
 
@@ -49,6 +57,7 @@ def _tracked() -> list[Path]:
 
 
 def test_tracked_tree_has_no_private_paths():
+    _require_list()
     files = _tracked()
     assert Path(__file__) in files, "this guard must itself be tracked"
     hits = scan(files)
@@ -57,11 +66,13 @@ def test_tracked_tree_has_no_private_paths():
 
 def test_scanner_reports_every_planted_hit(tmp_path):
     """Positive control: the scanner is worth exactly what it can catch."""
+    _require_list()
     planted = tmp_path / "planted.bin"
     planted.write_bytes(b"\x89PNG\n" + b"\n".join(n.encode() for n in FORBIDDEN) + b"\n")
     hits = scan([planted])
     found = {h.split(": ", 1)[1] for h in hits}
-    assert found == set(FORBIDDEN), sorted(set(FORBIDDEN) - found)
+    want = {f"#{k}" for k in range(1, len(FORBIDDEN) + 1)}
+    assert found == want, sorted(want - found)
     assert all(h.split(":")[1].isdigit() for h in hits)
 
 
