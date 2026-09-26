@@ -6,12 +6,12 @@ def test_resolve_reports_the_root_that_supplied_the_identity(rooted_client):
         json={
             "cmd": ["true"],
             "cwd": "/home/user/beta/sweeps",
-            "project": "pillar2a1_sweep",
+            "project": "stage2_sweep",
         },
     )
     body = r.json()
     assert body["project"] == "beta"
-    assert body["project_label"] == "pillar2a1_sweep"
+    assert body["project_label"] == "stage2_sweep"
     assert body["matched_root"] == "/home/user/beta"
 
 
@@ -51,10 +51,10 @@ def test_explain_shows_the_root_and_the_typed_label(rooted_client, monkeypatch):
     r = _explain(
         monkeypatch,
         rooted_client,
-        ["--project", "pillar2a1_sweep", "--cwd", "/home/user/beta/sweeps"],
+        ["--project", "stage2_sweep", "--cwd", "/home/user/beta/sweeps"],
     )
     assert r.exit_code == 0, r.output
-    assert "pillar2a1_sweep" in r.output
+    assert "stage2_sweep" in r.output
     assert "/home/user/beta" in r.output
 
 

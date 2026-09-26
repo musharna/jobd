@@ -25,7 +25,7 @@ def test_the_event_is_emitted_with_the_label_and_the_root(rooted_logs):
         json={
             "cmd": ["true"],
             "cwd": "/home/user/beta/sweeps",
-            "project": "pillar2a1_sweep",
+            "project": "stage2_sweep",
         },
     )
     assert r.status_code == 200, r.text
@@ -37,7 +37,7 @@ def test_the_event_is_emitted_with_the_label_and_the_root(rooted_logs):
     hits = [e for e in rows if e["event"] == "cwd_identity_applied"]
     assert len(hits) == 1, f"expected exactly one, got {[e['event'] for e in rows]}"
     assert hits[0]["project"] == "beta"
-    assert hits[0]["payload"]["project_label"] == "pillar2a1_sweep"
+    assert hits[0]["payload"]["project_label"] == "stage2_sweep"
     assert hits[0]["payload"]["matched_root"] == "/home/user/beta"
 
 

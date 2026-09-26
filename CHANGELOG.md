@@ -138,8 +138,8 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
   `gamma`, and `delta` now declare `roots:` in `config/projects.yaml`.**
   The matching machinery and its acceptance gate against 3,608 rows of real job history
   (`tests/test_corpus_replay.py`) landed first, but no project had ever declared a root,
-  so a job typed with an unregistered run label (`pillar2a1_sweep`, `arf-promoter`,
-  `gamma-stage4b`, ...) still fell through to `_default` regardless. Each root was
+  so a job typed with an unregistered run label (`stage2_sweep`, `leaf-assay`,
+  `gamma-rerun`, ...) still fell through to `_default` regardless. Each root was
   picked by replaying `tests/data/project_cwd_corpus.csv` grouped by cwd and keeping only
   directories where every project name ever typed from them reads as a variant of one
   project — deliberately excluding `/home/user/trellis2` and `.../hunyuan3d`
@@ -155,7 +155,7 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
   Shipping in the same release, the user-visible surface that makes a substituted identity
   findable and explainable rather than merely correct:
   - `job list --project NAME` now matches **either** the scheduling identity or the typed
-    run label. Without this a job submitted as `pillar2a1_sweep` and priced as `beta`
+    run label. Without this a job submitted as `stage2_sweep` and priced as `beta`
     was unfindable under the only name its submitter ever knew it by.
   - `JobInfo` gains `project_label`: the name as typed, `null` when it agrees with
     `project`, so the field reads as "something was substituted here".
@@ -188,7 +188,7 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 - **`job projects set/nudge` no longer crashes when the name folds.** v0.5.40 taught
   the write path to fold a spelling onto the registered project, but `POST
 /projects/{name}` kept returning the bare table, so the CLI went on indexing it by
-  the name the user typed — `job projects set arf_promoter 65` wrote `arf-promoter`
+  the name the user typed — `job projects set leaf_assay 65` wrote `leaf-assay`
   and then died with `KeyError` on the echo, reporting a traceback for a write that
   had already succeeded. Both write endpoints now report the project they landed on
   (`{"project": ..., "projects": {...}}`), matching what `/resolve` already did for

@@ -382,12 +382,12 @@ def test_submit_identity_note_goes_to_stderr(monkeypatch):
     line like every other one in this function, all of which go to stderr."""
     r = _submit_with_response(
         monkeypatch,
-        {"id": 7, "project": "beta", "project_label": "pillar2a1_sweep"},
+        {"id": 7, "project": "beta", "project_label": "stage2_sweep"},
     )
     assert r.exit_code == 0, r.output
     # The whole point: stdout stays machine-readable.
     assert json.loads(r.stdout)["id"] == 7
-    assert "pillar2a1_sweep" in r.stderr
+    assert "stage2_sweep" in r.stderr
     assert "identity from cwd" in r.stderr
 
 

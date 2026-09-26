@@ -41,7 +41,7 @@ def _write_result(name: str, state) -> dict:
 
     The write path folds a spelling onto the registered project, so the name the
     caller sent may not be a key in the table at all -- `job projects set
-    arf_promoter 65` re-prices `arf-promoter`. Returning the bare table left the
+    leaf_assay 65` re-prices `leaf-assay`. Returning the bare table left the
     caller to guess which key it wrote, and the CLI guessed the name it had
     typed: KeyError, mid-registration, after the write had already landed.
 
