@@ -26,7 +26,8 @@ _RULES: list[tuple[int, re.Pattern, str, str | dict[str, str]]] = [
         400,
         re.compile(r"cwd .* is under /mnt/c/", re.I),
         "cwd_outside_mount_roots",
-        "Pass host='laptop' (a top-level jobd_submit argument), or move cwd off /mnt/c/.",
+        "Pass host=<the machine whose C: drive holds it> (a top-level jobd_submit "
+        "argument), or move cwd off /mnt/c/.",
     ),
     (
         400,

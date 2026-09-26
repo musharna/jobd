@@ -50,6 +50,7 @@ from jobd.matcher import (
     cwd_routability,
     eligible_workers,
     gpu_contention_warning,
+    mnt_c_pin_error,
     submit_preflight,
 )
 from jobd.models import JobState, JobSubmit
@@ -108,20 +109,6 @@ def submit_job(
     else:
         fast_path = profile_spec.fast_path if profile_spec else False
 
-    # cwd sanity: Windows-mount paths only exist on the laptop (WSL). If
-    # someone submits --cwd /mnt/c/... without pinning the laptop, the
-    # worker will fail cd and every process will rc=127. Root cause of the
-    # 2026-04-22 project-b storm.
-    if req.cwd.startswith("/mnt/c/") and host_pin not in ("laptop", "MSI", "any-laptop"):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"cwd {req.cwd!r} is under /mnt/c/ (Windows mount, laptop-only) "
-                f"but host_pin={host_pin!r}. Pass --host laptop, or stage data "
-                f"under a cross-host path like /tmp or a project-scoped dir."
-            ),
-        )
-
     with session_factory() as session:
         for dep_id in req.depends_on:
             parent = session.get(Job, dep_id)
@@ -158,6 +145,9 @@ def submit_job(
         ser_warn = _serialization_warning(requires, host_pin, snapshots, session)
         gpu_warn = gpu_contention_warning(requires, host_pin, snapshots)
         preflight_warn = submit_preflight(requires, host_pin, all_snapshots)
+        mnt_c_msg = mnt_c_pin_error(req.cwd, host_pin, all_snapshots)
+        if mnt_c_msg is not None:
+            raise HTTPException(status_code=400, detail=mnt_c_msg)
         cwd_route = cwd_routability(req.cwd, host_pin, all_snapshots)
         cwd_route_warn: str | None = None
         if cwd_route is not None:

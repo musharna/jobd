@@ -1874,32 +1874,55 @@ def test_job_info_exposes_session_id(client):
     assert got["session_id"] == "sess-abc-123"
 
 
-def test_submit_rejects_mnt_c_cwd_for_non_laptop(client):
-    """Windows-mount paths routed to a non-laptop host → 400, not queued."""
-    r = client.post(
+def _hb_wsl(client, host, aliases):
+    client.post(
+        "/heartbeat",
+        json={
+            "host": host,
+            "host_aliases": aliases,
+            "free_vram_gb": 0.0,
+            "unregistered_vram_gb": 0.0,
+            "free_ram_gb": 16.0,
+            "idle_cpus": 4,
+            "arch": "x86_64",
+            "os": "linux",
+            "gpu": False,
+            "tags": ["wsl"],
+        },
+    )
+
+
+def _submit_mnt_c(client, host_pin):
+    return client.post(
         "/submit",
         json={
             "cmd": ["true"],
             "cwd": "/mnt/c/Users/dev/some/project",
             "project": "project-a",
-            "host_pin": "desktop-vm",
+            "host_pin": host_pin,
         },
     )
-    assert r.status_code == 400
-    assert "/mnt/c/" in r.text
 
 
-def test_submit_allows_mnt_c_cwd_when_pinned_to_laptop(client):
-    r = client.post(
-        "/submit",
-        json={
-            "cmd": ["true"],
-            "cwd": "/mnt/c/Users/dev/some/project",
-            "project": "project-a",
-            "host_pin": "laptop",
-        },
-    )
-    assert r.status_code == 200
+def test_submit_rejects_mnt_c_cwd_without_a_single_host(client):
+    """/mnt/c/ differs per WSL host → a pin that can route to more than one
+    host (unpinned, or a pool alias) is a 400, not queued."""
+    _hb_wsl(client, "laptop", ["any", "any-gpu"])
+    _hb_wsl(client, "desktop", ["any", "any-gpu"])
+    for pin in ("any", "any-gpu"):
+        r = _submit_mnt_c(client, pin)
+        assert r.status_code == 400, pin
+        assert "/mnt/c/" in r.text
+    # positive control, same broker state: one named host is accepted
+    assert _submit_mnt_c(client, "desktop").status_code == 200
+
+
+def test_submit_allows_mnt_c_cwd_pinned_to_any_single_host(client):
+    # No host name is special: the old rule accepted only laptop/MSI/any-laptop.
+    _hb_wsl(client, "laptop", ["any"])
+    _hb_wsl(client, "desktop", ["any"])
+    for pin in ("laptop", "desktop"):
+        assert _submit_mnt_c(client, pin).status_code == 200, pin
 
 
 def test_cancel_running_sets_signal_not_state(client):

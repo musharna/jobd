@@ -44,7 +44,7 @@ def test_submit_dry_run_does_not_queue(client):
 
 def test_submit_dry_run_runs_cwd_validation(client):
     """Dry-run must enforce the same cwd sanity gate as a live submit —
-    /mnt/c/... without --host laptop is rejected at preview time too."""
+    /mnt/c/... without a single-host --host is rejected at preview time too."""
     r = client.post(
         "/submit",
         json={
