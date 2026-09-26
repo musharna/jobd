@@ -1,1 +1,0 @@
-- **`docs/plans/` is gone.** The six internal design, plan and deploy notes are removed from the tree (they remain in git history); the SIGTERM-drain phases the code comments refer to are now described in `docs/runbook.md`, "Drain / restart a worker".
