@@ -4,6 +4,12 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.51] — 2026-09-26
+
+### Changed
+
+- **A `/mnt/c/` working directory now needs a pin to one host, whichever host it is.** The broker used to accept such a job only when pinned to one of three hard-coded host names, two of which no longer matched any worker, and it refused every other WSL host even though each has its own `/mnt/c`. The rule is now: `any`, or a pin that matches more than one known worker (a pool alias such as `any-gpu`), is refused with a 400; a pin naming a single host is accepted. A pin that matches no known worker is left to the routing checks.
+
 ## [0.5.50] — 2026-09-26
 
 ### Fixed
