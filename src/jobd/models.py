@@ -361,7 +361,7 @@ class WorkerHeartbeat(BaseModel):
     # reading as single-slot, idle.
     max_concurrent: int = 1
     running: int = 0
-    # SIGTERM-drain Phase 2 (docs/plans/sigterm-drain.md): the job ids this
+    # SIGTERM-drain Phase 2 (docs/runbook.md, "Drain / restart a worker"): the job ids this
     # worker currently holds in flight. None = old worker that doesn't report;
     # the broker's heartbeat reconcile skips it entirely. An empty list is a
     # real claim of "nothing in flight" and DOES reconcile.

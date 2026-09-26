@@ -31,7 +31,7 @@ worker's heartbeat passes the dead-worker cutoff.
 
 ## Drain / restart a worker
 
-Workers handle `SIGTERM` with a full drain (docs/plans/sigterm-drain.md): the
+Workers handle `SIGTERM` with a full drain: the
 daemon stops claiming new jobs, preempts every in-flight job (SIGTERM to the
 workload, checkpoint window honored, SIGKILL after the grace), waits for each
 to post `/complete`, then emits a `worker_shutdown` event with a
@@ -50,6 +50,13 @@ heartbeat reconcile cleans up: the restarted worker reports its (empty)
 in-flight set, and after 2 consecutive heartbeats (~10 s) any stranded claim
 older than 60 s is requeued (ASSIGNED, or RUNNING + idempotent) or orphaned
 with `termination_reason=worker_restarted` (RUNNING, non-idempotent).
+
+When that restarted worker comes up it also kills any `jobd-<ns>-<id>.scope`
+systemd units left over from its previous run (only its own `<ns>`, derived
+from the broker URL), so a requeued idempotent job cannot run twice against a
+still-running old copy. Code comments refer to these three parts as the
+SIGTERM-drain phases: Phase 1 is the worker drain, Phase 2 the broker's
+heartbeat reconcile, Phase 3 this startup scope sweep.
 
 ```bash
 systemctl --user stop job-worker        # graceful drain (SIGTERM)

@@ -226,7 +226,7 @@ def _unregister_in_flight(job_id: int) -> None:
         _in_flight.pop(job_id, None)
 
 
-# SIGTERM drain (docs/plans/sigterm-drain.md). `_drain_event` flips once when
+# SIGTERM drain (docs/runbook.md, "Drain / restart a worker"). `_drain_event` flips once when
 # shutdown begins and is never cleared in production. `_drain_hooks` maps
 # job_id -> callable(reason, grace_cap_s) that routes the job through its
 # preempt machinery; run_job registers its hook right after Popen and
@@ -344,7 +344,7 @@ def scope_unit_name(job_id: int) -> str:
 
 def _sweep_stale_scopes() -> list[str]:
     """Kill leftover jobd-<ns>-<id>.scope units from a previous worker incarnation
-    (SIGTERM-drain Phase 3, docs/plans/sigterm-drain.md).
+    (SIGTERM-drain Phase 3, docs/runbook.md, "Drain / restart a worker").
 
     Scopes live outside the worker service's cgroup, so workloads survive an
     undrained worker death. The broker's heartbeat reconcile then requeues
@@ -428,7 +428,7 @@ def _in_flight_ids() -> list[int]:
     """Sorted in-flight job ids for the heartbeat `in_flight_job_ids` report —
     the broker reconciles its ASSIGNED/RUNNING claims for this host against
     it, catching jobs a restarted worker no longer knows about (SIGTERM-drain
-    Phase 2, docs/plans/sigterm-drain.md)."""
+    Phase 2, docs/runbook.md, "Drain / restart a worker")."""
     with _in_flight_lock:
         return sorted(_in_flight.keys())
 
@@ -672,7 +672,7 @@ def _reserve_and_dispatch(
     The job ALWAYS runs in a daemon thread, even at ``max_concurrent == 1``.
     Inline execution would park the main thread inside proc.stdout.read() for
     the whole job, so a SIGTERM drain could not start until the job ended
-    naturally (docs/plans/sigterm-drain.md). Bounded shutdown comes from the
+    naturally (docs/runbook.md, "Drain / restart a worker"). Bounded shutdown comes from the
     drain deadline plus systemd's stop-timeout KILL, not thread daemonness.
     ``run_in_thread`` is the callable that executes the job and unregisters it
     when done.
@@ -1052,7 +1052,7 @@ def _drain_refuse(client: httpx.Client, job_id: int) -> bool:
     """SIGTERM drain: a job claimed just before the drain flag flipped must not
     start a workload the drain can no longer see. Complete it as
     preempted/worker_shutdown so the broker record doesn't strand in
-    ASSIGNED (docs/plans/sigterm-drain.md, dispatch-side gap race)."""
+    ASSIGNED (docs/runbook.md, "Drain / restart a worker", dispatch-side gap race)."""
     if not _drain_event.is_set():
         return False
     log.warning("job %s: refusing to start, worker is draining", job_id)

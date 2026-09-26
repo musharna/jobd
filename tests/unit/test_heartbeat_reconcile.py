@@ -1,4 +1,4 @@
-"""SIGTERM-drain Phase 2 (docs/plans/sigterm-drain.md): heartbeat reconcile.
+"""SIGTERM-drain Phase 2 (docs/runbook.md, "Drain / restart a worker"): heartbeat reconcile.
 
 A worker that dies without draining (SIGKILL, crash, power loss) restarts
 within seconds under Restart=on-failure and heartbeats again — refreshing the

@@ -1,6 +1,6 @@
 """What the network actually told us — and whether the CLI says it out loud.
 
-On 2026-09-02 the gt76 broker was healthy: container up, listening on :8765,
+On 2026-09-02 the broker on broker-host was healthy: container up, listening on :8765,
 freshly auto-deployed to 0.5.43. `job ping` reported `health: unreachable`.
 The real cause was a Tailscale ACL silently dropping packets, because this
 machine had re-registered as a second, untagged node. An operator who knows

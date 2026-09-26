@@ -341,7 +341,7 @@ def _reconcile_worker_in_flight(
     list[tuple[int, str]],
 ]:
     """SIGTERM-drain Phase 2: reconcile a worker's reported in-flight set
-    against broker-side claims (docs/plans/sigterm-drain.md).
+    against broker-side claims (docs/runbook.md, "Drain / restart a worker").
 
     Reconciles BOTH directions. Forward: a job the broker claims is running that
     the worker does not report (the worker died and restarted) is requeued or

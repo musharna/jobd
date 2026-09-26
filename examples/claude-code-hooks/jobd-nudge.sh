@@ -2,8 +2,8 @@
 # PreToolUse Bash nudge hook for jobd (Phase 4-lite).
 #
 # Reads the PreToolUse JSON payload from stdin, matches the command against
-# a hardcoded regex list, and on first hit writes a stderr nudge + appends
-# a TSV log line. Always exits 0 — the hook is advisory, never blocking.
+# a regex list (generic rules, plus two optional ones set by env vars), and on
+# first hit writes a stderr nudge + appends a TSV log line. Always exits 0 — the hook is advisory, never blocking.
 #
 # Log path override for tests: $JOBD_NUDGE_LOG
 #
@@ -34,18 +34,34 @@ fi
 # Rules are two parallel arrays: RULE_IDS[i] corresponds to RULE_REGEXES[i].
 # Evaluated in order; first match wins. Add new rules by appending to both
 # arrays. Keep regexes as ERE (grep -E) syntax.
-RULE_IDS=(
-	"heavy-run-wrap"
-	"ssh-desktop"
+#
+# Two optional, site-specific rules come first and are OFF unless configured:
+#   JOBD_NUDGE_WRAPPERS      space-separated names of local wrapper commands you
+#                            use for heavy work (e.g. a memory-capped runner).
+#                            Names may contain only letters, digits, '.', '_'
+#                            and '-'; anything else is ignored.
+#   JOBD_NUDGE_SSH_HOST_PAT  ERE matched against the ssh host alias of your GPU
+#                            machine(s), e.g. 'gpu-box|workstation'. Nudges on
+#                            `ssh <host> ... train|pipeline|run_...`.
+RULE_IDS=()
+RULE_REGEXES=()
+for w in ${JOBD_NUDGE_WRAPPERS:-}; do
+	[[ "$w" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || continue
+	RULE_IDS+=("local-wrapper")
+	RULE_REGEXES+=("(^|[[:space:]])${w//./\\.}([[:space:]]|\$)")
+done
+if [[ -n "${JOBD_NUDGE_SSH_HOST_PAT:-}" ]]; then
+	RULE_IDS+=("ssh-gpu-host")
+	RULE_REGEXES+=("(^|[[:space:]])ssh[[:space:]]+(${JOBD_NUDGE_SSH_HOST_PAT})[[:space:]]+.*(train|pipeline|run_)")
+fi
+RULE_IDS+=(
 	"r-pipeline"
 	"python-train"
 	"accelerate"
 	"dvc-repro"
 	"snakemake"
 )
-RULE_REGEXES=(
-	'(^|[[:space:]])heavy-run([[:space:]]|$)'
-	'(^|[[:space:]])ssh[[:space:]]+desktop(-wsl)?[[:space:]]+.*(train|pipeline|run_)'
+RULE_REGEXES+=(
 	'(^|[[:space:]])Rscript[[:space:]]+.*(pipeline|run_[a-zA-Z_]+)\.R\b'
 	'(^|[[:space:]]|/)python[0-9]*(\.[0-9]+)?[[:space:]]+.*train\.py\b'
 	'(^|[[:space:]])accelerate[[:space:]]+launch\b'

@@ -1,4 +1,4 @@
-"""SIGTERM-drain Phase 3 (docs/plans/sigterm-drain.md): startup scope sweep.
+"""SIGTERM-drain Phase 3 (docs/runbook.md, "Drain / restart a worker"): startup scope sweep.
 
 After an undrained worker death, scope-wrapped workloads survive in their
 jobd-<id>.scope units (scopes live outside the worker service's cgroup). If

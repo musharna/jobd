@@ -30,6 +30,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # tests/test_no_private_paths.py reads its identifier list from here.
+      JOBD_PRIVACY_FORBIDDEN: ${{ secrets.PRIVACY_FORBIDDEN }}
     strategy:
       fail-fast: false
       matrix:

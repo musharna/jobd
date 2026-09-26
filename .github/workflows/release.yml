@@ -56,6 +56,9 @@ jobs:
     # with pyproject will be refused anyway, so don't spend a full test leg
     # discovering that minutes later.
     needs: verify
+    env:
+      # tests/test_no_private_paths.py reads its identifier list from here.
+      JOBD_PRIVACY_FORBIDDEN: ${{ secrets.PRIVACY_FORBIDDEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv

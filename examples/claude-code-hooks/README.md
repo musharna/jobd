@@ -8,7 +8,7 @@ exists. Copy the ones you want into your `~/.claude/` setup and wire them up in
 
 | Hook                | Type                       | What it does                                                                                                                                                                                                                                                            |
 | ------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `jobd-nudge.sh`     | PreToolUse(Bash), advisory | Detects a heavy command (training, R pipeline, `accelerate launch`, …) and prints a non-blocking nudge to submit it through jobd instead. Never blocks.                                                                                                                 |
+| `jobd-nudge.sh`     | PreToolUse(Bash), advisory | Detects a heavy command (training, R pipeline, `accelerate launch`, …) and prints a non-blocking nudge to submit it through jobd instead. Never blocks. Two optional rules are off until configured: `JOBD_NUDGE_WRAPPERS` (names of your own heavy-work wrapper commands) and `JOBD_NUDGE_SSH_HOST_PAT` (a regex for the ssh aliases of your GPU hosts). |
 | `jobd-block-gpu.sh` | PreToolUse(Bash), blocking | Hard-blocks GPU launches that target a specific GPU host and bypass jobd (exit 2). Supports `# NO_GPU` / `# CONCURRENT_OK` / `# VRAM=NGB` override markers, each audit-logged. **No-op until you set `JOBD_GPU_SSH` and `JOBD_GPU_HOST_PAT`** (see the header comment). |
 
 `test-jobd-nudge.sh` is a small self-contained test harness for `jobd-nudge.sh`.
@@ -37,5 +37,7 @@ exists. Copy the ones you want into your `~/.claude/` setup and wire them up in
 }
 ```
 
-Both hooks emit broker `/events` telemetry when `JOBD_URL` is set, so hook
-activity shows up in the same observability stream as job lifecycle events.
+`jobd-block-gpu.sh` emits broker `/events` telemetry when `JOBD_URL` is set, so
+its blocks and bypasses show up in the same observability stream as job
+lifecycle events. `jobd-nudge.sh` only writes a local log
+(`~/.claude/jobd-nudges.log`, or `$JOBD_NUDGE_LOG`).

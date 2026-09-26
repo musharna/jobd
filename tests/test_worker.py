@@ -1172,7 +1172,7 @@ def test_resource_snapshot_reports_slot_usage(monkeypatch):
 def test_resource_snapshot_reports_in_flight_job_ids(monkeypatch):
     """SIGTERM-drain Phase 2: every heartbeat carries the worker's in-flight
     job ids so the broker can reconcile claims a restarted worker no longer
-    knows about (docs/plans/sigterm-drain.md). Sorted for determinism."""
+    knows about (docs/runbook.md, "Drain / restart a worker"). Sorted for determinism."""
     _reset_in_flight()
     try:
         monkeypatch.setattr(job_worker, "nvidia_free_vram_gb", lambda: 30.0)
@@ -1321,7 +1321,7 @@ def test_reserve_and_dispatch_single_slot_also_threads():
     """SIGTERM-drain prerequisite: even at max_concurrent == 1 the job must run
     in a worker thread, never inline in the poll loop. Inline execution parks
     the main thread inside proc.stdout.read() for the whole job, so a drain
-    can't start until the job ends naturally (docs/plans/sigterm-drain.md)."""
+    can't start until the job ends naturally (docs/runbook.md, "Drain / restart a worker")."""
     _reset_in_flight()
     started = threading.Event()
     release = threading.Event()
