@@ -8,7 +8,8 @@ under test:
   threads Starlette's TestClient runs requests on are counted too), keyed
   ``relpath:qualname``. Comprehension frames are skipped: Python 3.11 runs
   them as functions and 3.12 inlines them (PEP 709), so counting them would
-  make the totals depend on the interpreter.
+  make the totals depend on the interpreter. Generators and coroutines count
+  once per entry, not per resume (``_entry_offset``).
 - ``matcher_calls``: the subset of ``py_calls`` in ``src/jobd/matcher.py``,
   i.e. matcher evaluations.
 - ``sql``: statements the broker sends to SQLite (SQLAlchemy
@@ -77,18 +78,23 @@ class Counts:
 _active: Counts | None = None
 # code object -> (key, entry offset) or None when the code is not counted.
 _keys: dict[Any, tuple[str, int | None] | None] = {}
-_ASYNC = inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR | inspect.CO_ITERABLE_COROUTINE
+_RESUMABLE = (
+    inspect.CO_GENERATOR
+    | inspect.CO_COROUTINE
+    | inspect.CO_ASYNC_GENERATOR
+    | inspect.CO_ITERABLE_COROUTINE
+)
 
 
 def _entry_offset(code: Any) -> int | None:
-    """For a coroutine, the offset of its ``RESUME 0`` (function start).
+    """For a generator or coroutine, the offset of its ``RESUME 0`` (start).
 
-    The profiler reports a "call" on every resume after an ``await`` too, and
-    how often a coroutine suspends is the event loop's business: on the same
-    workload ``next_job`` resumed 2 times fewer on 3.13 than on 3.11. So a
-    coroutine counts once per entry. Plain generators keep counting each
-    resume (one per item), which is the same on every version measured."""
-    if not code.co_flags & _ASYNC:
+    The profiler also reports a "call" on every resume, and how many it
+    reports is the interpreter's business, not jobd's: on the same workload
+    ``next_job`` resumed 2 times fewer on 3.13 than on 3.11, and every
+    generator expression reported one resume fewer on 3.12.3 (CI's runner)
+    than on 3.12.13. So these count once per entry."""
+    if not code.co_flags & _RESUMABLE:
         return None
     for ins in dis.get_instructions(code):
         if ins.opname == "RESUME" and ins.arg == 0:
