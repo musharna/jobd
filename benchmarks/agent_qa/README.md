@@ -11,25 +11,49 @@ Claude Code under three setups:
 - **Claude + jobd-mcp**: this server (jobd[mcp] 0.5.51 from PyPI) only,
   without `jobd_cancel`, `jobd_preempt` and `jobd_worker_delete`.
 
-Results: TODO, the full sweep has not run yet. Only a pilot has (2 questions ×
-3 setups × 1 run, on 2026-10-16 with Claude Code 2.1.302): every setup exited
-cleanly and every reply had a scoreable `ANSWER:` line.
+Run on 2026-10-16 with Claude Code 2.1.302. All 369 runs exited 0, and the
+read-only proxy refused no request in any of them.
 
-Figure: TODO (`agent_qa.png`, written by `plot.R` after the sweep).
+![Right, wrong or declined per setup](agent_qa.png)
 
-| Setup | Right | Wrong | Declined | Questions right in all 3 runs | Cost / answer, median (mean) | Seconds / answer, median (mean) | Slowest |
-|---|---|---|---|---|---|---|---|
-| Claude alone | TODO | TODO | TODO | TODO of 41 | TODO | TODO | TODO |
-| Claude + job CLI | TODO | TODO | TODO | TODO of 41 | TODO | TODO | TODO |
-| Claude + jobd-mcp | TODO | TODO | TODO | TODO of 41 | TODO | TODO | TODO |
+| Setup | Right | Wrong | Declined | Questions right in all 3 runs | Cost / answer, median (mean) | Seconds / answer, median (mean) | Slowest | Tool calls / answer, median (mean) |
+|---|---|---|---|---|---|---|---|---|
+| Claude alone | 0 | 0 | 123 | 0 of 41 | $0.009 ($0.010) | 4.8 (5.4) | 18 s | 0 (0) |
+| Claude + job CLI | 123 | 0 | 0 | 41 of 41 | $0.028 ($0.038) | 13.6 (16.4) | 55 s | 2 (2.9) |
+| Claude + jobd-mcp | 123 | 0 | 0 | 41 of 41 | $0.022 ($0.038) | 6.7 (8.2) | 26 s | 1 (1.8) |
 
 Out of 123 answers per setup. The three runs of a question are not
 independent, so the questions column is the fairer count. The numbers come
-from `summary.tsv`, which `plot.R` writes from `results.jsonl`.
+from [`summary.tsv`](summary.tsv), which `plot.R` writes from `results.jsonl`.
 
 ## What it shows
 
-TODO after the sweep.
+- **Accuracy is a tie.** With the CLI and with the server, Claude got every
+  question right in every run. Alone, it declined all 123. It did not guess
+  once.
+- **The server's edge is time and calls, not cost.**
+  - The typical answer took half as long with the server: a median of 6.7 s
+    against 13.6 s, with means of 8.2 s against 16.4 s. The server was faster
+    in every kind of question.
+  - It made fewer tool calls: a median of 1 against 2. With the CLI, every one of the 123 runs
+    started by reading `job --help`.
+  - Mean cost was the same: $0.038 for both, $4.66 for the server's 123
+    answers against $4.65 for the CLI's. The median favoured the server
+    ($0.022 against $0.028).
+- **One question set the server's mean cost.** It asked for one project's
+  failed jobs on one day (q26), and cost $0.33 to $0.46 per run with the
+  server, against $0.13 to $0.17 with the CLI. `jobd_list` rows carry no
+  `finished_at` and the tool has no date filter, so Claude fetched the
+  project's 200 most recent failures (47,000 characters) and then whole event
+  streams (up to 54,000 characters) to find the day. With the CLI it read
+  `job status` for each job and grepped the `finished` line.
+- **The server's 5 `jobd_submit` calls were all dry runs** (routing
+  questions). The CLI setup has no dry run, and it answered routing questions
+  from `job workers` tags.
+
+![Cost and time per answer, every run](agent_qa_cost_time.png)
+
+![Right, wrong or declined by kind of question](agent_qa_by_category.png)
 
 ## What it does not show
 
@@ -39,6 +63,8 @@ TODO after the sweep.
 - **One broker, one fleet.** The questions are drawn from one person's broker
   (four workers, about 6,700 jobs). Another fleet's history may be easier or
   harder to search.
+- **Every setup with tools got everything right, so the questions cannot rank
+  the two on accuracy.** Harder questions (several lookups, judgement) might.
 - **Read-only questions only.** Nothing is submitted, cancelled or preempted,
   so the benchmark says nothing about doing those well.
 - **One model, one date.**
@@ -151,5 +177,5 @@ Each run is an isolated `claude -p`:
 The user prompt names the CLI (`job`) in every setup too. In the pilot, the
 CLI setup looked for a program called `jobd` (the broker's server binary), was
 denied and declined, which measured guessing a name rather than looking
-something up. Raw transcripts and proxy logs go to `runs/`, which is
-gitignored.
+something up. The full run cost $10.52 in API usage. Raw transcripts and proxy logs go to
+`runs/`, which is gitignored.
