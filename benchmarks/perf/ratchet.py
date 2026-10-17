@@ -30,6 +30,7 @@ gain is locked in by the PR that earned it.
     uv run python benchmarks/perf/ratchet.py            # check (exit 1 on any difference)
     uv run python benchmarks/perf/ratchet.py --update   # lower the baseline to what was measured
     uv run python benchmarks/perf/ratchet.py --update --allow-increase   # accept a rise
+    uv run python benchmarks/perf/ratchet.py --update --allow-witness-change   # a workload's output changed
 """
 
 from __future__ import annotations
@@ -242,8 +243,15 @@ def _top_deltas(b: dict[str, int], g: dict[str, int], n: int = 10) -> list[str]:
     return [f"    {deltas[k]:+d}  {k}" for k in moved[:n]]
 
 
-def update(base: dict[str, Any], got: dict[str, Any], allow_increase: bool) -> list[str]:
-    """Refusals for an --update; empty means it may be written."""
+def update(
+    base: dict[str, Any],
+    got: dict[str, Any],
+    allow_increase: bool,
+    allow_witness_change: bool = False,
+) -> list[str]:
+    """Refusals for an --update; empty means it may be written. A changed
+    witness means the workload now does something else, so its counts are not
+    comparable and a plain --update must not paper over it."""
     refusals = []
     for name, g in got.items():
         b = base.get(name)
@@ -252,6 +260,8 @@ def update(base: dict[str, Any], got: dict[str, Any], allow_increase: bool) -> l
         for m in METRICS:
             if g[m] > b[m] and not allow_increase:
                 refusals.append(f"{name}: {m} would rise {b[m]} -> {g[m]}; needs --allow-increase")
+        if g["witness"] != b["witness"] and not allow_witness_change:
+            refusals.append(f"{name}: witness changed; needs --allow-witness-change")
     return refusals
 
 
@@ -259,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--update", action="store_true", help="write the measurement as the baseline")
     ap.add_argument("--allow-increase", action="store_true", help="let --update raise a count")
+    ap.add_argument(
+        "--allow-witness-change",
+        action="store_true",
+        help="let --update record a workload whose output changed",
+    )
     ap.add_argument("--only", default="", help="comma-separated workload names")
     ap.add_argument("--baseline", default=str(BASELINE))
     ap.add_argument("--json-out", default="", help="also write the measurement here")
@@ -276,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name:32} py_calls={g['py_calls']:6} matcher={g['matcher_calls']:4} "
               f"sql={g['sql']:4} http={g['http']:3}")  # fmt: skip
     if a.update:
-        refusals = update(base, got, a.allow_increase)
+        refusals = update(base, got, a.allow_increase, a.allow_witness_change)
         if refusals:
             print("\n".join(refusals), file=sys.stderr)
             return 1

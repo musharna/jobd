@@ -14,7 +14,8 @@ when someone reconfigures a host; ``run.py`` re-reads it before a sweep and
 refuses to run if it drifted (``drift`` below).
 
 The broker in question is the user's own, so ``questions.json`` holds their
-project names, job ids and log lines; it is gitignored, not published.
+project names, job ids and log lines; it is written to ``ARTIFACTS``, outside
+the repo, not published.
 
     JOBD_URL=... JOBD_API_TOKEN=... uv run python benchmarks/agent_qa/build_questions.py
 """
@@ -35,6 +36,10 @@ import httpx
 
 SEED = 20261016
 HERE = Path(__file__).resolve().parent
+# The key, results and transcripts live OUTSIDE the repo checkout, so an arm's
+# shell cannot stumble on them (leak control) and `git add -A` cannot publish
+# them. Override with JOBD_QA_ARTIFACTS.
+ARTIFACTS = Path(os.environ.get("JOBD_QA_ARTIFACTS") or Path.home() / "jobd-artifacts" / "agent_qa")
 TERMINAL = ("completed", "failed")
 POOL_ALIASES = {"any", "any-gpu"}  # shared by every worker; they name no host
 PAGE = 1000  # the broker's LIST_LIMIT_MAX
@@ -395,7 +400,8 @@ def main() -> None:
         sys.exit("set JOBD_URL (and JOBD_API_TOKEN) to the broker to draw from")
     b = Broker(url, token)
     key = build(b, random.Random(SEED), datetime.now(UTC))
-    (HERE / "questions.json").write_text(json.dumps(key, indent=1) + "\n")
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    (ARTIFACTS / "questions.json").write_text(json.dumps(key, indent=1) + "\n")
     counts: dict[str, int] = {}
     for q in key["questions"]:
         counts[q["category"]] = counts.get(q["category"], 0) + 1

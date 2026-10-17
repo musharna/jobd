@@ -1,5 +1,7 @@
 # Private: drawn from, and answered by, the live broker (project names,
-# job ids, log lines). Not for a public repo.
+# job ids, log lines). Not for a public repo. run.py and analyze.py write
+# them to ~/jobd-artifacts/agent_qa now; these lines catch an override.
 questions.json
 results.jsonl
 runs/
+scored.jsonl

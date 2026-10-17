@@ -102,6 +102,43 @@ def test_a_changed_witness_fails_even_when_every_count_is_equal() -> None:
     assert compare(BASE, got) == ["api_workers: witness changed {'ids': [1, 2]} -> {'ids': []}"]
 
 
+def test_update_refuses_a_changed_witness_without_its_flag() -> None:
+    same = {**BASE}
+    assert update(BASE, same, allow_increase=False) == []  # positive control
+    got = {**BASE, "api_workers": {**BASE["api_workers"], "witness": {"ids": []}}}
+    assert update(BASE, got, allow_increase=True) == [
+        "api_workers: witness changed; needs --allow-witness-change"
+    ]
+    assert update(BASE, got, allow_increase=False, allow_witness_change=True) == []
+
+
+def test_update_writes_nothing_when_it_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the CLI: a refused --update exits 1 and leaves the
+    baseline file byte-identical; the flagged one writes it."""
+    import json
+
+    import ratchet
+
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"python_roots": [], "workloads": BASE}))
+    before = path.read_bytes()
+    risen = {**BASE, "api_workers": _row({"jobd/broker/routes/workers.py:list_workers": 1}, http=2)}
+    monkeypatch.setattr(ratchet, "measure", lambda names=None: risen)
+    assert ratchet.main(["--update", "--baseline", str(path)]) == 1
+    assert path.read_bytes() == before
+    assert ratchet.main(["--update", "--allow-increase", "--baseline", str(path)]) == 0
+    assert json.loads(path.read_text())["workloads"]["api_workers"]["http"] == 2
+    changed = {**risen, "sched_pass": {**risen["sched_pass"], "witness": {"ids": [9]}}}
+    monkeypatch.setattr(ratchet, "measure", lambda names=None: changed)
+    after_rise = path.read_bytes()
+    assert ratchet.main(["--update", "--allow-increase", "--baseline", str(path)]) == 1
+    assert path.read_bytes() == after_rise
+    assert ratchet.main(["--update", "--allow-witness-change", "--baseline", str(path)]) == 0
+    assert json.loads(path.read_text())["workloads"]["sched_pass"]["witness"] == {"ids": [9]}
+
+
 def test_a_workload_missing_from_either_side_fails() -> None:
     assert compare(BASE, {"sched_pass": BASE["sched_pass"]}) == [
         "api_workers: in the baseline but not measured"

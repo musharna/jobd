@@ -1,0 +1,26 @@
+arm	metric	estimate	lo95	hi95	p	note
+alt	accuracy_runs	1	1	1	NA	bootstrap over 41 questions, 10000 draws
+alt	questions_right_every_run	1	1	1	NA	bootstrap over 41 questions, 10000 draws
+alt	cost_usd_median	0.0283904	0.0260152	0.0343098	NA	bootstrap over 41 questions, 10000 draws
+alt	cost_usd_mean	0.0378265	0.0310933	0.0464592	NA	bootstrap over 41 questions, 10000 draws
+alt	seconds_median	13.6	11.2	15.8	NA	bootstrap over 41 questions, 10000 draws
+alt	seconds_mean	16.3699	14.1366	19.135	NA	bootstrap over 41 questions, 10000 draws
+alt	tool_calls_mean	2.91057	2.47154	3.46341	NA	bootstrap over 41 questions, 10000 draws
+mcp	accuracy_runs	1	1	1	NA	bootstrap over 41 questions, 10000 draws
+mcp	questions_right_every_run	1	1	1	NA	bootstrap over 41 questions, 10000 draws
+mcp	cost_usd_median	0.021521	0.0201324	0.024202	NA	bootstrap over 41 questions, 10000 draws
+mcp	cost_usd_mean	0.0379042	0.0253361	0.0585968	NA	bootstrap over 41 questions, 10000 draws
+mcp	seconds_median	6.7	6.1	7.7	NA	bootstrap over 41 questions, 10000 draws
+mcp	seconds_mean	8.16423	7.17073	9.31382	NA	bootstrap over 41 questions, 10000 draws
+mcp	tool_calls_mean	1.78049	1.30081	2.37398	NA	bootstrap over 41 questions, 10000 draws
+mcp/alt	seconds_median_ratio	0.492647	0.44	0.589744	NA	bootstrap over 41 questions, 10000 draws
+mcp/alt	cost_usd_median_ratio	0.758038	0.66711	0.808125	NA	bootstrap over 41 questions, 10000 draws
+mcp/alt	cost_usd_mean_ratio	1.00205	0.77767	1.31392	NA	bootstrap over 41 questions, 10000 draws
+mcp-alt	tool_calls_mean_diff	-1.13008	-1.45528	-0.796748	NA	bootstrap over 41 questions, 10000 draws
+mcp_vs_alt	mcnemar_right_every_run	0	NA	NA	1	exact; discordant questions: 0 only mcp right, 0 only alt right
+mcp_vs_alt	sign_test_seconds_median	41	NA	NA	9.09495e-13	per-question medians: mcp lower on 41, higher on 0, tied on 0
+mcp_vs_alt	sign_test_cost_usd_median	29	NA	NA	4.8736e-06	per-question medians: mcp lower on 35, higher on 6, tied on 0
+mcp_vs_alt	sign_test_tool_calls_median	34	NA	NA	1.9465e-08	per-question medians: mcp lower on 37, higher on 3, tied on 1
+bare	questions_right_every_run	0	NA	NA	NA	0 of 41 questions
+prior	questions_right_every_run	0.097561	NA	NA	NA	4 of 41 questions
+best_constant	questions_right_every_run	0.243902	NA	NA	NA	10 of 41 questions

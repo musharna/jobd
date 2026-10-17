@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -99,11 +100,15 @@ def main() -> None:
 
 
 def write_shim(bindir: Path, python: str = sys.executable) -> Path:
-    """Write ``bindir/job``: a shell shim that runs this guard. Put ``bindir``
-    first on PATH and every bare ``job`` goes through ``decide``."""
+    """Write ``bindir/job``: a shell shim that runs a copy of this guard. Put
+    ``bindir`` first on PATH and every bare ``job`` goes through ``decide``.
+    The copy sits beside the shim, so reading the shim does not point an
+    agent at the benchmark's directory."""
     bindir.mkdir(parents=True, exist_ok=True)
+    guard = bindir / "job_guard.py"
+    shutil.copyfile(Path(__file__).resolve(), guard)
     shim = bindir / "job"
-    shim.write_text(f'#!/bin/sh\nexec "{python}" -I "{Path(__file__).resolve()}" "$@"\n')
+    shim.write_text(f'#!/bin/sh\nexec "{python}" -I "{guard}" "$@"\n')
     shim.chmod(0o755)
     return shim
 

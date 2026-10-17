@@ -23,8 +23,11 @@ from; a changed answer stops the sweep (``--allow-drift`` overrides).
 
 Each finished run is appended to ``results.jsonl`` with its score; a rerun
 skips (arm, question, rep) triples already there, so an interrupted sweep
-resumes. Raw stream-json transcripts go to ``runs/<arm>/<qid>-<rep>.jsonl``,
-proxy decisions to ``runs/<arm>/<qid>-<rep>.proxy.jsonl``.
+resumes. Nothing is retried: a timeout or a harness error is recorded as that
+run's row (``exit``), in every arm alike, and ``analyze.py`` counts it invalid.
+Raw stream-json transcripts go to ``runs/<arm>/<qid>-<rep>.jsonl``, proxy
+decisions to ``runs/<arm>/<qid>-<rep>.proxy.jsonl``. All of it lives under
+``ARTIFACTS`` (default ``~/jobd-artifacts/agent_qa``), outside the checkout.
 
     JOBD_URL=... JOBD_API_TOKEN=... uv run python benchmarks/agent_qa/run.py --reps 3 --workers 1
 """
@@ -44,12 +47,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from build_questions import Broker, drift
+from build_questions import ARTIFACTS, Broker, drift
 from job_guard import write_shim
 from readonly_proxy import ReadOnlyProxy
-from score import score
+from score import oracle_reply, score, wrong_reply
 
-HERE = Path(__file__).resolve().parent
 MODEL = "claude-opus-5-5"
 VERSION = "0.5.51"  # latest jobd on PyPI, 2026-10-16
 MCP_SERVER = ["uvx", "--from", f"jobd[mcp]=={VERSION}", "jobd-mcp"]
@@ -138,7 +140,7 @@ class ProxyBypassed(RuntimeError):
 
 
 def run_one(arm: str, q: dict[str, Any], rep: int, upstream: str, token: str) -> dict[str, Any]:
-    out = HERE / "runs" / arm / f"{q['id']}-{rep}.jsonl"
+    out = ARTIFACTS / "runs" / arm / f"{q['id']}-{rep}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     plog = out.with_suffix(".proxy.jsonl")
     plog.unlink(missing_ok=True)
@@ -232,11 +234,32 @@ def prewarm() -> None:
     """Install the pinned release into uv's cache before the clock starts, so
     the first run of each arm is not charged for a download (or timed out
     waiting for the MCP server to start)."""
-    for argv in (
+    subprocess.run(
         ["uvx", "--from", f"jobd[mcp]=={VERSION}", "python", "-c", "import jobd.mcp.server"],
-        [*CLI, "--version"],
-    ):
-        subprocess.run(argv, check=True, capture_output=True, timeout=600)
+        check=True, capture_output=True, timeout=600,
+    )  # fmt: skip
+    # The arms must run the release the README names, whatever uv resolved.
+    got = subprocess.run([*CLI, "--version"], check=True, capture_output=True, text=True,
+                         timeout=600).stdout  # fmt: skip
+    if VERSION not in got:
+        sys.exit(f"the pinned CLI reports {got.strip()!r}, not {VERSION}")
+    got = subprocess.run(
+        ["uvx", "--from", f"jobd[mcp]=={VERSION}", "python", "-c",
+         "import importlib.metadata as m; print(m.version('jobd'))"],
+        check=True, capture_output=True, text=True, timeout=600,
+    ).stdout.strip()  # fmt: skip
+    if got != VERSION:
+        sys.exit(f"the pinned MCP server is jobd {got}, not {VERSION}")
+
+
+def oracle_check(questions: list[dict[str, Any]]) -> None:
+    """Before any run: the key's own answers must all score right and a near
+    miss for each must score wrong, on THIS key. Otherwise the sweep would
+    measure the scorer, not the arms."""
+    bad = [q["id"] for q in questions if score(q, oracle_reply(q))["verdict"] != "right"]
+    bad += [q["id"] for q in questions if score(q, wrong_reply(q))["verdict"] != "wrong"]
+    if bad:
+        sys.exit(f"oracle check failed on {sorted(set(bad))}: fix the key or the scorer first")
 
 
 def main() -> None:
@@ -245,7 +268,7 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--only", default="", help="comma-separated question ids")
-    ap.add_argument("--results", default=str(HERE / "results.jsonl"))
+    ap.add_argument("--results", default=str(ARTIFACTS / "results.jsonl"))
     ap.add_argument("--allow-drift", action="store_true", help="run even if the key drifted")
     ap.add_argument(
         "--rescore",
@@ -253,8 +276,9 @@ def main() -> None:
         help="re-score every stored reply against the current questions.json, run nothing",
     )
     a = ap.parse_args()
-    key = json.loads((HERE / "questions.json").read_text())
+    key = json.loads((ARTIFACTS / "questions.json").read_text())
     questions = key["questions"]
+    oracle_check(questions)
     if a.rescore:
         rescore(Path(a.results), {q["id"]: q for q in questions})
         return
@@ -264,7 +288,13 @@ def main() -> None:
     if a.only:
         keep = set(a.only.split(","))
         questions = [q for q in questions if q["id"] in keep]
-    problems = drift(Broker(upstream, token), {**key, "questions": questions})
+    broker = Broker(upstream, token)
+    live_version = broker.get("/health").get("version")
+    if live_version != key["broker_version"]:
+        # The answers depend on the broker's semantics (routing rule, what a
+        # terminal state is), so a broker upgrade invalidates the key.
+        sys.exit(f"broker is {live_version}, the key was built on {key['broker_version']}")
+    problems = drift(broker, {**key, "questions": questions})
     if problems:
         print("the broker no longer matches questions.json:\n  " + "\n  ".join(problems))
         if not a.allow_drift:

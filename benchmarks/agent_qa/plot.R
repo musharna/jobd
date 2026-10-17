@@ -1,36 +1,44 @@
-# Figures for the agent benchmark, from results.jsonl directly.
+# Figures for the agent benchmark, from analyze.py's scored.jsonl: the sweep
+# rows (rescored, with validity) plus the two no-model baseline rows.
 #
-#   Rscript benchmarks/agent_qa/plot.R [results.jsonl] [outdir]
+#   python benchmarks/agent_qa/analyze.py
+#   Rscript benchmarks/agent_qa/plot.R [scored.jsonl] [outdir]
 #
 # Writes summary.tsv (verdicts, cost and time per setup; verdicts per setup x
 # kind of question) and three figures:
 #   agent_qa.png             right / wrong / declined per setup (the README one)
 #   agent_qa_cost_time.png   cost and seconds per answer, every run
 #   agent_qa_by_category.png right / wrong / declined per setup x kind of question
-# Bars count answers, not questions (questions x runs per setup). Every number
+# Bars count valid answers, not questions (questions x runs per setup; one run
+# per question for a baseline, which has no randomness). Every number
 # on the figures is computed here from the log; nothing is typed in by hand.
 # Green, red and grey mean right, wrong and declined in every figure; setups
 # are told apart by their axis labels, not by colour.
 #
 # summary.tsv and the figures hold only counts, costs and times, so they can
-# be committed; results.jsonl holds the replies (live broker data) and cannot.
+# be committed; scored.jsonl holds the replies (live broker data) and cannot.
 
 library(ggplot2)
 library(jsonlite)
 
 args <- commandArgs(trailingOnly = TRUE)
-results_path <- if (length(args) >= 1) args[1] else "benchmarks/agent_qa/results.jsonl"
+results_path <- if (length(args) >= 1) args[1] else "~/jobd-artifacts/agent_qa/scored.jsonl"
 outdir <- if (length(args) >= 2) args[2] else "benchmarks/agent_qa"
 source("benchmarks/theme_jobd.R")
 
-r <- jsonlite::stream_in(file(results_path), verbose = FALSE)
+all_rows <- jsonlite::stream_in(file(path.expand(results_path)), verbose = FALSE)
+stopifnot(is.logical(all_rows$valid), !anyNA(all_rows$valid))
+r <- all_rows[all_rows$valid, ]
 stopifnot(all(r$verdict %in% names(pal_verdict)))
 
 arm_labels <- c(
+  prior = "Constant guess (no model)",
+  best_constant = "Best constant, fit to the key",
   bare = "Claude alone",
   alt = "Claude + job CLI",
   mcp = "Claude + jobd-mcp"
 )
+model_arms <- c("bare", "alt", "mcp")
 stopifnot(all(r$arm %in% names(arm_labels)))
 r$arm_label <- factor(arm_labels[r$arm], levels = rev(arm_labels))
 r$verdict <- factor(r$verdict, levels = names(pal_verdict))
@@ -45,11 +53,12 @@ cat_labels <- c(
 )
 stopifnot(all(r$category %in% names(cat_labels)))
 
-n_per_arm <- table(r$arm)
+n_per_arm <- table(all_rows$arm[all_rows$arm %in% model_arms])
 stopifnot(length(unique(n_per_arm)) == 1)
 n_ans <- as.numeric(n_per_arm[1])
 n_q <- length(unique(r$qid))
-n_rep <- length(unique(r$rep))
+n_rep <- length(unique(r$rep[r$arm %in% model_arms]))
+n_valid <- table(factor(r$arm, levels = names(arm_labels)))
 
 # Tables first: the figures draw these numbers, and the README quotes them.
 tally <- function(x) {
@@ -63,23 +72,25 @@ tally <- function(x) {
 }
 per_arm <- do.call(rbind, lapply(names(arm_labels), function(a) {
   x <- r[r$arm == a, ]
+  m <- a %in% model_arms # a baseline has no cost, time, tools or broker
   cbind(
-    level = "arm", arm = a, category = "all", tally(x),
-    cost_usd_mean = round(mean(x$cost_usd), 4),
-    cost_usd_median = round(median(x$cost_usd), 4),
-    cost_usd_total = round(sum(x$cost_usd), 2),
-    seconds_mean = round(mean(x$seconds), 1),
-    seconds_median = round(median(x$seconds), 1),
-    seconds_max = max(x$seconds),
-    tool_calls_mean = round(mean(lengths(x$tool_calls)), 2),
-    broker_requests_mean = round(mean(x$broker_requests), 2),
-    refused_requests = sum(lengths(x$refused_requests))
+    level = "arm", arm = a, category = "all",
+    runs = sum(all_rows$arm == a), invalid = sum(all_rows$arm == a & !all_rows$valid), tally(x),
+    cost_usd_mean = if (m) round(mean(x$cost_usd), 4) else NA,
+    cost_usd_median = if (m) round(median(x$cost_usd), 4) else NA,
+    cost_usd_total = if (m) round(sum(x$cost_usd), 2) else NA,
+    seconds_mean = if (m) round(mean(x$seconds), 1) else NA,
+    seconds_median = if (m) round(median(x$seconds), 1) else NA,
+    seconds_max = if (m) max(x$seconds) else NA,
+    tool_calls_mean = if (m) round(mean(lengths(x$tool_calls)), 2) else NA,
+    broker_requests_mean = if (m) round(mean(x$broker_requests), 2) else NA,
+    refused_requests = if (m) sum(lengths(x$refused_requests)) else NA
   )
 }))
 per_cat <- do.call(rbind, lapply(names(arm_labels), function(a) {
   do.call(rbind, lapply(names(cat_labels), function(k) {
     cbind(
-      level = "arm_x_category", arm = a, category = k,
+      level = "arm_x_category", arm = a, category = k, runs = NA, invalid = NA,
       tally(r[r$arm == a & r$category == k, ]),
       cost_usd_mean = NA, cost_usd_median = NA, cost_usd_total = NA,
       seconds_mean = NA, seconds_median = NA, seconds_max = NA, tool_calls_mean = NA,
@@ -109,7 +120,8 @@ legend_counts <- function(v) {
 # Figure 1: one bar per setup, segments = verdict share, labelled with counts.
 counts <- as.data.frame(table(arm_label = r$arm_label, verdict = r$verdict))
 counts <- counts[counts$Freq > 0, ]
-counts$share <- counts$Freq / n_ans
+counts$share <- counts$Freq /
+  as.numeric(n_valid[names(arm_labels)[match(counts$arm_label, arm_labels)]])
 p1 <- ggplot(counts, aes(x = share, y = arm_label, fill = verdict)) +
   geom_col(width = 0.62, position = position_stack(reverse = TRUE)) +
   geom_text(
@@ -122,23 +134,26 @@ p1 <- ggplot(counts, aes(x = share, y = arm_label, fill = verdict)) +
   # setup in the order the title names.
   scale_fill_manual(
     values = pal_verdict, labels = legend_counts, drop = TRUE,
-    name = "Answers (alone / job CLI / jobd-mcp):"
+    name = "Answers (constant / best constant / alone / job CLI / jobd-mcp):"
   ) +
   guides(fill = guide_legend(title.position = "top", title.hjust = 0.5)) +
   scale_x_continuous(labels = scales::percent, expand = c(0, 0)) +
   labs(
-    x = sprintf("Share of %d answers per setup", n_ans), y = NULL,
+    x = sprintf("Share of answers: %d per Claude setup, %d per no-model baseline", n_ans, n_q),
+    y = NULL,
     title = "Questions about a live jobd broker: right, wrong or declined",
     subtitle = paste0(setup_note, "\n", key_note)
   ) +
   theme_jobd(base_size = 13) +
   theme(panel.grid.major.y = element_blank(), plot.margin = margin(8, 24, 8, 8))
-ggsave(file.path(outdir, "agent_qa.png"), p1, width = 11, height = 4.2, dpi = 200, bg = "white")
+ggsave(file.path(outdir, "agent_qa.png"), p1, width = 11, height = 5.2, dpi = 200, bg = "white")
 
 # Figure 2: cost and seconds per answer, one point per run, box over them.
+mr <- r[r$arm %in% model_arms, ]
+mr$arm_label <- droplevels(mr$arm_label)
 long <- rbind(
-  data.frame(arm_label = r$arm_label, metric = "Cost per answer (US$, log scale)", value = r$cost_usd),
-  data.frame(arm_label = r$arm_label, metric = "Seconds per answer (log scale)", value = r$seconds)
+  data.frame(arm_label = mr$arm_label, metric = "Cost per answer (US$, log scale)", value = mr$cost_usd),
+  data.frame(arm_label = mr$arm_label, metric = "Seconds per answer (log scale)", value = mr$seconds)
 )
 p2 <- ggplot(long, aes(x = value, y = arm_label)) +
   geom_boxplot(width = 0.55, outlier.shape = NA, fill = "white", colour = "grey20") +
@@ -164,11 +179,11 @@ p2 <- ggplot(long, aes(x = value, y = arm_label)) +
 ggsave(file.path(outdir, "agent_qa_cost_time.png"), p2, width = 12, height = 4.2, dpi = 200, bg = "white")
 
 # Figure 3: verdicts per setup x kind of question; strips name the counts.
-first <- r[r$arm == names(arm_labels)[1], ]
+first <- r[r$arm == "prior", ]
 n_cat <- vapply(names(cat_labels), function(k) length(unique(first$qid[first$category == k])), 0)
 present <- names(cat_labels)[n_cat > 0]
 strip <- setNames(
-  sprintf("%s (%d questions × %d runs)", cat_labels[present], n_cat[present], n_rep),
+  sprintf("%s (%d questions)", cat_labels[present], n_cat[present]),
   present
 )
 r$cat_strip <- factor(strip[r$category], levels = strip)
@@ -187,13 +202,15 @@ p3 <- ggplot(cc, aes(x = Freq, y = arm_label, fill = verdict)) +
   scale_x_continuous(expand = c(0, 0)) +
   labs(
     x = "Answers", y = NULL, title = "Right, wrong or declined, by kind of question",
-    subtitle = setup_note
+    subtitle = paste0(
+      setup_note, "\nThe two baselines answer each question once, with no model."
+    )
   ) +
   theme_jobd(base_size = 12) +
   theme(
     panel.grid.major.y = element_blank(), strip.text = element_text(hjust = 0, face = "bold"),
     plot.margin = margin(8, 24, 8, 8)
   )
-ggsave(file.path(outdir, "agent_qa_by_category.png"), p3, width = 9, height = 9.5, dpi = 200, bg = "white")
+ggsave(file.path(outdir, "agent_qa_by_category.png"), p3, width = 9, height = 13, dpi = 200, bg = "white")
 
 print(per_arm)

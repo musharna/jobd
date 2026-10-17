@@ -119,3 +119,41 @@ def score(question: dict[str, Any], reply: str) -> dict[str, Any]:
     known = set(truth.get("known_names", {}).values())
     unknown_host = not right and any(n not in known for n in names)
     return {"verdict": "right" if right else "wrong", "value": value, "unknown_host": unknown_host}
+
+
+def oracle_reply(question: dict[str, Any]) -> str:
+    """The key's own answer as a reply: the positive control. Every one must
+    score right, or the scorer cannot recognise a correct answer."""
+    t, c = question["truth"], question["category"]
+    value = {
+        "exit_code": lambda: str(t["exit_code"]),
+        "host": lambda: t["names"][0],
+        "wall_time": lambda: str(round(t["seconds"])),
+        "project_failures": lambda: ", ".join(str(i) for i in t["job_ids"]),
+        "log_line": lambda: t["line"],
+        "fleet": lambda: ", ".join(t["hosts"]),
+    }[c]()
+    return f"Looked it up.\nANSWER: {value}"
+
+
+def wrong_reply(question: dict[str, Any]) -> str:
+    """A near miss for every kind: the negative control. Every one must score
+    wrong, or the scorer is too lenient to tell a miss from a hit."""
+    t, c = question["truth"], question["category"]
+    if c == "exit_code":
+        value = str(t["exit_code"] + 1)
+    elif c == "host":
+        others = sorted(set(t["known_names"].values()) - {t["names"][0]})
+        value = others[0] if others else "no-such-host"
+    elif c == "wall_time":
+        value = str(round(t["seconds"]) + 3)
+    elif c == "project_failures":
+        value = ", ".join(str(i) for i in [*t["job_ids"], max(t["job_ids"]) + 1])
+    elif c == "log_line":
+        value = t["line"] + " (cont.)"
+    elif c == "fleet":
+        extra = sorted(set(t["known_names"].values()) - set(t["hosts"]))
+        value = ", ".join([*t["hosts"], extra[0]] if extra else t["hosts"][:-1] or ["none"])
+    else:
+        raise ValueError(f"unknown category {c!r}")
+    return f"Looked it up.\nANSWER: {value}"
