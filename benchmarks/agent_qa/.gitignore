@@ -1,0 +1,5 @@
+# Private: drawn from, and answered by, the live broker (project names,
+# job ids, log lines). Not for a public repo.
+questions.json
+results.jsonl
+runs/
