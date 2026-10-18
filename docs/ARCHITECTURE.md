@@ -256,3 +256,23 @@ Recorded because "why isn't there an X" is a fair question, and the answer is us
   is a verdict the broker already reached; a second run would repeat it or hide a broken
   host. There is still no backoff *queue* — a retried job is an ordinary queued job with
   a `not_before`.
+
+---
+
+## Diagram source
+
+Mermaid source for the README's architecture diagram ([`assets/architecture.svg`](assets/architecture.svg)):
+
+```mermaid
+flowchart TD
+    CLI["job CLI"]:::client --> B
+    MCP["jobd-mcp<br/>MCP tools"]:::client --> B
+    API["HTTP · SSE"]:::client --> B
+    B["<b>jobd broker</b> — FastAPI<br/>queue · matcher · priorities · SQLite"]:::broker
+    B <-->|poll · dispatch| WA["worker A<br/>24 GB GPU"]:::worker
+    B <-->|poll · dispatch| WB["worker B<br/>8 GB GPU"]:::worker
+    B <-->|poll · dispatch| WC["worker C<br/>CPU-only"]:::worker
+    classDef client fill:#1f2937,stroke:#4b5563,color:#e5e7eb;
+    classDef broker fill:#0e7490,stroke:#155e75,color:#ecfeff;
+    classDef worker fill:#14532d,stroke:#166534,color:#dcfce7;
+```

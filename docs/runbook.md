@@ -241,6 +241,7 @@ entirely. Two knobs remove the choice:
 - **`JOBD_JOB_RETENTION_DAYS`** (default **0** = keep forever) — delete the terminal
   **row** itself (and its log) after N days. Rows are cheap and get more useful
   with age, so this stays opt-in. Emits `jobs_pruned`.
+  Pruning old terminal parents is safe for any still-pending dependents.
 
 A job whose log was pruned reports `pruned: true` from `/jobs/{id}/output`, and
 `job logs` says so explicitly — a pruned log must never be confused with "the
