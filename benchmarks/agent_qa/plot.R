@@ -105,10 +105,8 @@ write.table(rbind(per_arm, per_cat), file.path(outdir, "summary.tsv"),
 )
 
 setup_note <- sprintf("Claude Opus 5.5 in Claude Code, %d questions × %d runs.", n_q, n_rep)
-key_note <- paste0(
-  "Answers checked against the same broker the tools read, so this measures\n",
-  "whether a lookup is carried out correctly, not whether the broker is right."
-)
+# The caveat that answers are checked against the broker the tools read is in
+# the README text, not on the figure, where it rendered too small to read.
 legend_counts <- function(v) {
   sprintf("%s (%s)", v, vapply(v, function(k) {
     paste(vapply(names(arm_labels), function(a) {
@@ -143,17 +141,13 @@ p1 <- ggplot(counts, aes(x = share, y = arm_label, fill = verdict)) +
     x = sprintf("Share of answers: %d per Claude setup, %d per no-model baseline", n_ans, n_q),
     y = NULL,
     title = "Questions about a live jobd broker: right, wrong or declined",
-    subtitle = setup_note,
-    caption = key_note
+    subtitle = setup_note
   ) +
   theme_jobd(base_size = 13) +
-  theme(
-    panel.grid.major.y = element_blank(), plot.margin = margin(8, 24, 8, 8),
-    plot.caption = element_text(hjust = 0, colour = "grey30"), plot.caption.position = "plot"
-  )
+  theme(panel.grid.major.y = element_blank(), plot.margin = margin(8, 24, 8, 8))
 # 8.5 in wide, not 11: the README shows this figure at 780 px, where an 11 in
 # figure drew the axis and legend text at about 10 px. At 8.5 in it is about 13.
-ggsave(file.path(outdir, "agent_qa.png"), p1, width = 8.5, height = 5.6, dpi = 200, bg = "white")
+ggsave(file.path(outdir, "agent_qa.png"), p1, width = 8.5, height = 5.2, dpi = 200, bg = "white")
 
 # Figure 2: cost and seconds per answer, one point per run, box over them.
 mr <- r[r$arm %in% model_arms, ]

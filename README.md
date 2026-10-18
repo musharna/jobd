@@ -1,8 +1,8 @@
 # jobd
 
-jobd is a job broker with an MCP server that lets AI agents submit, route and babysit jobs on a few machines of your own. Like [task-spooler](https://manpages.ubuntu.com/manpages/noble/man1/tsp.1.html) or [pueue](https://github.com/Nukesor/pueue), but across all your machines on [Tailscale](https://tailscale.com/) or a LAN: each job lands on a worker with the VRAM free, survives across sessions, and can be preempted cleanly, with no cloud, Kubernetes or Slurm.
+jobd is a job broker with an MCP server that lets AI agents submit, route and babysit jobs on a few machines of your own. Like [task-spooler](https://manpages.ubuntu.com/manpages/noble/man1/tsp.1.html) or [pueue](https://github.com/Nukesor/pueue), but across all your machines on [Tailscale](https://tailscale.com/) or a LAN, routing each job to a worker with the VRAM free, with no cloud, Kubernetes or Slurm.
 
-[![CI](https://github.com/musharna/jobd/actions/workflows/ci.yml/badge.svg)](https://github.com/musharna/jobd/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/musharna/jobd/ci.yml?branch=main&label=CI)](https://github.com/musharna/jobd/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/jobd)](https://pypi.org/project/jobd/)
 [![Python](https://img.shields.io/pypi/pyversions/jobd)](https://pypi.org/project/jobd/)
 [![License](https://img.shields.io/pypi/l/jobd)](https://github.com/musharna/jobd/blob/main/LICENSE)
