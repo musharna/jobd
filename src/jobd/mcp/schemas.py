@@ -182,6 +182,14 @@ LIST_INPUT = {
             "maximum": 200,
             "description": "Max jobs returned (newest first; clamped to [1,200]). `counts` still covers every job matching the filters; a `truncated` field reports how many were cut.",
         },
+        "finished_after": {
+            "type": "string",
+            "description": "Only jobs with finished_at at or after this: ISO-8601 (no offset = UTC) or relative (2h, 3d, 1w = that long ago). With a window and no state, every terminal state is included and counts cover the window exactly.",
+        },
+        "finished_before": {
+            "type": "string",
+            "description": "Only jobs with finished_at before this (exclusive); same formats as finished_after.",
+        },
     },
 }
 

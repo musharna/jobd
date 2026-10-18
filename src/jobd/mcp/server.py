@@ -73,7 +73,7 @@ _TOOLS = [
     ),
     (
         "jobd_list",
-        "List jobs on the broker with per-state counts. Defaults to the active set (queued/assigned/running); filter by state (e.g. ['failed']) or project to find past runs. Each row is a compact summary: job_id, project, state, host, exit_code, queued_at, started_at — call jobd_status for a job's full record. Use to answer 'what is running / queued right now?' or to locate a job id you've lost.",
+        "List jobs on the broker with per-state counts. Defaults to the active set (queued/assigned/running); filter by state (e.g. ['failed']), project, or a finished_at window (finished_after/finished_before) to find past runs. Each row is a compact summary: job_id, project, state, host, exit_code, queued_at, started_at, finished_at, duration_s — call jobd_status for a job's full record. Use to answer 'what is running / queued right now?', 'what failed overnight?', or to locate a job id you've lost.",
         LIST_INPUT,
         t.jobd_list,
         "job",
@@ -200,6 +200,9 @@ def _log_call(name: str, arguments: dict | None, error_kind: str | None, ms: flo
 _INSTRUCTIONS = """\
 Cross-session job queue.
 
+Tool names below are written bare (jobd_list); your client lists each tool
+under its own prefix (e.g. mcp__jobd__jobd_list), so call it by that name.
+
 WHEN TO USE THIS SERVER:
 
 Heavy / long-running compute (use when user wants to launch work that should outlive the current session):
@@ -316,9 +319,11 @@ def build_server(client: JobdClient | None = None) -> Server:
                 content=[types.TextContent(type="text", text=str(e))],
                 is_error=True,
             )
-        except InvalidArguments as e:
-            # Raised by schema validation BEFORE the tool runs, so it is
-            # certainly the caller's arguments. Same shape as a broker 422.
+        except (InvalidArguments, t.ArgumentError) as e:
+            # Raised by schema validation BEFORE the tool runs, or by a tool
+            # that found a schema-valid value unusable (an unparseable
+            # timestamp): certainly the caller's arguments. Same shape as a
+            # broker 422.
             error_kind = "invalid_arguments"
             return _error_result(error_kind, str(e), e.hint)
         except Exception as e:  # noqa: BLE001 — the last-resort classification
