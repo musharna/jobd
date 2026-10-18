@@ -9,7 +9,10 @@ under test:
   ``relpath:qualname``. Comprehension frames are skipped: Python 3.11 runs
   them as functions and 3.12 inlines them (PEP 709), so counting them would
   make the totals depend on the interpreter. Generators and coroutines count
-  once per entry, not per resume (``_entry_offset``).
+  once per entry, not per resume (``_entry_offset``): resumptions differed
+  across Python versions, and on CI's 3.12.3 one fewer generator resume
+  failed the gate. Counted per entry, with the baseline rebuilt on 3.12.3,
+  the counts are identical on 3.11, 3.12.3, 3.12.13, 3.13 and 3.14.
 - ``matcher_calls``: the subset of ``py_calls`` in ``src/jobd/matcher.py``,
   i.e. matcher evaluations.
 - ``sql``: statements the broker sends to SQLite (SQLAlchemy
