@@ -124,6 +124,12 @@ storing a tailnet auth key and an SSH key in GitHub and letting CI reach into th
 homelab. Nothing in this path needs a secret, and nothing outside the network can
 trigger a deploy.
 
+These self-update scripts are the only parts of jobd that go online; otherwise the
+broker and workers talk only to each other and to your clients.
+`scripts/update-worker.sh` (which `job fleet add` installs on a timer) installs from
+PyPI, and `scripts/deploy-broker.sh` queries the GitHub API and pulls the image from
+GHCR.
+
 ```bash
 # One-time install on the broker host:
 sudo cp scripts/deploy-broker.sh /usr/local/bin/jobd-deploy && sudo chmod +x /usr/local/bin/jobd-deploy
