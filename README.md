@@ -232,6 +232,10 @@ Or point any other MCP client at it:
 
 Now an agent can "run this overnight," check on it next session, and route GPU work through the broker instead of colliding on a shared card. The `examples/claude-code-hooks/` directory has optional [Claude Code](https://docs.claude.com/en/docs/claude-code) hooks that _nudge_ (or hard-block) an agent toward submitting heavy commands through jobd — including a VRAM-aware GPU guard with `# NO_GPU` / `# CONCURRENT_OK` / `# VRAM=NGB` override markers.
 
+## Does it help?
+
+We asked Claude Opus 5.5 41 read-only questions about a live broker, 3 times each, with the `job` CLI and with jobd-mcp. Both got all 41 right in every run, so accuracy does not separate them (McNemar p = 1); the questions are too easy to rank the two. With the server, the median answer took 6.7 s against 13.6 s (ratio 0.49, 95% CI 0.44 to 0.59) and used 1.1 fewer tool calls on average. Median cost was 24% lower, but mean cost was the same. Method, controls and limitations: [benchmarks/agent_qa](https://github.com/musharna/jobd/blob/main/benchmarks/agent_qa/README.md).
+
 ## Configuration
 
 Three optional YAML files under `JOBD_CONFIG_DIR` (default `/app/config`, the Docker image's path — set it when you run from pip). Example files live in this repo's `config/` directory; they are not included in the pip package, and `docker-compose.yml` mounts them into the container:
