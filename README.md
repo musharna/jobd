@@ -234,7 +234,7 @@ Now an agent can "run this overnight," check on it next session, and route GPU w
 
 ## Does it help?
 
-We asked Claude Opus 5.5 41 read-only questions about a live broker, 3 times each, with the `job` CLI and with jobd-mcp. Both got all 41 right in every run, so accuracy does not separate them (McNemar p = 1); the questions are too easy to rank the two. With the server, the median answer took 6.7 s against 13.6 s (ratio 0.49, 95% CI 0.44 to 0.59) and used 1.1 fewer tool calls on average. Median cost was 24% lower, but mean cost was the same. Method, controls and limitations: [benchmarks/agent_qa](https://github.com/musharna/jobd/blob/main/benchmarks/agent_qa/README.md).
+Not on accuracy, so far. On 38 harder read-only questions about a live broker (time windows, totals over many jobs, the event record, logs), Claude Opus 5.5 got 38 right in all 3 runs with jobd-mcp and 37 with the `job` CLI. That is a pre-registered tie (McNemar p = 1). With the server the median answer cost $0.032 against $0.164 (ratio 0.20, 95% CI 0.15 to 0.28) and took 8.8 s against 53 s, cheaper and faster on every question. Those were secondary endpoints, measured on an unreleased commit that adds a `finished_at` window to `jobd_list`. An earlier, easier set (41 questions) had both at 41 of 41. Method, controls and limitations: [benchmarks/agent_qa](https://github.com/musharna/jobd/blob/main/benchmarks/agent_qa/README.md).
 
 ## Configuration
 

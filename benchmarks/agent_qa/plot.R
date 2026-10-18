@@ -38,8 +38,14 @@ arm_labels <- c(
   alt = "Claude + job CLI",
   mcp = "Claude + jobd-mcp"
 )
-model_arms <- c("bare", "alt", "mcp")
+arm_short <- c(
+  prior = "constant", best_constant = "best constant", bare = "alone",
+  alt = "job CLI", mcp = "jobd-mcp"
+)
 stopifnot(all(r$arm %in% names(arm_labels)))
+# The 2026-10-18 re-run has no bare arm: keep only the setups in this file.
+arm_labels <- arm_labels[names(arm_labels) %in% unique(all_rows$arm)]
+model_arms <- intersect(c("bare", "alt", "mcp"), names(arm_labels))
 r$arm_label <- factor(arm_labels[r$arm], levels = rev(arm_labels))
 r$verdict <- factor(r$verdict, levels = names(pal_verdict))
 
@@ -49,7 +55,16 @@ cat_labels <- c(
   wall_time = "Run time of a job",
   project_failures = "A project's failures on one day",
   log_line = "Last line of a job's log",
-  fleet = "Routing and worker capabilities"
+  fleet = "Routing and worker capabilities",
+  # Version 2 (build_hard.py)
+  window_count = "Jobs of a project and state finished in a window",
+  window_ids = "Every failed job in a window",
+  busiest_host = "Host that ran most of a project's jobs in a window",
+  busiest_project = "Project with the most jobs in a state in a window",
+  total_runtime = "Summed run time of a project's jobs in a window",
+  event_count = "A job's sweep_warning events",
+  queue_wait = "A job's queue wait, from its event",
+  log_join = "Which failed job in a window has this last log line"
 )
 stopifnot(all(r$category %in% names(cat_labels)))
 
@@ -88,7 +103,7 @@ per_arm <- do.call(rbind, lapply(names(arm_labels), function(a) {
   )
 }))
 per_cat <- do.call(rbind, lapply(names(arm_labels), function(a) {
-  do.call(rbind, lapply(names(cat_labels), function(k) {
+  do.call(rbind, lapply(intersect(names(cat_labels), unique(r$category)), function(k) {
     cbind(
       level = "arm_x_category", arm = a, category = k, runs = NA, invalid = NA,
       tally(r[r$arm == a & r$category == k, ]),
@@ -134,7 +149,7 @@ p1 <- ggplot(counts, aes(x = share, y = arm_label, fill = verdict)) +
   # setup in the order the title names.
   scale_fill_manual(
     values = pal_verdict, labels = legend_counts, drop = TRUE,
-    name = "Answers (constant / best constant / alone / job CLI / jobd-mcp):"
+    name = sprintf("Answers (%s):", paste(arm_short[names(arm_labels)], collapse = " / "))
   ) +
   guides(fill = guide_legend(title.position = "top", title.hjust = 0.5)) +
   scale_x_continuous(labels = scales::percent, expand = c(0, 0)) +
@@ -181,6 +196,7 @@ ggsave(file.path(outdir, "agent_qa_cost_time.png"), p2, width = 12, height = 4.2
 # Figure 3: verdicts per setup x kind of question; strips name the counts.
 first <- r[r$arm == "prior", ]
 n_cat <- vapply(names(cat_labels), function(k) length(unique(first$qid[first$category == k])), 0)
+names(n_cat) <- names(cat_labels)
 present <- names(cat_labels)[n_cat > 0]
 strip <- setNames(
   sprintf("%s (%d questions)", cat_labels[present], n_cat[present]),

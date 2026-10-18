@@ -1,0 +1,5 @@
+arm	runs	valid	invalid	transcripts_scanned	leak_hits	reasons
+alt	114	114	0	114	0	none
+mcp	114	114	0	114	0	none
+prior	38	38	0	0	0	no model: scorer only
+best_constant	38	38	0	0	0	no model: scorer only
