@@ -119,11 +119,11 @@ write.table(rbind(per_arm, per_cat), file.path(outdir, "summary.tsv"),
   sep = "\t", quote = FALSE, row.names = FALSE, na = "NA"
 )
 
+# Name only the verdicts that occur: the 2026-10-18 re-run has no declines.
+verdict_words <- if (any(r$verdict == "declined")) "right, wrong or declined" else "right or wrong"
 setup_note <- sprintf("Claude Opus 5.5 in Claude Code, %d questions × %d runs.", n_q, n_rep)
-key_note <- paste0(
-  "Answers checked against the same broker the tools read, so this measures\n",
-  "whether a lookup is carried out correctly, not whether the broker is right."
-)
+# The caveat that answers are checked against the broker the tools read is in
+# the README text, not on the figure, where it rendered too small to read.
 legend_counts <- function(v) {
   sprintf("%s (%s)", v, vapply(v, function(k) {
     paste(vapply(names(arm_labels), function(a) {
@@ -151,17 +151,20 @@ p1 <- ggplot(counts, aes(x = share, y = arm_label, fill = verdict)) +
     values = pal_verdict, labels = legend_counts, drop = TRUE,
     name = sprintf("Answers (%s):", paste(arm_short[names(arm_labels)], collapse = " / "))
   ) +
-  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5)) +
+  # Two rows: at 8.5 in the three legend keys no longer fit on one.
+  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5, nrow = 2, byrow = TRUE)) +
   scale_x_continuous(labels = scales::percent, expand = c(0, 0)) +
   labs(
     x = sprintf("Share of answers: %d per Claude setup, %d per no-model baseline", n_ans, n_q),
     y = NULL,
-    title = "Questions about a live jobd broker: right, wrong or declined",
-    subtitle = paste0(setup_note, "\n", key_note)
+    title = paste0("Questions about a live jobd broker: ", verdict_words),
+    subtitle = setup_note
   ) +
   theme_jobd(base_size = 13) +
   theme(panel.grid.major.y = element_blank(), plot.margin = margin(8, 24, 8, 8))
-ggsave(file.path(outdir, "agent_qa.png"), p1, width = 11, height = 5.2, dpi = 200, bg = "white")
+# 8.5 in wide, not 11: the README shows this figure at 780 px, where an 11 in
+# figure drew the axis and legend text at about 10 px. At 8.5 in it is about 13.
+ggsave(file.path(outdir, "agent_qa.png"), p1, width = 8.5, height = 5.2, dpi = 200, bg = "white")
 
 # Figure 2: cost and seconds per answer, one point per run, box over them.
 mr <- r[r$arm %in% model_arms, ]
@@ -217,7 +220,8 @@ p3 <- ggplot(cc, aes(x = Freq, y = arm_label, fill = verdict)) +
   scale_fill_manual(values = pal_verdict, name = NULL, drop = TRUE) +
   scale_x_continuous(expand = c(0, 0)) +
   labs(
-    x = "Answers", y = NULL, title = "Right, wrong or declined, by kind of question",
+    x = "Answers", y = NULL,
+    title = paste0(toupper(substr(verdict_words, 1, 1)), substring(verdict_words, 2), ", by kind of question"),
     subtitle = paste0(
       setup_note, "\nThe two baselines answer each question once, with no model."
     )
