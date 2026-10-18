@@ -1,0 +1,849 @@
+{
+ "python_roots": [
+  "src/jobd",
+  "src/job_cli"
+ ],
+ "workloads": {
+  "api_events": {
+   "detail": {
+    "http": {
+     "GET /events": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/routes/events.py:build_router.<locals>.get_events": 1,
+     "jobd/broker/routes/events.py:build_router.<locals>.get_events.<locals>._match": 128,
+     "jobd/events.py:_iter_lines_reverse": 1,
+     "jobd/events.py:read_events": 1
+    },
+    "sql": {}
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 136,
+   "sql": 0,
+   "witness": {
+    "kinds": "555bcbbefc9f33a7",
+    "n": 128
+   }
+  },
+  "api_heartbeat": {
+   "detail": {
+    "http": {
+     "GET /workers": 1,
+     "POST /heartbeat": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 2,
+     "jobd/auth.py:_acl_disabled": 2,
+     "jobd/auth.py:_check_token": 2,
+     "jobd/auth.py:_token_required": 2,
+     "jobd/auth.py:require_token": 2,
+     "jobd/broker/adopt.py:adopted_jobs_for_host": 1,
+     "jobd/broker/routes/workers.py:build_router.<locals>.heartbeat": 1,
+     "jobd/broker/routes/workers.py:build_router.<locals>.list_workers": 1,
+     "jobd/models.py:WorkerInfo._ser_dt": 4,
+     "jobd/models.py:_as_utc_iso": 4
+    },
+    "sql": {
+     "SELECT jobs": 1,
+     "SELECT workers": 2,
+     "UPDATE workers": 1
+    }
+   },
+   "http": 2,
+   "matcher_calls": 0,
+   "py_calls": 21,
+   "sql": 4,
+   "witness": {
+    "host": "charlie",
+    "state": "online"
+   }
+  },
+  "api_job_output": {
+   "detail": {
+    "http": {
+     "GET /jobs/{id}/output": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/joblog.py:job_log_path": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.get_output": 1
+    },
+    "sql": {
+     "SELECT jobs": 1
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 7,
+   "sql": 1,
+   "witness": {
+    "size": 114,
+    "tail": "d6b923ebab0b1f43"
+   }
+  },
+  "api_job_status": {
+   "detail": {
+    "http": {
+     "GET /jobs/{id}": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 1,
+     "jobd/broker/jobinfo.py:_presentable_warning": 1,
+     "jobd/broker/jobinfo.py:_redact_env": 1,
+     "jobd/broker/jobinfo.py:_to_info": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.get_job": 1,
+     "jobd/estimator.py:make_predict_cache": 1,
+     "jobd/models.py:JobInfo._ser_dt": 3,
+     "jobd/models.py:_as_utc_iso": 3
+    },
+    "sql": {
+     "SELECT jobs": 3
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 17,
+   "sql": 3,
+   "witness": {
+    "exit": 0,
+    "id": 32,
+    "state": "completed",
+    "worker": "charlie"
+   }
+  },
+  "api_list_failed_for_project": {
+   "detail": {
+    "http": {
+     "GET /jobs": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 1,
+     "jobd/broker/jobinfo.py:_presentable_warning": 2,
+     "jobd/broker/jobinfo.py:_redact_env": 2,
+     "jobd/broker/jobinfo.py:_to_info": 2,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.list_jobs": 1,
+     "jobd/config.py:canonical_project_name": 1,
+     "jobd/estimator.py:make_predict_cache": 1,
+     "jobd/models.py:JobInfo._ser_dt": 6,
+     "jobd/models.py:_as_utc_iso": 6
+    },
+    "sql": {
+     "SELECT jobs": 4
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 27,
+   "sql": 4,
+   "witness": {
+    "ids": [
+     6,
+     12
+    ]
+   }
+  },
+  "api_list_jobs": {
+   "detail": {
+    "http": {
+     "GET /jobs": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 1,
+     "jobd/broker/jobinfo.py:_populate_eta": 12,
+     "jobd/broker/jobinfo.py:_presentable_warning": 40,
+     "jobd/broker/jobinfo.py:_redact_env": 40,
+     "jobd/broker/jobinfo.py:_to_info": 40,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.list_jobs": 1,
+     "jobd/ctest_eta.py:predict_ctest": 12,
+     "jobd/estimator.py:WallPrediction.basis": 12,
+     "jobd/estimator.py:_PredictCache.get": 76,
+     "jobd/estimator.py:_quantile": 4,
+     "jobd/estimator.py:cmd_head": 94,
+     "jobd/estimator.py:make_predict_cache": 1,
+     "jobd/estimator.py:predict_wall": 2,
+     "jobd/estimator.py:queue_start_eta": 12,
+     "jobd/estimator.py:queue_start_eta.<locals>.shares_pool": 132,
+     "jobd/models.py:JobInfo._ser_dt": 120,
+     "jobd/models.py:_as_utc_iso": 120
+    },
+    "sql": {
+     "SELECT jobs": 6
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 724,
+   "sql": 6,
+   "witness": {
+    "ids": "4077514da5d5d808",
+    "n": 40
+   }
+  },
+  "api_submit": {
+   "detail": {
+    "http": {
+     "POST /submit": 1
+    },
+    "py_calls": {
+     "jobd/app.py:build_app.<locals>._wake_dispatchers": 1,
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/events.py:_emit_event": 1,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 1,
+     "jobd/broker/jobinfo.py:_populate_eta": 1,
+     "jobd/broker/jobinfo.py:_presentable_warning": 1,
+     "jobd/broker/jobinfo.py:_redact_env": 1,
+     "jobd/broker/jobinfo.py:_to_info": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.submit": 1,
+     "jobd/broker/scheduling.py:_build_snapshots": 2,
+     "jobd/broker/scheduling.py:_serialization_warning": 1,
+     "jobd/broker/submit.py:submit_job": 1,
+     "jobd/config.py:_merge_defaults": 1,
+     "jobd/config.py:canonical_project_name": 1,
+     "jobd/config.py:resolve_effective_config": 1,
+     "jobd/config.py:resolve_priority": 1,
+     "jobd/config.py:resolve_project_defaults": 1,
+     "jobd/ctest_eta.py:predict_ctest": 1,
+     "jobd/estimator.py:ColdStart.basis": 1,
+     "jobd/estimator.py:_PredictCache.get": 1,
+     "jobd/estimator.py:cmd_head": 4,
+     "jobd/estimator.py:make_predict_cache": 1,
+     "jobd/estimator.py:predict_wall": 1,
+     "jobd/events.py:_maybe_rotate": 1,
+     "jobd/events.py:append_event": 1,
+     "jobd/events.py:max_bytes": 1,
+     "jobd/matcher.py:_covers": 1,
+     "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:_effective_vram_gb": 2,
+     "jobd/matcher.py:_selectors_match": 9,
+     "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 7,
+     "jobd/matcher.py:cwd_routability": 1,
+     "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:eligible_workers": 2,
+     "jobd/matcher.py:gpu_contention_warning": 1,
+     "jobd/matcher.py:mnt_c_pin_error": 1,
+     "jobd/matcher.py:submit_preflight": 1,
+     "jobd/matcher.py:submit_preflight.<locals>.<genexpr>": 1,
+     "jobd/models.py:JobInfo._ser_dt": 3,
+     "jobd/models.py:JobSubmit._check_sweep": 1,
+     "jobd/models.py:_as_utc_iso": 3
+    },
+    "sql": {
+     "INSERT jobs": 1,
+     "SELECT jobs": 3,
+     "SELECT workers": 2
+    }
+   },
+   "http": 1,
+   "matcher_calls": 28,
+   "py_calls": 69,
+   "sql": 6,
+   "witness": {
+    "id": 41,
+    "project": "project-a",
+    "state": "queued"
+   }
+  },
+  "api_submit_dry_run": {
+   "detail": {
+    "http": {
+     "POST /submit": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.submit": 1,
+     "jobd/broker/scheduling.py:_build_snapshots": 2,
+     "jobd/broker/scheduling.py:_serialization_warning": 1,
+     "jobd/broker/submit.py:submit_job": 1,
+     "jobd/config.py:_merge_defaults": 1,
+     "jobd/config.py:canonical_project_name": 1,
+     "jobd/config.py:resolve_effective_config": 1,
+     "jobd/config.py:resolve_priority": 1,
+     "jobd/config.py:resolve_project_defaults": 1,
+     "jobd/matcher.py:_covers": 1,
+     "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:_effective_vram_gb": 2,
+     "jobd/matcher.py:_selectors_match": 13,
+     "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 10,
+     "jobd/matcher.py:cwd_routability": 1,
+     "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:eligible_workers": 3,
+     "jobd/matcher.py:gpu_contention_warning": 1,
+     "jobd/matcher.py:mnt_c_pin_error": 1,
+     "jobd/matcher.py:submit_preflight": 1,
+     "jobd/matcher.py:submit_preflight.<locals>.<genexpr>": 1,
+     "jobd/models.py:JobSubmit._check_sweep": 1
+    },
+    "sql": {
+     "SELECT workers": 2
+    }
+   },
+   "http": 1,
+   "matcher_calls": 36,
+   "py_calls": 52,
+   "sql": 2,
+   "witness": {
+    "state": "dry-run",
+    "would_route_to": [
+     "alpha",
+     "charlie"
+    ]
+   }
+  },
+  "api_workers": {
+   "detail": {
+    "http": {
+     "GET /workers": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/routes/workers.py:build_router.<locals>.list_workers": 1,
+     "jobd/models.py:WorkerInfo._ser_dt": 4,
+     "jobd/models.py:_as_utc_iso": 4
+    },
+    "sql": {
+     "SELECT workers": 1
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 14,
+   "sql": 1,
+   "witness": [
+    [
+     "alpha",
+     "online",
+     6
+    ],
+    [
+     "bravo",
+     "online",
+     5
+    ],
+    [
+     "charlie",
+     "online",
+     5
+    ],
+    [
+     "delta",
+     "online",
+     2
+    ]
+   ]
+  },
+  "mcp_jobd_events": {
+   "detail": {
+    "http": {
+     "GET /events": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/routes/events.py:build_router.<locals>.get_events": 1,
+     "jobd/broker/routes/events.py:build_router.<locals>.get_events.<locals>._match": 128,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 1,
+     "jobd/client.py:JobdClient.events": 1,
+     "jobd/events.py:_iter_lines_reverse": 1,
+     "jobd/events.py:read_events": 1,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:jobd_events": 1
+    },
+    "sql": {}
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 143,
+   "sql": 0,
+   "witness": {
+    "kinds": [
+     "job_submitted",
+     "job_dispatched",
+     "job_started",
+     "job_completed"
+    ]
+   }
+  },
+  "mcp_jobd_list_default": {
+   "detail": {
+    "http": {
+     "GET /jobs": 3
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 3,
+     "jobd/auth.py:_acl_disabled": 3,
+     "jobd/auth.py:_check_token": 3,
+     "jobd/auth.py:_token_required": 3,
+     "jobd/auth.py:require_token": 3,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 3,
+     "jobd/broker/jobinfo.py:_populate_eta": 12,
+     "jobd/broker/jobinfo.py:_presentable_warning": 12,
+     "jobd/broker/jobinfo.py:_redact_env": 12,
+     "jobd/broker/jobinfo.py:_to_info": 12,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.list_jobs": 3,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 3,
+     "jobd/client.py:JobdClient.list_jobs_with_total": 3,
+     "jobd/ctest_eta.py:predict_ctest": 12,
+     "jobd/estimator.py:WallPrediction.basis": 12,
+     "jobd/estimator.py:_PredictCache.get": 76,
+     "jobd/estimator.py:_quantile": 4,
+     "jobd/estimator.py:cmd_head": 94,
+     "jobd/estimator.py:make_predict_cache": 3,
+     "jobd/estimator.py:predict_wall": 2,
+     "jobd/estimator.py:queue_start_eta": 12,
+     "jobd/estimator.py:queue_start_eta.<locals>.shares_pool": 132,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:jobd_list": 1,
+     "jobd/mcp/tools.py:jobd_list.<locals>.<lambda>": 12,
+     "jobd/mcp/translate.py:_parse_iso": 24,
+     "jobd/mcp/translate.py:wrap_jobs": 1,
+     "jobd/mcp/translate.py:wrap_jobs.<locals>.<genexpr>": 1,
+     "jobd/mcp/translate.py:xlate_job_info": 12,
+     "jobd/models.py:JobInfo._ser_dt": 36,
+     "jobd/models.py:_as_utc_iso": 36
+    },
+    "sql": {
+     "SELECT jobs": 14
+    }
+   },
+   "http": 3,
+   "matcher_calls": 0,
+   "py_calls": 549,
+   "sql": 14,
+   "witness": {
+    "counts": {
+     "assigned": 0,
+     "queued": 12,
+     "running": 0
+    },
+    "ids": [
+     40,
+     37,
+     33,
+     29,
+     28,
+     26,
+     25,
+     22,
+     20,
+     16,
+     15,
+     2
+    ]
+   }
+  },
+  "mcp_jobd_list_project_failed": {
+   "detail": {
+    "http": {
+     "GET /jobs": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 1,
+     "jobd/broker/jobinfo.py:_presentable_warning": 2,
+     "jobd/broker/jobinfo.py:_redact_env": 2,
+     "jobd/broker/jobinfo.py:_to_info": 2,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.list_jobs": 1,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 1,
+     "jobd/client.py:JobdClient.list_jobs_with_total": 1,
+     "jobd/config.py:canonical_project_name": 1,
+     "jobd/estimator.py:make_predict_cache": 1,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:jobd_list": 1,
+     "jobd/mcp/tools.py:jobd_list.<locals>.<lambda>": 2,
+     "jobd/mcp/translate.py:_parse_iso": 4,
+     "jobd/mcp/translate.py:wrap_jobs": 1,
+     "jobd/mcp/translate.py:wrap_jobs.<locals>.<genexpr>": 1,
+     "jobd/mcp/translate.py:xlate_job_info": 2,
+     "jobd/models.py:JobInfo._ser_dt": 6,
+     "jobd/models.py:_as_utc_iso": 6
+    },
+    "sql": {
+     "SELECT jobs": 4
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 44,
+   "sql": 4,
+   "witness": {
+    "counts": {
+     "failed": 2
+    },
+    "ids": [
+     6,
+     12
+    ]
+   }
+  },
+  "mcp_jobd_logs": {
+   "detail": {
+    "http": {
+     "GET /jobs/{id}/output": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/joblog.py:job_log_path": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.get_output": 1,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 1,
+     "jobd/client.py:JobdClient.logs": 1,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:jobd_logs": 1
+    },
+    "sql": {
+     "SELECT jobs": 1
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 14,
+   "sql": 1,
+   "witness": {
+    "size": 114,
+    "tail": "d6b923ebab0b1f43"
+   }
+  },
+  "mcp_jobd_status": {
+   "detail": {
+    "http": {
+     "GET /jobs/{id}": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 1,
+     "jobd/broker/jobinfo.py:_presentable_warning": 1,
+     "jobd/broker/jobinfo.py:_redact_env": 1,
+     "jobd/broker/jobinfo.py:_to_info": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.get_job": 1,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 1,
+     "jobd/client.py:JobdClient.status": 1,
+     "jobd/estimator.py:make_predict_cache": 1,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:_status": 1,
+     "jobd/mcp/tools.py:jobd_status": 1,
+     "jobd/mcp/translate.py:_parse_iso": 2,
+     "jobd/mcp/translate.py:xlate_job_info": 1,
+     "jobd/models.py:JobInfo._ser_dt": 3,
+     "jobd/models.py:_as_utc_iso": 3
+    },
+    "sql": {
+     "SELECT jobs": 3
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 28,
+   "sql": 3,
+   "witness": {
+    "host": "charlie",
+    "job_id": 32,
+    "state": "completed"
+   }
+  },
+  "mcp_jobd_submit": {
+   "detail": {
+    "http": {
+     "POST /submit": 1
+    },
+    "py_calls": {
+     "jobd/app.py:build_app.<locals>._wake_dispatchers": 1,
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/events.py:_emit_event": 1,
+     "jobd/broker/jobinfo.py:_build_eta_ctx": 1,
+     "jobd/broker/jobinfo.py:_populate_eta": 1,
+     "jobd/broker/jobinfo.py:_presentable_warning": 1,
+     "jobd/broker/jobinfo.py:_redact_env": 1,
+     "jobd/broker/jobinfo.py:_to_info": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.submit": 1,
+     "jobd/broker/scheduling.py:_build_snapshots": 2,
+     "jobd/broker/scheduling.py:_serialization_warning": 1,
+     "jobd/broker/submit.py:submit_job": 1,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 1,
+     "jobd/client.py:JobdClient.submit": 1,
+     "jobd/config.py:_merge_defaults": 1,
+     "jobd/config.py:canonical_project_name": 1,
+     "jobd/config.py:resolve_effective_config": 1,
+     "jobd/config.py:resolve_priority": 1,
+     "jobd/config.py:resolve_project_defaults": 1,
+     "jobd/ctest_eta.py:predict_ctest": 1,
+     "jobd/estimator.py:ColdStart.basis": 1,
+     "jobd/estimator.py:_PredictCache.get": 1,
+     "jobd/estimator.py:cmd_head": 4,
+     "jobd/estimator.py:make_predict_cache": 1,
+     "jobd/estimator.py:predict_wall": 1,
+     "jobd/events.py:_maybe_rotate": 1,
+     "jobd/events.py:append_event": 1,
+     "jobd/events.py:max_bytes": 1,
+     "jobd/matcher.py:_covers": 1,
+     "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:_selectors_match": 5,
+     "jobd/matcher.py:cwd_routability": 1,
+     "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:eligible_workers": 1,
+     "jobd/matcher.py:gpu_contention_warning": 1,
+     "jobd/matcher.py:mnt_c_pin_error": 1,
+     "jobd/matcher.py:submit_preflight": 1,
+     "jobd/matcher.py:submit_preflight.<locals>.<genexpr>": 1,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:_build_submit_payload": 1,
+     "jobd/mcp/tools.py:jobd_submit": 1,
+     "jobd/mcp/translate.py:_parse_iso": 2,
+     "jobd/mcp/translate.py:xlate_job_info": 1,
+     "jobd/mcp/translate.py:xlate_submit_payload": 1,
+     "jobd/models.py:JobInfo._ser_dt": 3,
+     "jobd/models.py:JobSubmit._check_sweep": 1,
+     "jobd/models.py:_as_utc_iso": 3
+    },
+    "sql": {
+     "INSERT jobs": 1,
+     "SELECT jobs": 3,
+     "SELECT workers": 2
+    }
+   },
+   "http": 1,
+   "matcher_calls": 14,
+   "py_calls": 67,
+   "sql": 6,
+   "witness": {
+    "job_id": 41,
+    "state": "queued"
+   }
+  },
+  "mcp_jobd_submit_dry_run": {
+   "detail": {
+    "http": {
+     "POST /submit": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/routes/jobs.py:build_router.<locals>.submit": 1,
+     "jobd/broker/scheduling.py:_build_snapshots": 2,
+     "jobd/broker/scheduling.py:_serialization_warning": 1,
+     "jobd/broker/submit.py:submit_job": 1,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 1,
+     "jobd/client.py:JobdClient.submit": 1,
+     "jobd/config.py:_merge_defaults": 1,
+     "jobd/config.py:canonical_project_name": 1,
+     "jobd/config.py:resolve_effective_config": 1,
+     "jobd/config.py:resolve_priority": 1,
+     "jobd/config.py:resolve_project_defaults": 1,
+     "jobd/matcher.py:_covers": 1,
+     "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:_effective_vram_gb": 2,
+     "jobd/matcher.py:_selectors_match": 13,
+     "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 10,
+     "jobd/matcher.py:cwd_routability": 1,
+     "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:eligible_workers": 3,
+     "jobd/matcher.py:gpu_contention_warning": 1,
+     "jobd/matcher.py:mnt_c_pin_error": 1,
+     "jobd/matcher.py:submit_preflight": 1,
+     "jobd/matcher.py:submit_preflight.<locals>.<genexpr>": 1,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:_build_submit_payload": 1,
+     "jobd/mcp/tools.py:jobd_submit": 1,
+     "jobd/mcp/translate.py:xlate_submit_payload": 1,
+     "jobd/models.py:JobSubmit._check_sweep": 1
+    },
+    "sql": {
+     "SELECT workers": 2
+    }
+   },
+   "http": 1,
+   "matcher_calls": 36,
+   "py_calls": 61,
+   "sql": 2,
+   "witness": {
+    "state": "dry-run",
+    "would_route_to": [
+     "alpha",
+     "charlie"
+    ]
+   }
+  },
+  "mcp_jobd_workers": {
+   "detail": {
+    "http": {
+     "GET /workers": 1
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 1,
+     "jobd/auth.py:_acl_disabled": 1,
+     "jobd/auth.py:_check_token": 1,
+     "jobd/auth.py:_token_required": 1,
+     "jobd/auth.py:require_token": 1,
+     "jobd/broker/routes/workers.py:build_router.<locals>.list_workers": 1,
+     "jobd/client.py:JobdClient.__init__": 1,
+     "jobd/client.py:JobdClient._request": 1,
+     "jobd/client.py:JobdClient.workers": 1,
+     "jobd/mcp/server.py:_validate_arguments": 1,
+     "jobd/mcp/server.py:build_server": 1,
+     "jobd/mcp/server.py:build_server.<locals>._dispatch": 1,
+     "jobd/mcp/tools.py:jobd_workers": 1,
+     "jobd/mcp/translate.py:wrap_workers": 1,
+     "jobd/models.py:WorkerInfo._ser_dt": 4,
+     "jobd/models.py:_as_utc_iso": 4
+    },
+    "sql": {
+     "SELECT workers": 1
+    }
+   },
+   "http": 1,
+   "matcher_calls": 0,
+   "py_calls": 22,
+   "sql": 1,
+   "witness": {
+    "health": "healthy",
+    "hosts": [
+     "alpha",
+     "bravo",
+     "charlie",
+     "delta"
+    ]
+   }
+  },
+  "sched_pass": {
+   "detail": {
+    "http": {
+     "POST /next-job": 4
+    },
+    "py_calls": {
+     "jobd/auth.py:TailnetACLMiddleware.dispatch": 4,
+     "jobd/auth.py:_acl_disabled": 4,
+     "jobd/auth.py:_check_token": 4,
+     "jobd/auth.py:_token_required": 4,
+     "jobd/auth.py:require_token": 4,
+     "jobd/broker/adopt.py:adoption_fills_host": 4,
+     "jobd/broker/events.py:_emit_event": 4,
+     "jobd/broker/jobinfo.py:_presentable_warning": 4,
+     "jobd/broker/jobinfo.py:_to_info": 4,
+     "jobd/broker/routes/workers.py:build_router.<locals>.next_job": 4,
+     "jobd/broker/routes/workers.py:build_router.<locals>.next_job.<locals>._attempt": 4,
+     "jobd/broker/routes/workers.py:build_router.<locals>.next_job.<locals>._attempt.<locals>.<genexpr>": 42,
+     "jobd/broker/state.py:_deps_satisfied_bulk": 4,
+     "jobd/broker/state.py:_excluded_workers": 42,
+     "jobd/db.py:Job.requires": 18,
+     "jobd/events.py:_maybe_rotate": 4,
+     "jobd/events.py:append_event": 4,
+     "jobd/events.py:max_bytes": 4,
+     "jobd/matcher.py:_effective_vram_gb": 3,
+     "jobd/matcher.py:_selectors_match": 13,
+     "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 11,
+     "jobd/matcher.py:effective_vram_request_gb": 5,
+     "jobd/matcher.py:fits_on_worker": 13,
+     "jobd/matcher.py:pick_next_job": 4,
+     "jobd/matcher.py:pick_next_job.<locals>.<lambda>": 42,
+     "jobd/models.py:JobInfo._ser_dt": 12,
+     "jobd/models.py:_as_utc_iso": 12
+    },
+    "sql": {
+     "SELECT jobs": 12,
+     "SELECT workers": 4,
+     "UPDATE jobs": 4
+    }
+   },
+   "http": 4,
+   "matcher_calls": 91,
+   "py_calls": 277,
+   "sql": 20,
+   "witness": [
+    [
+     "alpha",
+     15
+    ],
+    [
+     "bravo",
+     20
+    ],
+    [
+     "charlie",
+     22
+    ],
+    [
+     "delta",
+     28
+    ]
+   ]
+  }
+ }
+}
