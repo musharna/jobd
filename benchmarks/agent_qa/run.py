@@ -27,7 +27,23 @@ resumes. Nothing is retried: a timeout or a harness error is recorded as that
 run's row (``exit``), in every arm alike, and ``analyze.py`` counts it invalid.
 Raw stream-json transcripts go to ``runs/<arm>/<qid>-<rep>.jsonl``, proxy
 decisions to ``runs/<arm>/<qid>-<rep>.proxy.jsonl``. All of it lives under
-``ARTIFACTS`` (default ``~/jobd-artifacts/agent_qa``), outside the checkout.
+``ARTIFACTS`` (default ``~/jobd-artifacts/agent_qa``), outside the checkout;
+``--key`` and ``--runs`` point at another key and transcript directory (the
+2026-10-18 re-run uses ``ARTIFACTS/rerun-2026-10-18``).
+
+``--server-spec git+https://github.com/musharna/jobd@<40-hex sha>`` runs the
+mcp arm on an unreleased commit instead of the PyPI pin; ``run.py`` checks the
+installed package came from that commit, and records the spec in every row
+and in ``versions.json``. ``--exclude-newer`` bounds every other dependency's
+resolution by date, in both arms.
+
+Usage gate (the runs share the account's limits with its owner): after every
+run, the transcript's ``rate_limit_event`` is read. A five-hour utilization at
+or above ``PAUSE_AT`` or a ``rejected`` status pauses the sweep until that
+window's ``resetsAt``; each pause is appended to ``pauses.jsonl``. A seven-day
+utilization at or above ``STOP_AT`` stops the sweep. ``--drop-api-failures``
+moves rows the API ended before the model answered (``api_failure``) to
+``<results>.api_failures.jsonl`` so a resumed sweep runs each once more.
 
     JOBD_URL=... JOBD_API_TOKEN=... uv run python benchmarks/agent_qa/run.py --reps 3 --workers 1
 """
@@ -47,6 +63,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+import build_hard
 from build_questions import ARTIFACTS, Broker, drift
 from job_guard import write_shim
 from readonly_proxy import ReadOnlyProxy
@@ -54,8 +71,12 @@ from score import oracle_reply, score, wrong_reply
 
 MODEL = "claude-opus-5-5"
 VERSION = "0.5.51"  # latest jobd on PyPI, 2026-10-16
-MCP_SERVER = ["uvx", "--from", f"jobd[mcp]=={VERSION}", "jobd-mcp"]
+SERVER = f"jobd[mcp]=={VERSION}"
+GIT_SPEC = re.compile(r"^git\+https://github\.com/musharna/jobd@([0-9a-f]{40})$")
+MCP_SERVER = ["uvx", "--from", SERVER, "jobd-mcp"]
 CLI = ["uvx", "--from", f"jobd=={VERSION}", "job"]
+PAUSE_AT = 0.85  # five-hour utilization that pauses the sweep until its reset
+STOP_AT = 0.80  # seven-day utilization that stops it
 RUN_TIMEOUT_S = 900
 # Every arm gets this in place of Claude Code's own system prompt, which
 # describes tools even when --tools "" removes them all.
@@ -80,7 +101,29 @@ DENIED_BASH = [
 ]  # fmt: skip
 
 
-def arm_flags(arm: str, tmp: Path, proxy_url: str) -> list[str]:
+def server_cmd(spec: str, exclude_newer: str | None) -> list[str]:
+    """uvx command for the mcp arm: the PyPI pin, or jobd[mcp] at a git commit."""
+    pkg = spec if spec == SERVER else f"jobd[mcp] @ {spec}"
+    return ["uvx", *(["--exclude-newer", exclude_newer] if exclude_newer else []),
+            "--from", pkg, "jobd-mcp"]  # fmt: skip
+
+
+def cli_cmd(exclude_newer: str | None) -> list[str]:
+    return ["uvx", *(["--exclude-newer", exclude_newer] if exclude_newer else []), *CLI[1:]]
+
+
+def check_server_spec(spec: str) -> str | None:
+    """The PyPI pin, or a git spec naming a full commit; returns the commit."""
+    if spec == SERVER:
+        return None
+    m = GIT_SPEC.match(spec)
+    if not m:
+        sys.exit(f"--server-spec must be {SERVER!r} or "
+                 f"git+https://github.com/musharna/jobd@<40-hex sha>; got {spec!r}")  # fmt: skip
+    return m.group(1)
+
+
+def arm_flags(arm: str, tmp: Path, proxy_url: str, server: list[str] = MCP_SERVER) -> list[str]:
     empty = tmp / "no-mcp.json"
     empty.write_text('{"mcpServers": {}}')
     if arm == "bare":
@@ -94,14 +137,14 @@ def arm_flags(arm: str, tmp: Path, proxy_url: str) -> list[str]:
         ]  # fmt: skip
     if arm == "mcp":
         cfg = tmp / "mcp.json"
-        server = {
-            "command": MCP_SERVER[0],
-            "args": MCP_SERVER[1:],
+        cfg_server = {
+            "command": server[0],
+            "args": server[1:],
             # The server's call log defaults to ~/.claude/state/jobd-mcp; keep
             # benchmark calls out of the user's real one.
             "env": {"JOBD_URL": proxy_url, "JOBD_MCP_LOG_DIR": str(tmp / "mcp-log")},
         }
-        cfg.write_text(json.dumps({"mcpServers": {"jobd": server}}))
+        cfg.write_text(json.dumps({"mcpServers": {"jobd": cfg_server}}))
         return [
             "--tools", "", "--allowedTools", "mcp__jobd",
             "--disallowedTools", ",".join(f"mcp__jobd__{t}" for t in MUTATING_MCP),
@@ -110,14 +153,17 @@ def arm_flags(arm: str, tmp: Path, proxy_url: str) -> list[str]:
     raise ValueError(arm)
 
 
-def arm_env(arm: str, tmp: Path, proxy_url: str) -> dict[str, str]:
-    """The parent environment minus the broker token, pointed at the proxy."""
+def arm_env(arm: str, tmp: Path, proxy_url: str, cli: list[str] = CLI) -> dict[str, str]:
+    """The parent environment minus the broker token, pointed at the proxy,
+    with a TMPDIR of the run's own."""
     env = {k: v for k, v in os.environ.items() if k != "JOBD_API_TOKEN"}
     env["JOBD_URL"] = proxy_url
+    (tmp / "tmp").mkdir()
+    env["TMPDIR"] = str(tmp / "tmp")
     if arm == "alt":
         bindir = write_shim(tmp / "bin").parent
         env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
-        env["JOBD_BENCH_REAL_JOB"] = json.dumps(CLI)
+        env["JOBD_BENCH_REAL_JOB"] = json.dumps(cli)
         env["JOBD_BENCH_PROXY_URL"] = proxy_url
         # The Bash tool's zsh would source ~/.zshenv, which can export the live
         # broker's URL and token; an empty ZDOTDIR keeps the user's startup
@@ -139,8 +185,21 @@ class ProxyBypassed(RuntimeError):
     pass
 
 
-def run_one(arm: str, q: dict[str, Any], rep: int, upstream: str, token: str) -> dict[str, Any]:
-    out = ARTIFACTS / "runs" / arm / f"{q['id']}-{rep}.jsonl"
+class Opts:
+    """Per-sweep settings run_one needs (one object, so the pool call stays short)."""
+
+    def __init__(self, runs: Path, spec: str, exclude_newer: str | None) -> None:
+        self.runs = runs
+        self.spec = spec
+        self.exclude_newer = exclude_newer
+        self.server = server_cmd(spec, exclude_newer)
+        self.cli = cli_cmd(exclude_newer)
+
+
+def run_one(
+    arm: str, q: dict[str, Any], rep: int, upstream: str, token: str, o: Opts
+) -> dict[str, Any]:
+    out = o.runs / arm / f"{q['id']}-{rep}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     plog = out.with_suffix(".proxy.jsonl")
     plog.unlink(missing_ok=True)
@@ -155,14 +214,14 @@ def run_one(arm: str, q: dict[str, Any], rep: int, upstream: str, token: str) ->
         cmd = [
             "claude", "-p", prompt, "--model", MODEL, "--setting-sources", "",
             "--output-format", "stream-json", "--verbose", "--system-prompt", SYSTEM,
-            *arm_flags(arm, tmp, proxy.url),
+            *arm_flags(arm, tmp, proxy.url, o.server),
         ]  # fmt: skip
         t0 = time.monotonic()
         try:
             proc = subprocess.run(
                 cmd,
                 cwd=work,
-                env=arm_env(arm, tmp, proxy.url),
+                env=arm_env(arm, tmp, proxy.url, o.cli),
                 capture_output=True,
                 text=True,
                 timeout=RUN_TIMEOUT_S,
@@ -202,6 +261,7 @@ def run_one(arm: str, q: dict[str, Any], rep: int, upstream: str, token: str) ->
         "qid": q["id"],
         "category": q["category"],
         "rep": rep,
+        "server_spec": o.spec if arm == "mcp" else None,
         "exit": rc,
         "seconds": seconds,
         "claude_code": init.get("claude_code_version"),
@@ -213,8 +273,117 @@ def run_one(arm: str, q: dict[str, Any], rep: int, upstream: str, token: str) ->
         "refused_requests": [f"{d['method']} {d['path']}" for d in decisions if not d["allowed"]],
         "cost_usd": result.get("total_cost_usd"),
         "reply": reply,
+        "api_failure": api_failure(events, rc),
+        "rate_limit": rate_limit(events),
         **score(q, reply),
     }
+
+
+def rate_limit(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The run's last rate_limit_event, reduced to what the gate reads."""
+    info = None
+    for e in events:
+        if e.get("type") == "rate_limit_event":
+            info = e.get("rate_limit_info") or {}
+    if info is None:
+        return None
+    w = info.get("unifiedWindows") or {}
+    return {
+        "status": info.get("status"),
+        "five_hour": (w.get("five_hour") or {}).get("utilization"),
+        "five_hour_resets": (w.get("five_hour") or {}).get("resetsAt") or info.get("resetsAt"),
+        "seven_day": (w.get("seven_day") or {}).get("utilization"),
+        "seven_day_resets": (w.get("seven_day") or {}).get("resetsAt"),
+    }
+
+
+def api_failure(events: list[dict[str, Any]], rc: object) -> str | None:
+    """Why the API, not the model, ended this run before it answered, or None.
+
+    Read from the transcript alone, never from the reply or its score, so the
+    same rule picks rows in every arm: a rate-limit rejection with no
+    successful result after it, or a result whose terminal reason is an API
+    error. A timeout is not one: it stays in as an invalid run.
+    """
+    result = next((e for e in events if e.get("type") == "result"), None)
+    ok = result is not None and result.get("subtype") == "success" and not result.get("is_error")
+    rejected = any(
+        e.get("type") == "rate_limit_event"
+        and (e.get("rate_limit_info") or {}).get("status") == "rejected"
+        for e in events
+    )
+    if rejected and not ok:
+        return "rate_limited"
+    if result is not None and result.get("terminal_reason") == "api_error":
+        return "api_error"
+    return None
+
+
+class Gate:
+    """Pauses the sweep when the account's five-hour window runs high, and
+    stops it when the seven-day window does. Every pause is recorded."""
+
+    def __init__(self, log: Path, sleep=time.sleep, now=time.time) -> None:
+        self.log, self.sleep, self.now = log, sleep, now
+        self.until = 0.0
+        self.lock = threading.Lock()
+
+    def wait(self) -> None:
+        while True:
+            with self.lock:
+                left = self.until - self.now()
+            if left <= 0:
+                return
+            self.sleep(min(left, 300))
+
+    def update(self, rl: dict[str, Any] | None, after: str) -> None:
+        if not rl:
+            return
+        if (rl.get("seven_day") or 0) >= STOP_AT:
+            raise UsageStop(f"seven_day utilization {rl['seven_day']} >= {STOP_AT} after {after}")
+        hot = rl.get("status") == "rejected" or (rl.get("five_hour") or 0) >= PAUSE_AT
+        if not hot:
+            return
+        resets = float(rl.get("five_hour_resets") or 0)
+        until = max(resets + 60, self.now() + 60)
+        with self.lock:
+            if until <= self.until:
+                return
+            self.until = until
+        entry = {"ts": self.now(), "after": after, **rl, "pause_until": until,
+                 "pause_s": round(until - self.now())}  # fmt: skip
+        with self.log.open("a") as fh:
+            fh.write(json.dumps(entry) + "\n")
+        print(f"PAUSE until {time.strftime('%H:%M:%S %Z', time.localtime(until))}: "
+              f"five_hour={rl.get('five_hour')} status={rl.get('status')}", flush=True)  # fmt: skip
+
+
+class UsageStop(RuntimeError):
+    pass
+
+
+def drop_api_failures(results: Path) -> None:
+    """Move every row the API ended before an answer out of ``results`` into
+    ``<results>.api_failures.jsonl``, so a resumed sweep runs those triples
+    once more. A triple already moved once is not moved again: its re-run
+    stands, and counts as invalid if the API ended it too."""
+    moved_path = results.with_suffix(".api_failures.jsonl")
+    before = set()
+    if moved_path.exists():
+        before = {(r["arm"], r["qid"], r["rep"])
+                  for r in map(json.loads, moved_path.read_text().splitlines())}  # fmt: skip
+    rows = [json.loads(ln) for ln in results.read_text().splitlines()]
+    keep, moved = [], []
+    for r in rows:
+        t = (r["arm"], r["qid"], r["rep"])
+        (moved if r.get("api_failure") and t not in before else keep).append(r)
+    results.write_text("".join(json.dumps(r) + "\n" for r in keep))
+    with moved_path.open("a") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in moved)
+    by_arm: dict[str, int] = {}
+    for r in moved:
+        by_arm[r["arm"]] = by_arm.get(r["arm"], 0) + 1
+    print(f"moved {len(moved)} rows to {moved_path.name}: {by_arm}; resume to re-run them once")
 
 
 def rescore(results: Path, by_id: dict[str, dict[str, Any]]) -> None:
@@ -230,26 +399,41 @@ def rescore(results: Path, by_id: dict[str, dict[str, Any]]) -> None:
     results.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-def prewarm() -> None:
-    """Install the pinned release into uv's cache before the clock starts, so
+_ORIGIN = (
+    "import importlib.metadata as m, json; d = m.distribution('jobd'); "
+    "u = d.read_text('direct_url.json'); "
+    "print(json.dumps({'jobd': d.version, "
+    "'commit': json.loads(u).get('vcs_info', {}).get('commit_id') if u else None}))"
+)
+
+
+def prewarm(o: Opts | None = None) -> dict[str, Any]:
+    """Install both arms' packages into uv's cache before the clock starts, so
     the first run of each arm is not charged for a download (or timed out
-    waiting for the MCP server to start)."""
-    subprocess.run(
-        ["uvx", "--from", f"jobd[mcp]=={VERSION}", "python", "-c", "import jobd.mcp.server"],
-        check=True, capture_output=True, timeout=600,
-    )  # fmt: skip
-    # The arms must run the release the README names, whatever uv resolved.
-    got = subprocess.run([*CLI, "--version"], check=True, capture_output=True, text=True,
+    waiting for the MCP server to start), and check each is what the README
+    names. Returns what was found, for versions.json."""
+    o = o or Opts(ARTIFACTS / "runs", SERVER, None)
+    server_py = [*o.server[:-1], "python", "-c"]
+    subprocess.run([*server_py, "import jobd.mcp.server"], check=True, capture_output=True,
+                   timeout=900)  # fmt: skip
+    got = subprocess.run([*o.cli, "--version"], check=True, capture_output=True, text=True,
                          timeout=600).stdout  # fmt: skip
     if VERSION not in got:
         sys.exit(f"the pinned CLI reports {got.strip()!r}, not {VERSION}")
-    got = subprocess.run(
-        ["uvx", "--from", f"jobd[mcp]=={VERSION}", "python", "-c",
-         "import importlib.metadata as m; print(m.version('jobd'))"],
-        check=True, capture_output=True, text=True, timeout=600,
-    ).stdout.strip()  # fmt: skip
-    if got != VERSION:
-        sys.exit(f"the pinned MCP server is jobd {got}, not {VERSION}")
+    origin = json.loads(
+        subprocess.run(
+            [*server_py, _ORIGIN], check=True, capture_output=True, text=True, timeout=600
+        )
+        .stdout.strip()
+        .splitlines()[-1]  # fmt: skip
+    )
+    commit = check_server_spec(o.spec)
+    if commit is None and origin["jobd"] != VERSION:
+        sys.exit(f"the pinned MCP server is jobd {origin['jobd']}, not {VERSION}")
+    if commit is not None and origin["commit"] != commit:
+        sys.exit(f"the mcp arm's jobd came from {origin['commit']}, not {commit}")
+    return {"cli": got.strip(), "mcp": origin, "server_spec": o.spec,
+            "exclude_newer": o.exclude_newer}  # fmt: skip
 
 
 def oracle_check(questions: list[dict[str, Any]]) -> None:
@@ -268,20 +452,42 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--only", default="", help="comma-separated question ids")
+    ap.add_argument("--key", default=str(ARTIFACTS / "questions.json"))
+    ap.add_argument("--runs", default=str(ARTIFACTS / "runs"), help="transcript directory")
     ap.add_argument("--results", default=str(ARTIFACTS / "results.jsonl"))
+    ap.add_argument(
+        "--server-spec",
+        default=SERVER,
+        help="mcp arm's jobd: the PyPI pin, or git+https://github.com/musharna/jobd@<sha>",
+    )
+    ap.add_argument(
+        "--exclude-newer",
+        default=None,
+        help="uv --exclude-newer for both arms' dependencies (ISO date)",
+    )
     ap.add_argument("--allow-drift", action="store_true", help="run even if the key drifted")
     ap.add_argument(
         "--rescore",
         action="store_true",
         help="re-score every stored reply against the current questions.json, run nothing",
     )
-    a = ap.parse_args()
-    key = json.loads((ARTIFACTS / "questions.json").read_text())
+    ap.add_argument(
+        "--drop-api-failures",
+        action="store_true",
+        help="move rows the API ended before an answer aside (once), run nothing",
+    )
+    a = ap.parse_args()  # fmt: skip
+    key = json.loads(Path(a.key).read_text())
     questions = key["questions"]
     oracle_check(questions)
+    results = Path(a.results)
     if a.rescore:
-        rescore(Path(a.results), {q["id"]: q for q in questions})
+        rescore(results, {q["id"]: q for q in questions})
         return
+    if a.drop_api_failures:
+        drop_api_failures(results)
+        return
+    check_server_spec(a.server_spec)
     upstream, token = os.environ.get("JOBD_URL"), os.environ.get("JOBD_API_TOKEN", "")
     if not upstream:
         sys.exit("set JOBD_URL (and JOBD_API_TOKEN) to the broker the key was built from")
@@ -294,13 +500,23 @@ def main() -> None:
         # The answers depend on the broker's semantics (routing rule, what a
         # terminal state is), so a broker upgrade invalidates the key.
         sys.exit(f"broker is {live_version}, the key was built on {key['broker_version']}")
-    problems = drift(broker, {**key, "questions": questions})
+    check = build_hard.drift if key.get("version") == build_hard.VERSION else drift
+    problems = check(broker, {**key, "questions": questions})
     if problems:
-        print("the broker no longer matches questions.json:\n  " + "\n  ".join(problems))
+        print("the broker no longer matches the key:\n  " + "\n  ".join(problems))
         if not a.allow_drift:
             sys.exit(2)
-    prewarm()
-    results = Path(a.results)
+    o = Opts(Path(a.runs), a.server_spec, a.exclude_newer)
+    versions = prewarm(o)
+    versions |= {"broker": live_version, "key": a.key, "key_built": key["built"]}
+    vfile = results.with_name("versions.json")
+    if vfile.exists():
+        old = json.loads(vfile.read_text())
+        same = ("server_spec", "mcp", "cli", "exclude_newer", "broker")
+        if {k: old.get(k) for k in same} != {k: versions.get(k) for k in same}:
+            sys.exit(f"{vfile} records other versions than this run would use: {old}")
+    results.parent.mkdir(parents=True, exist_ok=True)
+    vfile.write_text(json.dumps(versions, indent=1) + "\n")
     done = set()
     if results.exists():
         for ln in results.read_text().splitlines():
@@ -314,21 +530,34 @@ def main() -> None:
         if (arm, q["id"], rep) not in done
     ]
     print(f"{len(todo)} runs to do ({len(done)} already in {results.name})", flush=True)
+    gate = Gate(results.with_name("pauses.jsonl"))
+
+    def task(arm: str, q: dict[str, Any], rep: int) -> dict[str, Any]:
+        # Inside the worker, so the next run cannot start before this run's
+        # reading has been applied.
+        gate.wait()
+        r = run_one(arm, q, rep, upstream, token, o)
+        gate.update(r["rate_limit"], f"{arm} {q['id']} rep{rep}")
+        return r
+
     lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=a.workers) as pool:
-        futures = [pool.submit(run_one, *t, upstream, token) for t in todo]
+        futures = [pool.submit(task, *t) for t in todo]
         for n, f in enumerate(as_completed(futures), 1):
             try:
                 r = f.result()
-            except ProxyBypassed as e:
+            except (ProxyBypassed, UsageStop) as e:
                 pool.shutdown(wait=True, cancel_futures=True)
                 sys.exit(f"STOPPED: {e}")
             with lock, results.open("a") as fh:
                 fh.write(json.dumps(r) + "\n")
+            rl = r["rate_limit"] or {}
             print(
                 f"[{n}/{len(todo)}] {r['arm']:4} {r['qid']} rep{r['rep']} {r['verdict']:9}"
                 f" exit={r['exit']} {r['seconds']}s calls={len(r['tool_calls'])}"
-                f" broker={r['broker_requests']} refused={len(r['refused_requests'])}",
+                f" broker={r['broker_requests']} refused={len(r['refused_requests'])}"
+                f" ${r['cost_usd']} 5h={rl.get('five_hour')} 7d={rl.get('seven_day')}"
+                f"{' API:' + r['api_failure'] if r['api_failure'] else ''}",
                 flush=True,
             )
     sys.exit(0)

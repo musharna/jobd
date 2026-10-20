@@ -1,15 +1,23 @@
 # Agent benchmark: questions about a live broker, with and without jobd-mcp
 
-We asked Claude Opus 5.5 41 read-only questions about a live jobd broker,
-3 times each, with no tools, with the `job` CLI, and with jobd-mcp. Both tool
-setups got every question right in every run, so accuracy does not separate
-them (exact McNemar test, 0 discordant questions, p = 1). With the server the
-median answer took 6.7 s against 13.6 s, a ratio of 0.49 (95% CI 0.44 to
-0.59), and used 1.1 fewer tool calls on average (0.8 to 1.5). Its median cost
-was lower, a ratio of 0.76 (0.67 to 0.81), but its mean cost was the same,
-1.00 (0.78 to 1.31), because one question cost 2 to 3 times as much with the
-server. The main limitation is the ceiling: the questions are too easy to
-rank the two setups on accuracy.
+**Latest (2026-10-18, harder questions):** on 38 questions about time windows,
+totals over many jobs, the event record and logs, Claude Opus 5.5 got 38 right
+in all 3 runs with jobd-mcp and 37 with the `job` CLI. That is a tie under the
+pre-registered rule (McNemar p = 1): accuracy still does not separate them.
+With the server, the median answer cost $0.032 against $0.164 (ratio 0.20, 95%
+CI 0.15 to 0.28) and took 8.8 s against 53 s (0.16, 0.13 to 0.20), and it was
+cheaper and faster on every one of the 38 questions. Cost and time were
+secondary endpoints. The server tested is an unreleased commit. See
+[Re-run 2026-10-18](#re-run-2026-10-18-server-5475cab).
+
+**First sweep (2026-10-16):** we asked 41 easier read-only questions, 3 times
+each, with no tools, with the `job` CLI, and with jobd-mcp 0.5.51. Both tool
+setups got every question right in every run (exact McNemar test, 0
+discordant questions, p = 1). With the server the median answer took 6.7 s
+against 13.6 s, a ratio of 0.49 (95% CI 0.44 to 0.59), and used 1.1 fewer tool
+calls on average (0.8 to 1.5). Its median cost was lower, a ratio of 0.76
+(0.67 to 0.81), but its mean cost was the same, 1.00 (0.78 to 1.31), because
+one question cost 2 to 3 times as much with the server.
 
 ![Right, wrong or declined per setup](agent_qa.png)
 
@@ -56,6 +64,61 @@ The slowest single answers took 18 s (alone), 55 s (CLI) and 26 s (server).
 ![Cost and time per answer, every run](agent_qa_cost_time.png)
 
 ![Right, wrong or declined by kind of question](agent_qa_by_category.png)
+
+## Re-run 2026-10-18 (server 5475cab)
+
+Pre-registered in [`PREREG_2026-10-18.md`](PREREG_2026-10-18.md) before the
+sweep. The results are in [`rerun_2026-10-18/`](rerun_2026-10-18/).
+
+**Why.** [`diagnose.py`](diagnose.py) on the 10-16 transcripts found that the
+server's tool definitions cost little: they were mostly read from cache. One
+kind of question cost a lot. The 18 "failed jobs of a project on a day" runs
+were 45% of the server's spend, at a median of 6.5 turns and 11,000 characters
+of tool output, because `jobd_list` had no date filter and no `finished_at`.
+
+**What changed (MCP side only, no broker change).** `jobd_list` takes
+`finished_after` / `finished_before` and pages through the broker's existing
+`limit`/`offset`. Its rows carry `finished_at` and `duration_s`. The server's
+instructions say each tool is listed under its `mcp__jobd__` prefix. The mcp
+arm ran commit `5475cab` from git (`--server-spec`), not a PyPI release. The
+CLI arm stayed on `jobd==0.5.51`.
+
+**Questions.** [`build_hard.py`](build_hard.py) drew 38 questions from the
+uses the README and agent cookbook describe: counts and failed-job lists in a
+UTC window, the busiest host or project in a window, summed run time,
+`sweep_warning` counts and queue wait from the event record, and which of a
+window's failed jobs has a given last log line. It reads the broker's HTTP API
+without importing `jobd`. The key is frozen outside the repo. The oracle
+passed (38 of 38 right, 38 of 38 near misses wrong), and before the sweep the
+broker still gave every answer.
+
+| Setup | Right | Wrong | Questions right in all 3 runs | Cost / answer, median (mean) | Seconds / answer, median | Tool calls / answer, mean |
+|---|---|---|---|---|---|---|
+| Constant guess, no model | 3 | 35 | 3 of 38 | – | – | – |
+| Best constant, fit to the key | 9 | 29 | 9 of 38 | – | – | – |
+| Claude + job CLI | 113 | 1 | 37 of 38 | $0.164 ($0.162) | 53.2 | 12.3 |
+| Claude + jobd-mcp | 114 | 0 | 38 of 38 | $0.032 ($0.038) | 8.8 | 1.4 |
+
+- **Win rule: TIE.** Non-inferior (38 ≥ 37 − 2), but not better: 1
+  discordant question (only mcp right), McNemar p = 1, CI of the difference
+  in share right 0.00 to +0.08. The CLI's one miss left job 4147 out of a list
+  of six failures.
+- **Cost and time (secondary):** cheaper and faster on all 38 questions
+  (sign tests p = 7e-12). The sweep cost $22.75: $18.48 for the CLI arm and
+  $4.28 for the server arm. The CLI arm answered window questions by running
+  `job status` for every job `job list` returned, because `job list` prints no
+  times.
+- **Mechanism:** 96 of 114 server runs passed `finished_after` /
+  `finished_before`, every run of a window or log-join question. No call was
+  refused for a bare tool name. The most expensive server answer (h22, $0.21)
+  received all 160 jobs of a window to tally by project; the server has no
+  group-by.
+- **Controls:** 228 runs, 0 invalid, 0 leak-scan hits, 0 proxy refusals, 0
+  usage pauses, 0 API failures.
+
+![Cost and time per answer, 2026-10-18](rerun_2026-10-18/agent_qa_cost_time.png)
+
+![By kind of question, 2026-10-18](rerun_2026-10-18/agent_qa_by_category.png)
 
 ## Controls
 
@@ -226,4 +289,16 @@ uv run python benchmarks/agent_qa/run.py --reps 3 --workers 1    # oracle + vers
 uv run python benchmarks/agent_qa/run.py --rescore               # re-score stored replies after a key fix
 uv run python benchmarks/agent_qa/analyze.py                     # validity, leak scan, baselines, stats.tsv
 Rscript benchmarks/agent_qa/plot.R                               # summary.tsv + figures
+```
+
+The 2026-10-18 re-run (the PREREG's analysis block has the analysis):
+
+```bash
+R=~/jobd-artifacts/agent_qa/rerun-2026-10-18
+uv run python benchmarks/agent_qa/build_hard.py                  # freeze the v2 key in $R
+uv run python benchmarks/agent_qa/run.py --key $R/questions.json --runs $R/runs \
+  --results $R/results.jsonl --arms alt,mcp --reps 3 --workers 1 \
+  --server-spec git+https://github.com/musharna/jobd@5475cab81055001c10e9a60cd52ebeb06378a3b4 \
+  --exclude-newer 2026-10-18T12:00:00Z
+Rscript benchmarks/agent_qa/plot.R $R/scored.jsonl benchmarks/agent_qa/rerun_2026-10-18
 ```

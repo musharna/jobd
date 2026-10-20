@@ -240,11 +240,13 @@ class JobdClient:
         state: str | None = None,
         project: str | None = None,
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[list, int]:
         """Like list_jobs, but also return the broker's X-Total-Count — the size
         of the FULL filtered set, independent of `limit`. Lets a bounded page
         still report exact counts (audit 2026-07-15 L-8: jobd_list used to fetch
-        the entire job history per call to compute them)."""
+        the entire job history per call to compute them). `offset` pages
+        through that set, newest first."""
         params: dict[str, str] = {}
         if state:
             params["state_filter"] = state
@@ -252,6 +254,8 @@ class JobdClient:
             params["project"] = project
         if limit is not None:
             params["limit"] = str(limit)
+        if offset:
+            params["offset"] = str(offset)
         resp = self._request("GET", "/jobs", params=params)
         rows = resp.json()
         rows = rows if isinstance(rows, list) else rows.get("jobs", [])

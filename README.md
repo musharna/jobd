@@ -137,13 +137,13 @@ Any other MCP client:
 
 ## Does it help?
 
-Yes for speed, and equally accurate (123 of 123 each): with jobd-mcp, Claude answered questions about a live broker about twice as fast as with the `job` CLI.
+Equally accurate, and faster and cheaper: on 38 harder questions about a live broker, Claude answered 38 right in all 3 runs with jobd-mcp and 37 with the `job` CLI, a pre-registered tie (McNemar p = 1).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/musharna/jobd/main/benchmarks/agent_qa/agent_qa.png" alt="Bar chart of right, wrong and declined answers to 41 questions about a live jobd broker, 3 runs per question for each Claude setup. Constant guess with no model: 4 right, 37 wrong. Best constant fit to the answer key: 10 right, 31 wrong. Claude alone: all 123 declined. Claude with the job CLI: 123 of 123 right. Claude with jobd-mcp: 123 of 123 right." width="780">
+  <img src="https://raw.githubusercontent.com/musharna/jobd/main/benchmarks/agent_qa/rerun_2026-10-18/agent_qa.png" alt="Bar chart of right and wrong answers to 38 questions about a live jobd broker, 3 runs per question for each Claude setup. Constant guess with no model: 3 right, 35 wrong. Best constant fit to the answer key: 9 right, 29 wrong. Claude with the job CLI: 113 right, 1 wrong. Claude with jobd-mcp: 114 of 114 right." width="780">
 </p>
 
-We asked Claude Opus 5.5 41 read-only questions about a live broker, 3 times each. With the server the median answer took 6.7 s against 13.6 s (ratio 0.49, 95% CI 0.44 to 0.59) and used 1.1 fewer tool calls on average. Median cost was 24% lower but mean cost was the same, and the questions are too easy to rank the two setups on accuracy (McNemar p = 1).
+With the server the median answer cost 0.20 times as much (95% CI 0.15 to 0.28) and took 0.16 times as long (0.13 to 0.20), and it was cheaper and faster on all 38 questions. These were secondary endpoints, measured on an unreleased commit that adds a `finished_at` window to `jobd_list`. On an earlier, easier set both setups got 123 of 123.
 
 Method, controls and limitations: [benchmarks/agent_qa](https://github.com/musharna/jobd/blob/main/benchmarks/agent_qa/README.md).
 

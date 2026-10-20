@@ -460,6 +460,8 @@ def test_jobd_list_summarizes_jobs():
         "exit_code",
         "queued_at",
         "started_at",
+        "finished_at",
+        "duration_s",
     }
     assert out["jobs"][0]["job_id"] == 2  # newest-first across the merged states
     assert out["jobs"][0]["host"] == "desktop"

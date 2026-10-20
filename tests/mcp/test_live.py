@@ -46,6 +46,8 @@ LIST_SUMMARY_KEYS = {
     "exit_code",
     "queued_at",
     "started_at",
+    "finished_at",
+    "duration_s",
 }
 
 

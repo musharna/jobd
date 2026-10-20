@@ -83,7 +83,19 @@ PRIOR = {
     "wall_time": "144",
     "project_failures": "none",
     "log_line": "Done.",
+    # Version 2, fixed on 2026-10-18 before the sweep from fleet-wide facts,
+    # not the key: laptop ran the most jobs, agrigen-trellis is the project
+    # with the most jobs, and a round guess for each number.
+    "window_count": "10",
+    "window_ids": "none",
+    "busiest_host": "laptop",
+    "busiest_project": "agrigen-trellis",
+    "total_runtime": "3600",
+    "event_count": "10",
+    "queue_wait": "60",
+    "log_join": "none",
 }
+NONINFERIOR_MARGIN = 2  # questions; the ledger's win rule
 
 
 def tool_text(events: list[dict[str, Any]]) -> list[str]:
@@ -271,6 +283,51 @@ def paired_tests(by_arm: dict[str, dict[str, list[dict]]], qids: list[str]) -> l
     return out
 
 
+def right_all(rows: list[dict[str, Any]], qids: list[str], reps: int) -> dict[str, bool]:
+    """Per question: right in every one of `reps` runs. An invalid or missing
+    run is not a right one, so a question with one counts as not right."""
+    by_q = per_question(rows)
+    return {
+        q: len(by_q.get(q, [])) == reps
+        and all(r["valid"] and r["verdict"] == "right" for r in by_q[q])
+        for q in qids
+    }
+
+
+def win_rule(rows: list[dict[str, Any]], qids: list[str], reps: int = 3) -> dict[str, Any]:
+    """The pre-registered decision (PREREG_2026-10-18.md), on questions right in
+    every run, mcp against alt.
+
+    - non-inferior: mcp's count >= alt's - NONINFERIOR_MARGIN;
+    - better: exact McNemar p < 0.05 with more questions only mcp got, and the
+      bootstrap 95% CI of (mcp - alt) / questions wholly above 0;
+    - WIN = non-inferior and better; LOSS = not non-inferior, or significantly
+      worse (p < 0.05, CI wholly below 0); otherwise TIE.
+    """
+    ok = {a: right_all([r for r in rows if r["arm"] == a], qids, reps) for a in ("alt", "mcp")}
+    n_alt, n_mcp = sum(ok["alt"].values()), sum(ok["mcp"].values())
+    b = sum(ok["mcp"][q] and not ok["alt"][q] for q in qids)
+    c = sum(ok["alt"][q] and not ok["mcp"][q] for q in qids)
+    p = binom_two_sided(b, b + c)
+    rng = random.Random(SEED)
+    diffs = []
+    for _ in range(BOOT):
+        sample = [rng.choice(qids) for _ in qids]
+        diffs.append(sum(ok["mcp"][q] - ok["alt"][q] for q in sample) / len(qids))
+    diffs.sort()
+    lo, hi = diffs[int(0.025 * BOOT)], diffs[int(0.975 * BOOT) - 1]
+    noninferior = n_mcp >= n_alt - NONINFERIOR_MARGIN
+    better = p < 0.05 and b > c and lo > 0
+    worse = p < 0.05 and c > b and hi < 0
+    verdict = "WIN" if noninferior and better else "LOSS" if (not noninferior or worse) else "TIE"
+    return {
+        "verdict": verdict, "questions": len(qids), "mcp_right_all": n_mcp,
+        "alt_right_all": n_alt, "only_mcp": b, "only_alt": c, "mcnemar_p": p,
+        "diff": (n_mcp - n_alt) / len(qids), "diff_lo95": lo, "diff_hi95": hi,
+        "noninferior": noninferior,
+    }  # fmt: skip
+
+
 def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
     cols = list(rows[0])
 
@@ -289,9 +346,13 @@ def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default=str(ARTIFACTS / "results.jsonl"))
+    ap.add_argument("--key", default=str(ARTIFACTS / "questions.json"))
+    ap.add_argument("--runs", default=str(ARTIFACTS / "runs"))
     ap.add_argument("--outdir", default=str(HERE))
+    ap.add_argument("--reps", type=int, default=3)
     a = ap.parse_args()
-    key = json.loads((ARTIFACTS / "questions.json").read_text())
+    runs = Path(a.runs)
+    key = json.loads(Path(a.key).read_text())
     questions = key["questions"]
     by_id = {q["id"]: q for q in questions}
     rows = [json.loads(ln) for ln in Path(a.results).read_text().splitlines()]
@@ -300,7 +361,7 @@ def main() -> None:
     for r in rows:
         # Rescore on the way in, so the analysis never uses a stale verdict.
         r.update(score(by_id[r["qid"]], r["reply"]))
-        t = ARTIFACTS / "runs" / r["arm"] / f"{r['qid']}-{r['rep']}.jsonl"
+        t = runs / r["arm"] / f"{r['qid']}-{r['rep']}.jsonl"
         hits = leak_hits(t) if t.exists() else []
         leaks_scanned += t.exists()
         r["leak_hits"] = hits
@@ -308,7 +369,8 @@ def main() -> None:
         r["valid"] = r["invalid_reason"] is None
 
     validity = []
-    for arm in ARMS:
+    arms = [a for a in ARMS if any(r["arm"] == a for r in rows)]
+    for arm in arms:
         rs = [r for r in rows if r["arm"] == arm]
         reasons = Counter(r["invalid_reason"] for r in rs if not r["valid"])
         validity.append(
@@ -316,7 +378,7 @@ def main() -> None:
                 "arm": arm, "runs": len(rs), "valid": sum(r["valid"] for r in rs),
                 "invalid": len(rs) - sum(r["valid"] for r in rs),
                 "transcripts_scanned": sum(
-                    (ARTIFACTS / "runs" / arm / f"{r['qid']}-{r['rep']}.jsonl").exists()
+                    (runs / arm / f"{r['qid']}-{r['rep']}.jsonl").exists()
                     for r in rs
                 ),
                 "leak_hits": sum(bool(r["leak_hits"]) for r in rs),
@@ -338,7 +400,7 @@ def main() -> None:
     by_arm = {a: per_question([r for r in valid if r["arm"] == a]) for a in ("alt", "mcp")}
     complete = [q for q in qids if all(by_arm[a].get(q) for a in by_arm)]
     stats = bootstrap(by_arm, complete) + paired_tests(by_arm, complete)
-    for name in ("bare", "prior", "best_constant"):
+    for name in [n for n in ("bare", "prior", "best_constant") if n != "bare" or "bare" in arms]:
         rs = [r for r in (valid if name == "bare" else base) if r["arm"] == name]
         right_q = sum(all(r["verdict"] == "right" for r in g) for g in per_question(rs).values())
         stats.append(
@@ -349,8 +411,21 @@ def main() -> None:
             }
         )  # fmt: skip
 
-    (ARTIFACTS / "scored.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [*rows, *base]))
+    rule = win_rule(rows, qids, a.reps)
+    stats.append(
+        {
+            "arm": "mcp_vs_alt", "metric": "win_rule_" + rule["verdict"],
+            "estimate": rule["diff"], "lo95": rule["diff_lo95"], "hi95": rule["diff_hi95"],
+            "p": rule["mcnemar_p"],
+            "note": f"right in all {a.reps} runs: mcp {rule['mcp_right_all']}, alt "
+            f"{rule['alt_right_all']} of {rule['questions']}; only mcp {rule['only_mcp']}, "
+            f"only alt {rule['only_alt']}; non-inferior {rule['noninferior']}",
+        }
+    )  # fmt: skip
+    out_dir = Path(a.results).parent
+    (out_dir / "scored.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [*rows, *base]))
     out = Path(a.outdir)
+    out.mkdir(parents=True, exist_ok=True)
     write_tsv(out / "validity.tsv", validity)
     write_tsv(out / "stats.tsv", stats)
     print(f"{leaks_scanned} transcripts scanned for leaks")
@@ -358,6 +433,7 @@ def main() -> None:
         print(v)
     for s in stats:
         print({k: (round(v, 4) if isinstance(v, float) else v) for k, v in s.items()})
+    print("WIN RULE:", rule)
 
 
 if __name__ == "__main__":

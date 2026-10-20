@@ -8,8 +8,10 @@ field names. All translation lives in `translate.py`.
 
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from jobd.client import JobdClient
@@ -289,6 +291,10 @@ _LIST_SUMMARY_FIELDS = (
     "exit_code",
     "queued_at",
     "started_at",
+    "finished_at",
+    # finished_at - started_at, already computed by xlate_job_info; on the row
+    # so a run-time question over many jobs needs no per-job jobd_status.
+    "duration_s",
 )
 
 
@@ -298,6 +304,117 @@ _LIST_SUMMARY_FIELDS = (
 _LIST_DEFAULT_STATES = tuple(s.value for s in JobState if s.value not in TERMINAL_STATES)
 _LIST_LIMIT_DEFAULT = 50
 _LIST_LIMIT_MAX = 200
+# A finished_at window is filtered here, not by the broker (GET /jobs has no
+# time filter; adding one would need a broker upgrade on every deployment).
+# The window scan pages through the state/project-filtered set at the broker's
+# own page cap, and refuses rather than truncates past _WINDOW_MAX_PAGES: a
+# window count that silently covered only part of the history would be wrong
+# with no sign of it.
+_WINDOW_PAGE = 1000  # the broker's LIST_LIMIT_MAX
+_WINDOW_MAX_PAGES = 100
+_RELATIVE_WHEN = re.compile(r"^\s*(\d+)\s*([hdw])\s*$")
+
+
+class ArgumentError(ValueError):
+    """A tool argument the schema accepts but whose value is unusable (an
+    unparseable timestamp, an empty window). The server reports it as
+    invalid_arguments, the caller's to fix, not as an internal error."""
+
+    def __init__(self, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
+def parse_when(name: str, value: str, now: datetime | None = None) -> datetime:
+    """'2h' / '3d' / '1w' (that long before now) or ISO-8601 -> aware UTC
+    datetime. An ISO value without an offset is read as UTC, the zone every
+    broker timestamp is in. Mirrors the broker's own `since` parser."""
+    m = _RELATIVE_WHEN.match(value)
+    if m:
+        n = int(m.group(1))
+        if n <= 0:
+            raise ArgumentError(f"{name}={value!r}: a relative window must be positive",
+                                "Use e.g. 2h, 3d or 1w.")  # fmt: skip
+        delta = {"h": timedelta(hours=n), "d": timedelta(days=n), "w": timedelta(weeks=n)}
+        return (now or datetime.now(UTC)) - delta[m.group(2)]
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as e:
+        raise ArgumentError(
+            f"{name}={value!r} is not a timestamp: {e}",
+            "Pass ISO-8601 (2026-10-14T06:00:00Z; no offset means UTC) or a relative "
+            "window (2h, 3d, 1w).",
+        ) from e
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def _finished(row: dict) -> datetime | None:
+    v = row.get("finished_at")
+    if not v:
+        return None
+    dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+def _list_finished_window(
+    client: JobdClient,
+    states: list[str] | None,
+    project: str | None,
+    after: datetime | None,
+    before: datetime | None,
+    limit: int,
+) -> dict:
+    """jobd_list restricted to finished_at in [after, before). Only terminal
+    jobs have a finished_at, so an omitted (or empty) `state` means every
+    terminal state, and `counts` covers the window exactly, zeroes included."""
+    wanted = list(states) if states else sorted(TERMINAL_STATES)
+    # One state: let the broker filter. Several: one unfiltered pass is fewer
+    # pages than one pass per state.
+    state_param = wanted[0] if len(wanted) == 1 else None
+    rows: list[dict] = []
+    seen: set[int] = set()
+    offset = 0
+    for _ in range(_WINDOW_MAX_PAGES):
+        page, total = client.list_jobs_with_total(
+            state=state_param, project=project, limit=_WINDOW_PAGE, offset=offset
+        )
+        for r in page:
+            # A job submitted mid-scan shifts every later row down one place,
+            # so the next page can repeat a row; it can never skip one.
+            if r.get("id") in seen:
+                continue
+            seen.add(r.get("id"))
+            fin = _finished(r)
+            if r.get("state") not in wanted or fin is None:
+                continue
+            if (after is None or fin >= after) and (before is None or fin < before):
+                rows.append(r)
+        offset += _WINDOW_PAGE
+        if not page or offset >= total:
+            break
+    else:
+        raise ArgumentError(
+            f"the finished_at window scan passed {_WINDOW_MAX_PAGES * _WINDOW_PAGE} jobs",
+            "Narrow it with `project` or a single `state`.",
+        )
+    counts = {s: 0 for s in wanted}
+    for r in rows:
+        counts[r["state"]] += 1
+    rows.sort(key=lambda j: j.get("id") or 0, reverse=True)
+    wrapped = wrap_jobs(rows)
+    jobs = [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in wrapped["jobs"]][:limit]
+    result: dict[str, Any] = {
+        "jobs": jobs,
+        "counts": counts,
+        # Resolved, so a relative window ("3d") says which instants it meant.
+        "window": {
+            "finished_after": after.isoformat() if after else None,
+            "finished_before": before.isoformat() if before else None,
+        },
+    }
+    if len(rows) > len(jobs):
+        result["truncated"] = len(rows) - len(jobs)
+    return result
 
 
 def jobd_list(client: JobdClient, args: dict) -> dict:
@@ -314,6 +431,23 @@ def jobd_list(client: JobdClient, args: dict) -> dict:
     except (TypeError, ValueError):
         limit = _LIST_LIMIT_DEFAULT
     limit = max(1, min(limit, _LIST_LIMIT_MAX))
+
+    now = datetime.now(UTC)
+    after = before = None
+    if args.get("finished_after") is not None:
+        after = parse_when("finished_after", args["finished_after"], now)
+    if args.get("finished_before") is not None:
+        before = parse_when("finished_before", args["finished_before"], now)
+    if after is not None or before is not None:
+        if after is not None and before is not None and after >= before:
+            raise ArgumentError(
+                f"empty window: finished_after {after.isoformat()} is not before "
+                f"finished_before {before.isoformat()}",
+                "finished_after is the start (inclusive), finished_before the end (exclusive).",
+            )
+        return _list_finished_window(
+            client, args.get("state"), args.get("project"), after, before, limit
+        )
 
     # One BOUNDED request per requested state (audit 2026-07-15 L-8): the old
     # implementation forwarded at most one state and pulled the ENTIRE job

@@ -28,6 +28,17 @@ Matching rules, by category:
 - ``fleet``: the set of hosts must be equal, each name read through the
   key's alias table.
 
+Version 2 (the harder set, ``build_hard.py``):
+
+- ``window_count``, ``event_count``: the integer must be equal.
+- ``window_ids``: the set of job ids must be equal.
+- ``busiest_host``: as ``host``.
+- ``busiest_project``: the project name, case ignored, quotes dropped.
+- ``total_runtime``: within the key's ``tolerance_s`` (1 s per job summed, the
+  most rounding each job's whole seconds can move the total).
+- ``queue_wait``: within 1 s, as ``wall_time``.
+- ``log_join``: exactly one job id, the key's.
+
 A wrong answer in ``host`` or ``fleet`` that names no host the broker has ever
 known (the key's ``known_names``, checked, not guessed from its shape) is also
 flagged ``unknown_host``.
@@ -114,6 +125,21 @@ def score(question: dict[str, Any], reply: str) -> dict[str, Any]:
     elif category == "fleet":
         names = _hosts(value, truth["known_names"])
         right = set(names) == set(truth["hosts"])
+    elif category in ("window_count", "event_count"):
+        right = _int(value) == truth["count"]
+    elif category == "window_ids":
+        right = _ids(value) == set(truth["job_ids"])
+    elif category == "busiest_host":
+        names = _hosts(value, truth["known_names"])
+        right = len(names) == 1 and names[0].lower() in {n.lower() for n in truth["names"]}
+    elif category == "busiest_project":
+        right = _line(value).strip(" .").casefold() == truth["project"].casefold()
+    elif category in ("total_runtime", "queue_wait"):
+        got = _seconds(value)
+        tol = truth.get("tolerance_s", 1.0)
+        right = got is not None and abs(got - truth["seconds"]) <= tol
+    elif category == "log_join":
+        right = _ids(value) == {truth["job_id"]}
     else:
         raise ValueError(f"unknown category {category!r}")
     known = set(truth.get("known_names", {}).values())
@@ -132,6 +158,14 @@ def oracle_reply(question: dict[str, Any]) -> str:
         "project_failures": lambda: ", ".join(str(i) for i in t["job_ids"]),
         "log_line": lambda: t["line"],
         "fleet": lambda: ", ".join(t["hosts"]),
+        "window_count": lambda: str(t["count"]),
+        "event_count": lambda: str(t["count"]),
+        "window_ids": lambda: ", ".join(str(i) for i in t["job_ids"]),
+        "busiest_host": lambda: t["names"][0],
+        "busiest_project": lambda: t["project"],
+        "total_runtime": lambda: str(round(t["seconds"])),
+        "queue_wait": lambda: str(round(t["seconds"])),
+        "log_join": lambda: str(t["job_id"]),
     }[c]()
     return f"Looked it up.\nANSWER: {value}"
 
@@ -154,6 +188,21 @@ def wrong_reply(question: dict[str, Any]) -> str:
     elif c == "fleet":
         extra = sorted(set(t["known_names"].values()) - set(t["hosts"]))
         value = ", ".join([*t["hosts"], extra[0]] if extra else t["hosts"][:-1] or ["none"])
+    elif c in ("window_count", "event_count"):
+        value = str(t["count"] + 1)
+    elif c == "window_ids":
+        value = ", ".join(str(i) for i in [*t["job_ids"], max(t["job_ids"]) + 1])
+    elif c == "busiest_host":
+        # The runner-up: the near miss a tally slip would give.
+        others = sorted((h for h in t["tally"] if h != t["names"][0]), key=lambda h: -t["tally"][h])
+        value = others[0]
+    elif c == "busiest_project":
+        others = sorted((p for p in t["tally"] if p != t["project"]), key=lambda p: -t["tally"][p])
+        value = others[0]
+    elif c in ("total_runtime", "queue_wait"):
+        value = str(round(t["seconds"] + t.get("tolerance_s", 1.0) + 2))
+    elif c == "log_join":
+        value = next(i for i in sorted(t["lines"]) if int(i) != t["job_id"])
     else:
         raise ValueError(f"unknown category {c!r}")
     return f"Looked it up.\nANSWER: {value}"
