@@ -4,6 +4,23 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.52] — 2026-10-19
+
+### Security
+
+- **pyjwt 2.13.0 -> 2.15.1 in `uv.lock`** (10 advisories fixed in 2.14.0); this reaches the container image, not the PyPI dependency range (#160).
+
+### Changed
+
+- **README: "Does it help?"** A short section gives the agent benchmark's result: accuracy is not separated (both tool setups at 41 of 41), and the server's median answer is about twice as fast. The benchmark README is shorter and now starts with the answer, includes an Invalid column, and corrects the q26 sizes to what Claude received (all 194 failures, 41,808 characters). The perf ratchet's cross-version note moved to `benchmarks/perf/ratchet.py`.
+- **Agent benchmark re-run (2026-10-18).** A harder question set (38 questions from the documented use cases, `build_hard.py`) was pre-registered and run against jobd-mcp at an unreleased commit and the `job` CLI: a tie on accuracy (38 vs 37 questions right in all runs, p = 1), with the server cheaper and faster on every question (median cost ratio 0.20, time ratio 0.16). `run.py` gains `--server-spec`, `--exclude-newer`, a per-run TMPDIR, a usage-limit gate and a re-run-once rule for API failures; `analyze.py` gains the pre-registered win rule; `diagnose.py` breaks down where each arm's tokens go.
+- **README is less than half as long.** "Does it help?" now shows the benchmark chart, re-rendered narrower (8.5 in, one-line subtitle) so its text is legible at README width; data and counts are unchanged. Job arrays, `--explain`, `job adopt`, the full `job submit` synopsis and the pueue/task-spooler command map moved to `docs/cli.md`; concurrency (multislotting) to `docs/concurrency.md`; the architecture diagram's mermaid source to `docs/ARCHITECTURE.md`; the self-update network note to the runbook. The README's retention section, which said job logs are kept forever, is replaced by a pointer to the runbook (logs are pruned after 60 days by default).
+
+### Added
+
+- **Benchmarks: an agent A/B and a work-count perf ratchet.** `benchmarks/agent_qa/` asks Claude 41 read-only questions about a live broker (exit codes, hosts, run times, a project's failures on a day, log lines, routing) with no tools, with the `job` CLI, and with jobd-mcp. The key is drawn from the broker's HTTP API without importing `jobd`. Every setup reaches the broker through a loopback proxy that refuses anything but reads and dry-run submits, and the CLI setup's `job` refuses mutating subcommands. `benchmarks/perf/` counts the work per broker endpoint, scheduling pass and MCP tool on a fixed in-process fleet: jobd function calls, matcher calls, SQL statements and broker HTTP requests. `tests/test_perf_ratchet.py` fails on any difference from `baseline.json`, in either direction. The counts are identical on Python 3.11 to 3.14. Controls: `analyze.py` scores two no-model baselines (a constant guess, 4 of 41; the best constant fit to the key, 10 of 41) through the same scorer, applies one validity rule to every setup, scans every transcript for leaks of the key or the benchmark's files, and gives bootstrap intervals and paired tests. `run.py` refuses to start unless the key's own answers score right and near misses score wrong, and unless the broker and both pinned packages are the versions the key assumes. `ratchet.py --update` refuses a changed workload output without `--allow-witness-change`, as it refuses a rise without `--allow-increase`.
+- **`jobd_list` finished_at window.** `finished_after` / `finished_before` (ISO-8601, or relative `2h`/`3d`/`1w`) restrict the list to jobs that finished in a window; `counts` then cover the window exactly, every terminal state included. The filter runs in jobd-mcp over the broker's existing pagination, so no broker upgrade is needed. Rows now carry `finished_at` and `duration_s`. A bad timestamp is reported as `invalid_arguments`. The server's instructions now say the client lists each tool under its prefix (`mcp__jobd__jobd_list`).
+
 ## [0.5.51] — 2026-09-26
 
 ### Changed

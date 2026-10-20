@@ -589,7 +589,7 @@ wheels = [
 
 [[package]]
 name = "jobd"
-version = "0.5.51"
+version = "0.5.52"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
