@@ -461,12 +461,15 @@ def main() -> None:
     if a.substitute:
         ref = [json.loads(ln) for ln in Path(a.substitute).read_text().splitlines()]
         sub = substitute(rows, ref, qids, a.reps)
+        # Only the sweep's directory and file name: stats.tsv is tracked, and
+        # the absolute path is private.
+        ref_name = "/".join(Path(a.substitute).parts[-2:])
         stats.append(
             {
                 "arm": "mcp_vs_ref_alt", "metric": "substitute_right_every_run",
                 "estimate": sub["diff"], "lo95": sub["diff_lo95"], "hi95": sub["diff_hi95"],
                 "p": sub["mcnemar_p"],
-                "note": f"non-concurrent; ref {a.substitute}: mcp {sub['mcp_right_all']}, "
+                "note": f"non-concurrent; ref {ref_name}: mcp {sub['mcp_right_all']}, "
                 f"ref alt {sub['alt_right_all']} of {sub['questions']}; only mcp "
                 f"{sub['only_mcp']}, only ref alt {sub['only_alt']}",
             }

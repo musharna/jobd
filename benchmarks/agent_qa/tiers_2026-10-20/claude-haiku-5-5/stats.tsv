@@ -26,4 +26,4 @@ prior	questions_right_every_run	0.0789474	NA	NA	NA	3 of 38 questions
 best_constant	questions_right_every_run	0.236842	NA	NA	NA	9 of 38 questions
 mcp_vs_alt	win_rule_WIN	0.236842	0.105263	0.368421	0.00390625	right in all 3 runs: mcp 38, alt 29 of 38; only mcp 9, only alt 0; non-inferior True
 mcp	server_calls_per_run_mean	1.39474	NA	NA	NA	0 of 114 runs made no server call
-mcp_vs_ref_alt	substitute_right_every_run	0.0263158	0	0.0789474	1	non-concurrent; ref /home/mjarnold/jobd-artifacts/agent_qa/rerun-2026-10-18/scored.jsonl: mcp 38, ref alt 37 of 38; only mcp 1, only ref alt 0
+mcp_vs_ref_alt	substitute_right_every_run	0.0263158	0	0.0789474	1	non-concurrent; ref rerun-2026-10-18/scored.jsonl: mcp 38, ref alt 37 of 38; only mcp 1, only ref alt 0
