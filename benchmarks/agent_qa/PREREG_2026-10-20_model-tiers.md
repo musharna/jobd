@@ -163,3 +163,19 @@ uv run python benchmarks/agent_qa/tiers.py --key $K \
 ```
 
 Every result is reported, whatever it shows.
+
+## Deviations (appended after the sweeps started)
+
+- **Sonnet paused at 52 of 342 runs** (rep 1, through h17/h18), 22:58 EDT on
+  10-20, on the coordinator's order: seven_day was 0.84–0.85, and four other
+  servers had no Haiku rows yet. Haiku runs first everywhere, and Sonnet
+  resumes later with whatever budget is left. The stop at 0.90 is unchanged.
+  The runs in flight were killed before they wrote a row. `run.py` resumes by
+  skipping finished (arm, question, rep) triples, so those runs are redone
+  from scratch. The 52 rows are kept. No result was looked at before the
+  pause.
+- **Mechanism:** `diagnose.py` stops at its price fit on Haiku transcripts,
+  because their costs are not linear in its four token kinds. So the
+  mechanism readout uses its `run_row` without the fit
+  (`tiers-2026-10-20/scripts/mechanism.py`). The cost breakdown by token kind
+  is not reported.
