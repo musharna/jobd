@@ -120,6 +120,41 @@ broker still gave every answer.
 
 ![By kind of question, 2026-10-18](rerun_2026-10-18/agent_qa_by_category.png)
 
+## Haiku 5.5 re-run 2026-10-20
+
+Pre-registered in
+[`PREREG_2026-10-20_model-tiers.md`](PREREG_2026-10-20_model-tiers.md).
+Haiku 5.5 is the first of two tiers; the Sonnet 5.5 sweep is paused at 52 of
+342 runs, so the Holm-adjusted verdict is pending. Same 38 questions and key
+as on 10-18; the oracle passed and no answer drifted. Server
+`jobd[mcp]==0.5.52`, CLI `jobd==0.5.52`, all three arms re-run on Haiku.
+Results are in [`tiers_2026-10-20/claude-haiku-5-5/`](tiers_2026-10-20/claude-haiku-5-5/).
+
+| Setup (Haiku 5.5) | Right / 114 | Questions right in all 3 runs | Cost / answer, median | Seconds / answer, median |
+|---|---|---|---|---|
+| No tools | 0 | 0 of 38 | – | – |
+| + job CLI | 105 | 29 of 38 | $0.0057 | 69.5 |
+| + jobd-mcp | 114 | 38 of 38 | $0.0009 | 9.8 |
+
+- **Primary (raw p):** 9 questions only the server got right in all runs, 0
+  only the CLI. McNemar p = 0.0039, and the CI of the difference in share
+  right is +0.11 to +0.37. Of the CLI's 9 misses, 7 were runs that gave up
+  (`UNKNOWN`), 1 was a wrong total run time, and 2 were right answers voided
+  by the leak scan (see below). If those 2 count as right, it is 38 vs 31,
+  p = 0.016.
+- **Mechanism:** every server run called the server, 1.4 times on average.
+  96 of 114 passed `finished_after` / `finished_before`.
+- **Substitute (secondary, non-concurrent):** Haiku with the server got 38 of
+  38 against Opus with the CLI's 37 of 38 on 10-18 (p = 1).
+- **Cost:** the sweep cost $1.87: $0.99 for no tools (6 runs spent 5 to 8
+  minutes writing without an answer), $0.76 for the CLI and $0.12 for the
+  server.
+- **Controls:** 342 runs, 1 API error (re-run once, as pre-registered), 0
+  proxy refusals and 0 pauses. 2 CLI runs were invalid on the leak scan: the
+  arms' PATH held the worktree's `.venv/bin` (from `uv run`), and Haiku's
+  `which job` printed it. That path is not the key, but the rule voids the
+  run. On 10-18 the leak scan found no hits.
+
 ## Controls
 
 `analyze.py` applies these after a sweep, with no model and no broker. Tests:
