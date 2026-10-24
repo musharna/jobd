@@ -137,7 +137,7 @@ Any other MCP client:
 
 ## What the benchmark shows
 
-Claude was compared with itself using jobd's own `job` CLI, on 38 questions about a live broker, 3 runs each. With Claude Haiku 5.5 the server got all 38 right in every run and the CLI 29: a pre-registered win (Holm-adjusted McNemar p = 0.008). With Sonnet 5.5 it was 36 against 30 and with Opus 5.5 38 against 37, neither separated. On all three models the server's answers were cheaper and faster; with Sonnet, 0.20 times the cost and 0.17 times the time.
+Claude with the server was compared with Claude using jobd's own `job` CLI, on 38 questions about a live broker, 3 runs each. With Claude Haiku 5.5 the server got all 38 right in every run and the CLI 29: a pre-registered win (Holm-adjusted McNemar p = 0.008). With Sonnet 5.5 it was 36 against 30 and with Opus 5.5 38 against 37, neither separated. On all three models the server's answers were cheaper and faster; with Sonnet, 0.20 times the cost and 0.17 times the time.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/musharna/jobd/main/benchmarks/agent_qa/rerun_2026-10-18/agent_qa.png" alt="Bar chart of right and wrong answers to 38 questions about a live jobd broker, 3 runs per question for each Claude setup. Constant guess with no model: 3 right, 35 wrong. Best constant fit to the answer key: 9 right, 29 wrong. Claude with the job CLI: 113 right, 1 wrong. Claude with jobd-mcp: 114 of 114 right." width="780">
