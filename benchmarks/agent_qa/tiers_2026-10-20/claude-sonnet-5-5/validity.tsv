@@ -1,0 +1,6 @@
+arm	runs	valid	invalid	transcripts_scanned	leak_hits	reasons
+bare	114	110	4	114	0	exit timeout: 4
+alt	114	113	1	114	1	leak: jobd/.claude/worktrees: 1
+mcp	114	114	0	114	0	none
+prior	38	38	0	0	0	no model: scorer only
+best_constant	38	38	0	0	0	no model: scorer only

@@ -4,10 +4,10 @@ Arms (same model, same prompt, isolated: no user settings, hooks or other MCP
 servers, an empty working directory per run):
 
 - ``bare``: no tools at all.
-- ``alt``:  Bash, allowed to run only the ``job`` CLI (jobd 0.5.51 from PyPI,
-  behind ``job_guard.py``) and a few read-only text tools to filter its output.
-  This is what a user has without the MCP server.
-- ``mcp``:  jobd-mcp (jobd[mcp] 0.5.51 from PyPI via uvx) only, without
+- ``alt``:  Bash, allowed to run only the ``job`` CLI (jobd ``VERSION`` from
+  PyPI, behind ``job_guard.py``) and a few read-only text tools to filter its
+  output. This is what a user has without the MCP server.
+- ``mcp``:  jobd-mcp (jobd[mcp] ``VERSION`` from PyPI via uvx) only, without
   ``jobd_cancel``, ``jobd_preempt`` and ``jobd_worker_delete``.
 
 SAFETY. The questions are about the LIVE broker, so every arm reaches it only
@@ -19,7 +19,16 @@ skips the proxy is a 401. Mutating tools are also named in
 before they run.
 
 Before any run, ``drift`` re-reads every job and the fleet the key was built
-from; a changed answer stops the sweep (``--allow-drift`` overrides).
+from; a changed answer stops the sweep (``--allow-drift`` overrides). A broker
+on another version than the key's stops it too, unless
+``--accept-broker <live version>`` names that exact version; then the key must
+show no drift at all, and both versions go into ``versions.json``.
+
+``--model`` runs every arm on another Claude model (default ``MODEL``). Its
+transcripts and results default to ``runs-<model>/`` and
+``results-<model>.jsonl``, so the default model's are never overwritten; each
+row records the model the init event says served it, and a run served by any
+other model stops the sweep.
 
 Each finished run is appended to ``results.jsonl`` with its score; a rerun
 skips (arm, question, rep) triples already there, so an interrupted sweep
@@ -70,7 +79,8 @@ from readonly_proxy import ReadOnlyProxy
 from score import oracle_reply, score, wrong_reply
 
 MODEL = "claude-opus-5-5"
-VERSION = "0.5.51"  # latest jobd on PyPI, 2026-10-16
+DEFAULT_MODEL = MODEL
+VERSION = "0.5.52"  # latest jobd on PyPI, 2026-10-20 (0.5.51 for the 10-16 and 10-18 sweeps)
 SERVER = f"jobd[mcp]=={VERSION}"
 GIT_SPEC = re.compile(r"^git\+https://github\.com/musharna/jobd@([0-9a-f]{40})$")
 MCP_SERVER = ["uvx", "--from", SERVER, "jobd-mcp"]
@@ -185,6 +195,41 @@ class ProxyBypassed(RuntimeError):
     pass
 
 
+class WrongModel(RuntimeError):
+    pass
+
+
+def set_model(model: str) -> None:
+    """--model: every arm runs on ``model``."""
+    global MODEL
+    MODEL = model
+
+
+def set_stop_at(level: float) -> None:
+    """--stop-at: the seven-day utilization at which Gate stops the sweep."""
+    global STOP_AT
+    STOP_AT = level
+
+
+def model_paths(model: str) -> tuple[Path, Path]:
+    """Default transcript dir and results file for ``model``: the default
+    model keeps ``runs/`` and ``results.jsonl``; any other gets its own."""
+    if model == DEFAULT_MODEL:
+        return ARTIFACTS / "runs", ARTIFACTS / "results.jsonl"
+    return ARTIFACTS / f"runs-{model}", ARTIFACTS / f"results-{model}.jsonl"
+
+
+def check_broker(live: str | None, key: str, accept: str | None) -> str | None:
+    """Why the live broker cannot serve this key, or None. The answers depend
+    on the broker's semantics, so its version must be the key's, or the one
+    version ``--accept-broker`` names after a check that nothing changed."""
+    if live == key or (accept is not None and live == accept):
+        return None
+    if accept is not None:
+        return f"broker is {live}; --accept-broker names {accept}, the key was built on {key}"
+    return f"broker is {live}, the key was built on {key}"
+
+
 class Opts:
     """Per-sweep settings run_one needs (one object, so the pool call stays short)."""
 
@@ -255,6 +300,9 @@ def run_one(
     if arm == "alt" and not decisions and any(_BROKER_CMD.search(c) for c in commands):
         raise ProxyBypassed(f"{arm} {q['id']} rep{rep}: `job` ran but the proxy saw no request; "
                             f"see {out}")  # fmt: skip
+    if init.get("model") and init["model"] != MODEL:
+        raise WrongModel(f"{arm} {q['id']} rep{rep}: asked for {MODEL}, served by "
+                         f"{init['model']}; see {out}")  # fmt: skip
     reply = result.get("result") or ""
     return {
         "arm": arm,
@@ -319,6 +367,20 @@ def api_failure(events: list[dict[str, Any]], rc: object) -> str | None:
     return None
 
 
+def spend_stop() -> str | None:
+    """Why an API-billed sweep must stop before its next run, or None.
+
+    Set ``BENCH_SPEND_GATE`` to the shared spend meter's script and each run
+    first asks it (``check``, track from ``BENCH_TRACK``); any non-zero exit
+    (spend cap, billing violation, checkpoint) stops the sweep cleanly.
+    """
+    gate = os.environ.get("BENCH_SPEND_GATE")
+    if not gate:
+        return None
+    p = subprocess.run([sys.executable, gate, "check"], capture_output=True, text=True, check=False)
+    return None if p.returncode == 0 else (p.stderr.strip() or f"spend gate exit {p.returncode}")
+
+
 class Gate:
     """Pauses the sweep when the account's five-hour window runs high, and
     stops it when the seven-day window does. Every pause is recorded."""
@@ -329,6 +391,9 @@ class Gate:
         self.lock = threading.Lock()
 
     def wait(self) -> None:
+        why = spend_stop()
+        if why:
+            raise UsageStop(why)
         while True:
             with self.lock:
                 left = self.until - self.now()
@@ -453,8 +518,20 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--only", default="", help="comma-separated question ids")
     ap.add_argument("--key", default=str(ARTIFACTS / "questions.json"))
-    ap.add_argument("--runs", default=str(ARTIFACTS / "runs"), help="transcript directory")
-    ap.add_argument("--results", default=str(ARTIFACTS / "results.jsonl"))
+    ap.add_argument("--model", default=MODEL, help=f"claude --model (default {MODEL})")
+    ap.add_argument("--runs", default=None, help="transcript directory (default: per model)")
+    ap.add_argument("--results", default=None, help="results file (default: per model)")
+    ap.add_argument(
+        "--accept-broker",
+        default=None,
+        help="the one live broker version to accept for a key built on another; needs zero drift",
+    )
+    ap.add_argument(
+        "--stop-at",
+        type=float,
+        default=STOP_AT,
+        help=f"seven-day utilization that stops the sweep (default {STOP_AT})",
+    )
     ap.add_argument(
         "--server-spec",
         default=SERVER,
@@ -477,6 +554,11 @@ def main() -> None:
         help="move rows the API ended before an answer aside (once), run nothing",
     )
     a = ap.parse_args()  # fmt: skip
+    set_model(a.model)
+    set_stop_at(a.stop_at)
+    default_runs, default_results = model_paths(a.model)
+    a.runs = a.runs or str(default_runs)
+    a.results = a.results or str(default_results)
     key = json.loads(Path(a.key).read_text())
     questions = key["questions"]
     oracle_check(questions)
@@ -496,23 +578,29 @@ def main() -> None:
         questions = [q for q in questions if q["id"] in keep]
     broker = Broker(upstream, token)
     live_version = broker.get("/health").get("version")
-    if live_version != key["broker_version"]:
-        # The answers depend on the broker's semantics (routing rule, what a
-        # terminal state is), so a broker upgrade invalidates the key.
-        sys.exit(f"broker is {live_version}, the key was built on {key['broker_version']}")
+    # The answers depend on the broker's semantics (routing rule, what a
+    # terminal state is), so a broker upgrade invalidates the key unless
+    # --accept-broker names it.
+    why = check_broker(live_version, key["broker_version"], a.accept_broker)
+    if why:
+        sys.exit(why)
     check = build_hard.drift if key.get("version") == build_hard.VERSION else drift
     problems = check(broker, {**key, "questions": questions})
     if problems:
         print("the broker no longer matches the key:\n  " + "\n  ".join(problems))
+        if live_version != key["broker_version"]:
+            sys.exit("--accept-broker needs a key with no drift")
         if not a.allow_drift:
             sys.exit(2)
     o = Opts(Path(a.runs), a.server_spec, a.exclude_newer)
     versions = prewarm(o)
-    versions |= {"broker": live_version, "key": a.key, "key_built": key["built"]}
+    versions |= {"broker": live_version, "key": a.key, "key_built": key["built"],
+                 "key_broker": key["broker_version"], "model": MODEL,
+                 "stop_at": STOP_AT}  # fmt: skip
     vfile = results.with_name("versions.json")
     if vfile.exists():
         old = json.loads(vfile.read_text())
-        same = ("server_spec", "mcp", "cli", "exclude_newer", "broker")
+        same = ("server_spec", "mcp", "cli", "exclude_newer", "broker", "model")
         if {k: old.get(k) for k in same} != {k: versions.get(k) for k in same}:
             sys.exit(f"{vfile} records other versions than this run would use: {old}")
     results.parent.mkdir(parents=True, exist_ok=True)
@@ -546,7 +634,7 @@ def main() -> None:
         for n, f in enumerate(as_completed(futures), 1):
             try:
                 r = f.result()
-            except (ProxyBypassed, UsageStop) as e:
+            except (ProxyBypassed, UsageStop, WrongModel) as e:
                 pool.shutdown(wait=True, cancel_futures=True)
                 sys.exit(f"STOPPED: {e}")
             with lock, results.open("a") as fh:
