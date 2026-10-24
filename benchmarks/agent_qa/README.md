@@ -120,6 +120,86 @@ broker still gave every answer.
 
 ![By kind of question, 2026-10-18](rerun_2026-10-18/agent_qa_by_category.png)
 
+## Haiku and Sonnet re-run 2026-10-20
+
+Pre-registered in
+[`PREREG_2026-10-20_model-tiers.md`](PREREG_2026-10-20_model-tiers.md).
+Same 38 questions and key as on 10-18; the oracle passed and no answer
+drifted. Server `jobd[mcp]==0.5.52`, CLI `jobd==0.5.52`, all three arms
+re-run on each tier.
+
+**Win rule across both tiers: WIN.** Holm-adjusted McNemar p: Haiku 0.0078
+(lift: 9 questions only the server got right in all runs, 0 only the CLI; CI
++0.11 to +0.37), Sonnet 0.11 (8 against 2, CI 0.00 to +0.32: neither a lift
+nor a loss). [`tiers.py`](tiers.py) prints the verdict.
+
+### Haiku 5.5
+
+Results are in [`tiers_2026-10-20/claude-haiku-5-5/`](tiers_2026-10-20/claude-haiku-5-5/).
+
+| Setup (Haiku 5.5) | Right / 114 | Questions right in all 3 runs | Cost / answer, median | Seconds / answer, median |
+|---|---|---|---|---|
+| No tools | 0 | 0 of 38 | – | – |
+| + job CLI | 105 | 29 of 38 | $0.0057 | 69.5 |
+| + jobd-mcp | 114 | 38 of 38 | $0.0009 | 9.8 |
+
+- **Primary (raw p):** 9 questions only the server got right in all runs, 0
+  only the CLI. McNemar p = 0.0039, and the CI of the difference in share
+  right is +0.11 to +0.37. Of the CLI's 9 misses, 7 were runs that gave up
+  (`UNKNOWN`), 1 was a wrong total run time, and 2 were right answers voided
+  by the leak scan (see below). If those 2 count as right, it is 38 vs 31,
+  p = 0.016.
+- **Mechanism:** every server run called the server, 1.4 times on average.
+  96 of 114 passed `finished_after` / `finished_before`.
+- **Substitute (secondary, non-concurrent):** Haiku with the server got 38 of
+  38 against Opus with the CLI's 37 of 38 on 10-18 (p = 1).
+- **Cost:** the sweep cost $1.87: $0.99 for no tools (6 runs spent 5 to 8
+  minutes writing without an answer), $0.76 for the CLI and $0.12 for the
+  server.
+- **Controls:** 342 runs, 1 API error (re-run once, as pre-registered), 0
+  proxy refusals and 0 pauses. 2 CLI runs were invalid on the leak scan: the
+  arms' PATH held the worktree's `.venv/bin` (from `uv run`), and Haiku's
+  `which job` printed it. That path is not the key, but the rule voids the
+  run. On 10-18 the leak scan found no hits.
+
+### Sonnet 5.5
+
+Results are in [`tiers_2026-10-20/claude-sonnet-5-5/`](tiers_2026-10-20/claude-sonnet-5-5/).
+The first 52 runs (rep 1, through h17/h18) ran on the subscription on 10-20;
+the other 290 ran on 10-23 on an API key under a spend gate (see the PREREG's
+deviations). Same model, prompts and harness; Claude Code 2.1.305/306 then
+2.1.310, recorded per row.
+
+| Setup (Sonnet 5.5) | Right / 114 | Questions right in all 3 runs | Cost / answer, median | Seconds / answer, median |
+|---|---|---|---|---|
+| No tools | 0 | 0 of 38 | $0.0033 | 4.3 |
+| + job CLI | 103 | 30 of 38 | $0.059 | 39.9 |
+| + jobd-mcp | 111 | 36 of 38 | $0.012 | 6.9 |
+
+- **Primary (Holm p 0.11, not separated):** 8 questions only the server got
+  right in all runs, 2 only the CLI. Raw McNemar p = 0.11, CI of the
+  difference in share right 0.00 to +0.32. 1 CLI run was voided by the leak
+  scan for the same `.venv/bin` PATH line as on Haiku (h31 rep 3, an answer
+  that was right); counted as right it is 36 against 31, p = 0.18.
+- **Cost and time (secondary):** the server's median answer cost 0.20 of the
+  CLI's (CI 0.16 to 0.25) and took 0.17 of the time (0.13 to 0.20); it was
+  faster on all 38 questions and cheaper on 37. The arms cost $1.61 (server),
+  $7.52 (CLI) and $4.87 (no tools).
+- **Mechanism:** every server run called the server, 1.4 times on average.
+- **Substitute (secondary, non-concurrent):** Sonnet with the server got 36 of
+  38 against Opus with the CLI's 37 of 38 on 10-18 (p = 1).
+- **Controls:** 342 runs; 0 invalid server runs, 1 invalid CLI run (leak scan,
+  above), 4 invalid no-tools runs. Those 4 (h17, h18, h22 and h37, rep 2, all
+  on the API key) hit the 900 s timeout after one short thinking block, and
+  timeouts are not re-run. The likely cause is runaway output, not the API:
+  with no tools, Sonnet sometimes writes tool calls as plain text and keeps
+  going. The three most expensive no-tools runs that did finish (h14, h30 and
+  h17, rep 3) did exactly that, for 580 to 660 s and $1.29 to $1.60 each (137
+  to 264 KB of transcript), and they are most of the arm's $4.87. A transcript
+  holds a message only once it is complete, so a run cut off mid-message shows
+  only its thinking block. Replayed with the same flags, the same questions
+  answered in 4 to 8 s. The no-tools arm is not part of the primary.
+
 ## Controls
 
 `analyze.py` applies these after a sweep, with no model and no broker. Tests:

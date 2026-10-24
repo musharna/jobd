@@ -328,6 +328,28 @@ def win_rule(rows: list[dict[str, Any]], qids: list[str], reps: int = 3) -> dict
     }  # fmt: skip
 
 
+def substitute(
+    rows: list[dict[str, Any]], ref: list[dict[str, Any]], qids: list[str], reps: int = 3
+) -> dict[str, Any]:
+    """This sweep's mcp arm against another sweep's alt arm (``ref``, scored
+    rows with ``valid``), on the same questions: the substitute claim, e.g. a
+    smaller model with the server against a larger one without it. The two
+    sweeps ran at different times, so this is a secondary, non-concurrent
+    comparison; only the counts, McNemar p and CI are meant, not the verdict."""
+    ours = [r for r in rows if r["arm"] == "mcp"]
+    theirs = [{**r, "arm": "alt"} for r in ref if r["arm"] == "alt" and not r.get("baseline")]
+    return win_rule([*ours, *theirs], qids, reps)
+
+
+def mechanism(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Server tool calls in the mcp arm: per run, and runs that made none
+    (a server that is never called was not tested)."""
+    calls = [sum(t.startswith("mcp__jobd__") for t in r["tool_calls"])
+             for r in rows if r["arm"] == "mcp"]  # fmt: skip
+    return {"runs": len(calls), "server_calls_mean": statistics.fmean(calls) if calls else None,
+            "runs_with_no_server_call": sum(c == 0 for c in calls)}  # fmt: skip
+
+
 def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
     cols = list(rows[0])
 
@@ -350,6 +372,12 @@ def main() -> None:
     ap.add_argument("--runs", default=str(ARTIFACTS / "runs"))
     ap.add_argument("--outdir", default=str(HERE))
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument(
+        "--substitute",
+        default=None,
+        help="scored.jsonl of an earlier sweep: compare this mcp arm with its alt arm "
+        "(secondary, non-concurrent)",
+    )
     a = ap.parse_args()
     runs = Path(a.runs)
     key = json.loads(Path(a.key).read_text())
@@ -422,6 +450,31 @@ def main() -> None:
             f"only alt {rule['only_alt']}; non-inferior {rule['noninferior']}",
         }
     )  # fmt: skip
+    mech = mechanism(rows)
+    stats.append(
+        {
+            "arm": "mcp", "metric": "server_calls_per_run_mean",
+            "estimate": mech["server_calls_mean"], "lo95": None, "hi95": None, "p": None,
+            "note": f"{mech['runs_with_no_server_call']} of {mech['runs']} runs made no server call",
+        }
+    )  # fmt: skip
+    if a.substitute:
+        ref = [json.loads(ln) for ln in Path(a.substitute).read_text().splitlines()]
+        sub = substitute(rows, ref, qids, a.reps)
+        # Only the sweep's directory and file name: stats.tsv is tracked, and
+        # the absolute path is private.
+        ref_name = "/".join(Path(a.substitute).parts[-2:])
+        stats.append(
+            {
+                "arm": "mcp_vs_ref_alt", "metric": "substitute_right_every_run",
+                "estimate": sub["diff"], "lo95": sub["diff_lo95"], "hi95": sub["diff_hi95"],
+                "p": sub["mcnemar_p"],
+                "note": f"non-concurrent; ref {ref_name}: mcp {sub['mcp_right_all']}, "
+                f"ref alt {sub['alt_right_all']} of {sub['questions']}; only mcp "
+                f"{sub['only_mcp']}, only ref alt {sub['only_alt']}",
+            }
+        )  # fmt: skip
+        print("SUBSTITUTE (non-concurrent):", sub)
     out_dir = Path(a.results).parent
     (out_dir / "scored.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [*rows, *base]))
     out = Path(a.outdir)
