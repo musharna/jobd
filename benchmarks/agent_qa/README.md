@@ -191,9 +191,14 @@ deviations). Same model, prompts and harness; Claude Code 2.1.305/306 then
 - **Controls:** 342 runs; 0 invalid server runs, 1 invalid CLI run (leak scan,
   above), 4 invalid no-tools runs. Those 4 (h17, h18, h22 and h37, rep 2, all
   on the API key) hit the 900 s timeout after one short thinking block, and
-  timeouts are not re-run. Replayed with the same flags, the same question
-  answered in 4 to 8 s every time, so we read them as API-side latency; the
-  no-tools arm is not part of the primary.
+  timeouts are not re-run. The likely cause is runaway output, not the API:
+  with no tools, Sonnet sometimes writes tool calls as plain text and keeps
+  going. The three most expensive no-tools runs that did finish (h14, h30 and
+  h17, rep 3) did exactly that, for 580 to 660 s and $1.29 to $1.60 each (137
+  to 264 KB of transcript), and they are most of the arm's $4.87. A transcript
+  holds a message only once it is complete, so a run cut off mid-message shows
+  only its thinking block. Replayed with the same flags, the same questions
+  answered in 4 to 8 s. The no-tools arm is not part of the primary.
 
 ## Controls
 
