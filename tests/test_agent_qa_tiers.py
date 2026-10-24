@@ -160,7 +160,9 @@ def test_spend_gate_stops_the_sweep_before_a_run_and_lets_it_through_under_cap(
 ) -> None:
     """API-billed sweeps (2026-10-23): Gate.wait asks BENCH_SPEND_GATE before every run."""
     gate = tmp_path / "gate.py"
-    gate.write_text("import sys, os\nprint('cap reached', file=sys.stderr)\nsys.exit(int(os.environ['GATE_RC']))\n")
+    gate.write_text(
+        "import sys, os\nprint('cap reached', file=sys.stderr)\nsys.exit(int(os.environ['GATE_RC']))\n"
+    )
     monkeypatch.setenv("BENCH_SPEND_GATE", str(gate))
     monkeypatch.setenv("GATE_RC", "3")
     with pytest.raises(run.UsageStop, match="cap reached"):
