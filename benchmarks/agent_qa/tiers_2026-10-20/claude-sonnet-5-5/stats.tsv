@@ -1,0 +1,29 @@
+arm	metric	estimate	lo95	hi95	p	note
+alt	accuracy_runs	0.902655	0.823009	0.964912	NA	bootstrap over 38 questions, 10000 draws
+alt	questions_right_every_run	0.815789	0.684211	0.921053	NA	bootstrap over 38 questions, 10000 draws
+alt	cost_usd_median	0.0588433	0.0478001	0.0715445	NA	bootstrap over 38 questions, 10000 draws
+alt	cost_usd_mean	0.0663752	0.055453	0.0773817	NA	bootstrap over 38 questions, 10000 draws
+alt	seconds_median	40	35.4	52.7	NA	bootstrap over 38 questions, 10000 draws
+alt	seconds_mean	53.4018	44.143	62.6858	NA	bootstrap over 38 questions, 10000 draws
+alt	tool_calls_mean	20.0442	16.1239	24.115	NA	bootstrap over 38 questions, 10000 draws
+mcp	accuracy_runs	0.973684	0.929825	1	NA	bootstrap over 38 questions, 10000 draws
+mcp	questions_right_every_run	0.947368	0.868421	1	NA	bootstrap over 38 questions, 10000 draws
+mcp	cost_usd_median	0.0118105	0.010268	0.0132314	NA	bootstrap over 38 questions, 10000 draws
+mcp	cost_usd_mean	0.014165	0.0118069	0.0178699	NA	bootstrap over 38 questions, 10000 draws
+mcp	seconds_median	6.9	6.5	7.35	NA	bootstrap over 38 questions, 10000 draws
+mcp	seconds_mean	7.63421	7.28596	7.99561	NA	bootstrap over 38 questions, 10000 draws
+mcp	tool_calls_mean	1.39474	1.10526	1.78947	NA	bootstrap over 38 questions, 10000 draws
+mcp/alt	seconds_median_ratio	0.1725	0.132486	0.196328	NA	bootstrap over 38 questions, 10000 draws
+mcp/alt	cost_usd_median_ratio	0.200711	0.160356	0.25439	NA	bootstrap over 38 questions, 10000 draws
+mcp/alt	cost_usd_mean_ratio	0.213407	0.16655	0.28721	NA	bootstrap over 38 questions, 10000 draws
+mcp-alt	tool_calls_mean_diff	-18.6495	-22.8319	-14.6171	NA	bootstrap over 38 questions, 10000 draws
+mcp_vs_alt	mcnemar_right_every_run	5	NA	NA	0.179688	exact; discordant questions: 7 only mcp right, 2 only alt right
+mcp_vs_alt	sign_test_seconds_median	38	NA	NA	7.27596e-12	per-question medians: mcp lower on 38, higher on 0, tied on 0
+mcp_vs_alt	sign_test_cost_usd_median	36	NA	NA	2.83762e-10	per-question medians: mcp lower on 37, higher on 1, tied on 0
+mcp_vs_alt	sign_test_tool_calls_median	37	NA	NA	1.45519e-11	per-question medians: mcp lower on 37, higher on 0, tied on 1
+bare	questions_right_every_run	0	NA	NA	NA	0 of 38 questions
+prior	questions_right_every_run	0.0789474	NA	NA	NA	3 of 38 questions
+best_constant	questions_right_every_run	0.236842	NA	NA	NA	9 of 38 questions
+mcp_vs_alt	win_rule_TIE	0.157895	0	0.315789	0.109375	right in all 3 runs: mcp 36, alt 30 of 38; only mcp 8, only alt 2; non-inferior True
+mcp	server_calls_per_run_mean	1.39474	NA	NA	NA	0 of 114 runs made no server call
+mcp_vs_ref_alt	substitute_right_every_run	-0.0263158	-0.105263	0.0526316	1	non-concurrent; ref rerun-2026-10-18/scored.jsonl: mcp 36, ref alt 37 of 38; only mcp 1, only ref alt 2

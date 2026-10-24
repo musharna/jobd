@@ -120,14 +120,21 @@ broker still gave every answer.
 
 ![By kind of question, 2026-10-18](rerun_2026-10-18/agent_qa_by_category.png)
 
-## Haiku 5.5 re-run 2026-10-20
+## Haiku and Sonnet re-run 2026-10-20
 
 Pre-registered in
 [`PREREG_2026-10-20_model-tiers.md`](PREREG_2026-10-20_model-tiers.md).
-Haiku 5.5 is the first of two tiers; the Sonnet 5.5 sweep is paused at 52 of
-342 runs, so the Holm-adjusted verdict is pending. Same 38 questions and key
-as on 10-18; the oracle passed and no answer drifted. Server
-`jobd[mcp]==0.5.52`, CLI `jobd==0.5.52`, all three arms re-run on Haiku.
+Same 38 questions and key as on 10-18; the oracle passed and no answer
+drifted. Server `jobd[mcp]==0.5.52`, CLI `jobd==0.5.52`, all three arms
+re-run on each tier.
+
+**Win rule across both tiers: WIN.** Holm-adjusted McNemar p: Haiku 0.0078
+(lift: 9 questions only the server got right in all runs, 0 only the CLI; CI
++0.11 to +0.37), Sonnet 0.11 (8 against 2, CI 0.00 to +0.32: neither a lift
+nor a loss). [`tiers.py`](tiers.py) prints the verdict.
+
+### Haiku 5.5
+
 Results are in [`tiers_2026-10-20/claude-haiku-5-5/`](tiers_2026-10-20/claude-haiku-5-5/).
 
 | Setup (Haiku 5.5) | Right / 114 | Questions right in all 3 runs | Cost / answer, median | Seconds / answer, median |
@@ -154,6 +161,39 @@ Results are in [`tiers_2026-10-20/claude-haiku-5-5/`](tiers_2026-10-20/claude-ha
   arms' PATH held the worktree's `.venv/bin` (from `uv run`), and Haiku's
   `which job` printed it. That path is not the key, but the rule voids the
   run. On 10-18 the leak scan found no hits.
+
+### Sonnet 5.5
+
+Results are in [`tiers_2026-10-20/claude-sonnet-5-5/`](tiers_2026-10-20/claude-sonnet-5-5/).
+The first 52 runs (rep 1, through h17/h18) ran on the subscription on 10-20;
+the other 290 ran on 10-23 on an API key under a spend gate (see the PREREG's
+deviations). Same model, prompts and harness; Claude Code 2.1.305/306 then
+2.1.310, recorded per row.
+
+| Setup (Sonnet 5.5) | Right / 114 | Questions right in all 3 runs | Cost / answer, median | Seconds / answer, median |
+|---|---|---|---|---|
+| No tools | 0 | 0 of 38 | $0.0033 | 4.3 |
+| + job CLI | 103 | 30 of 38 | $0.059 | 39.9 |
+| + jobd-mcp | 111 | 36 of 38 | $0.012 | 6.9 |
+
+- **Primary (Holm p 0.11, not separated):** 8 questions only the server got
+  right in all runs, 2 only the CLI. Raw McNemar p = 0.11, CI of the
+  difference in share right 0.00 to +0.32. 1 CLI run was voided by the leak
+  scan for the same `.venv/bin` PATH line as on Haiku (h31 rep 3, an answer
+  that was right); counted as right it is 36 against 31, p = 0.18.
+- **Cost and time (secondary):** the server's median answer cost 0.20 of the
+  CLI's (CI 0.16 to 0.25) and took 0.17 of the time (0.13 to 0.20); it was
+  faster on all 38 questions and cheaper on 37. The arms cost $1.61 (server),
+  $7.52 (CLI) and $4.87 (no tools).
+- **Mechanism:** every server run called the server, 1.4 times on average.
+- **Substitute (secondary, non-concurrent):** Sonnet with the server got 36 of
+  38 against Opus with the CLI's 37 of 38 on 10-18 (p = 1).
+- **Controls:** 342 runs; 0 invalid server runs, 1 invalid CLI run (leak scan,
+  above), 4 invalid no-tools runs. Those 4 (h17, h18, h22 and h37, rep 2, all
+  on the API key) hit the 900 s timeout after one short thinking block, and
+  timeouts are not re-run. Replayed with the same flags, the same question
+  answered in 4 to 8 s every time, so we read them as API-side latency; the
+  no-tools arm is not part of the primary.
 
 ## Controls
 
