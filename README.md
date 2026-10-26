@@ -27,7 +27,7 @@ VRAM routing tracks one GPU per host: the worker reports free memory on GPU inde
 - **VRAM-fit routing.** Each job goes to a worker whose live free VRAM, RAM, CPUs, capability tags and arch/OS fit it, instead of you guessing which box is free.
 - **Preemption with a checkpoint window.** A higher-priority job can preempt a running one: `SIGTERM`, a grace window for the workload to save into its `JOBD_CHECKPOINT_DIR`, then `SIGKILL`. A preempted job is not re-run; to resume, submit a new job pointed at the checkpoint ([docs/preemption.md](https://github.com/musharna/jobd/blob/main/docs/preemption.md)).
 - **Survives sessions.** Jobs live in the broker, not your shell. Submit, close the laptop, check back tomorrow.
-- **Agent-native.** An [MCP](https://modelcontextprotocol.io/) server lets an AI agent submit, monitor and babysit jobs as tool calls ([does it help?](#does-it-help)).
+- **Agent-native.** An [MCP](https://modelcontextprotocol.io/) server lets an AI agent submit, monitor and babysit jobs as tool calls ([benchmark](#what-the-benchmark-shows)).
 - **Yours.** One broker process on a machine you own. No accounts, no telemetry, no per-GPU-hour billing. Only the optional self-update scripts go online ([runbook](https://github.com/musharna/jobd/blob/main/docs/runbook.md#continuous-deployment)).
 
 ## Why not just use…?
@@ -135,17 +135,17 @@ Any other MCP client:
 
 `JOBD_API_TOKEN` must match the broker's token, or every call returns 401. `examples/claude-code-hooks/` has optional hooks that nudge (or hard-block) an agent toward submitting heavy commands through jobd.
 
-## Does it help?
+## What the benchmark shows
 
-Equally accurate, and faster and cheaper: on 38 harder questions about a live broker, Claude answered 38 right in all 3 runs with jobd-mcp and 37 with the `job` CLI, a pre-registered tie (McNemar p = 1).
+Claude with the server was compared with Claude using jobd's own `job` CLI, on 38 questions about a live broker, 3 runs each. With Claude Haiku 5.5 the server got all 38 right in every run and the CLI 29: a pre-registered win (Holm-adjusted McNemar p = 0.008). With Sonnet 5.5 it was 36 against 30 and with Opus 5.5 38 against 37, neither separated. On all three models the server's answers were cheaper and faster; with Sonnet, 0.20 times the cost and 0.17 times the time.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/musharna/jobd/main/benchmarks/agent_qa/rerun_2026-10-18/agent_qa.png" alt="Bar chart of right and wrong answers to 38 questions about a live jobd broker, 3 runs per question for each Claude setup. Constant guess with no model: 3 right, 35 wrong. Best constant fit to the answer key: 9 right, 29 wrong. Claude with the job CLI: 113 right, 1 wrong. Claude with jobd-mcp: 114 of 114 right." width="780">
 </p>
 
-With the server the median answer cost 0.20 times as much (95% CI 0.15 to 0.28) and took 0.16 times as long (0.13 to 0.20), and it was cheaper and faster on all 38 questions. These were secondary endpoints, measured on an unreleased commit that adds a `finished_at` window to `jobd_list`. On an earlier, easier set both setups got 123 of 123.
+The chart is the Opus 5.5 run (2026-10-18). There the server's median answer cost 0.20 times as much (95% CI 0.15 to 0.28) and took 0.16 times as long (0.13 to 0.20), and it was cheaper and faster on all 38 questions. These were secondary endpoints, measured on an unreleased commit that adds a `finished_at` window to `jobd_list`. On an earlier, easier set both setups got 123 of 123.
 
-Method, controls and limitations: [benchmarks/agent_qa](https://github.com/musharna/jobd/blob/main/benchmarks/agent_qa/README.md).
+We wrote the questions and ran the benchmark ourselves; an outside re-run is welcome. Method, controls and limitations: [benchmarks/agent_qa](https://github.com/musharna/jobd/blob/main/benchmarks/agent_qa/README.md); the Haiku and Sonnet runs: [2026-10-20 re-run](https://github.com/musharna/jobd/blob/main/benchmarks/agent_qa/README.md#haiku-and-sonnet-re-run-2026-10-20).
 
 ## Supported platforms
 
