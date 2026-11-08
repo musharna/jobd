@@ -28,7 +28,7 @@ job list --array A42         # the members, with their index annotations
 job status A42               # aggregate: state tally + per-member rollup
 ```
 
-The array is identified as `A<id>` (the first member's job id). `job status A42` exits non-zero if any member ended in a non-completed terminal state, so it composes with shell `&&`.
+The array is identified as `A<id>` (the first member's job id). `job status A42` exits non-zero if any member ended in a non-completed terminal state, so it composes with shell `&&`; so does `job submit --count N --wait`, which waits on every member, not only the first.
 
 For a grid search, use `--sweep KEY=v1,v2,v3` (repeatable) instead of `--count`. The broker fans out the cartesian product of all axes, substituting `{KEY}` per member; `{i}` (the flat member index) is also available:
 
@@ -47,7 +47,7 @@ Most verbs map directly; the queue just spans every machine you own.
 | You ran…                          | With jobd                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------- |
 | `tsp <cmd>` / `pueue add -- <cmd>`| `job submit -p <project> -- <cmd>`                                          |
-| `tsp -w` / `pueue follow <id>`    | `job logs -f <id>` (or `job wait <id>`) — streams; exits 0 only if it completed, else its own nonzero exit code, else 1 |
+| `tsp -w` / `pueue follow <id>`    | `job logs -f <id>` (or `job wait <id>`) — streams; exits 0 only if it completed, else its own nonzero exit code (128+N for a signal, e.g. 143 for SIGTERM), else 1 |
 | `tsp` / `pueue status`            | `job list`                                                                  |
 | `pueue log <id>`                  | `job logs <id>`                                                             |
 | commands piped to `simple_gpu_scheduler` | `... \| job submit -p <project> --stdin` — one job per line, fleet-wide |

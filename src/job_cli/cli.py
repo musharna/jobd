@@ -365,9 +365,14 @@ def submit(
         for w in resp.get("warnings") or []:
             typer.secho(f"  ⚠ {w}", fg="yellow", err=True)
         if wait:
+            # Wait on EVERY member, then fail if any did (as `job status A<id>`
+            # does). `_stream_wait` exits the process, so calling it here ended
+            # the command on member 0's verdict and never waited on the rest.
+            rcs = []
             for jid in ids:
                 typer.echo(f"--- member {jid} ---", err=True)
-                _stream_wait(jid)
+                rcs.append(_wait_for_exit(jid))
+            sys.exit(1 if any(rcs) else 0)
         return
     note = _project_substitution_note(resp.get("project_label"), resp.get("project"))
     if note:
@@ -615,9 +620,14 @@ def exit_for(state: str, exit_code: int | None) -> int:
     exit_code passes through; otherwise it is 1. cancelled and preempted are
     deliberately nonzero: the job did not finish its work, so
     `job submit --wait ... && next` must not run `next`.
+
+    A signal death is recorded as Popen's negative returncode (-15 for SIGTERM);
+    it maps to the shell's 128+N (143), not to the low 8 bits of -15 (241).
     """
     if state not in TERMINAL_STATES:
         raise ValueError(f"exit_for: {state!r} is not a terminal state")
+    if exit_code is not None and exit_code < 0:
+        return 128 - exit_code
     # sys.exit keeps the low 8 bits only; a multiple of 256 would read as success.
     if exit_code and exit_code % 256:
         return exit_code
@@ -625,6 +635,11 @@ def exit_for(state: str, exit_code: int | None) -> int:
 
 
 def _stream_wait(job_id: int) -> None:
+    sys.exit(_wait_for_exit(job_id))
+
+
+def _wait_for_exit(job_id: int) -> int:
+    """Stream the job's log until its terminal event; return its CLI exit status."""
     with _client() as c, c.stream("GET", f"/wait/{job_id}", timeout=None) as s:
         # An unknown job id used to stream nothing and exit 0 — `job logs -f 99`
         # looked like a job with no output rather than a typo (audit
@@ -633,7 +648,7 @@ def _stream_wait(job_id: int) -> None:
         if s.status_code >= 400:
             s.read()
             typer.secho(f"job {job_id}: {s.text.strip()[:300]}", fg="red", err=True)
-            raise typer.Exit(1)
+            return 1
         # The verdict comes from the `terminal` event alone. A log line is never
         # parsed: a workload that prints `{"state": ...}` used to end the wait
         # early with an exit status read out of its own output.
@@ -650,12 +665,12 @@ def _stream_wait(job_id: int) -> None:
                 if event == "terminal":
                     parsed = json.loads(data)
                     typer.echo(f"[terminal] {parsed}", err=True)
-                    sys.exit(exit_for(parsed["state"], parsed.get("exit_code")))
+                    return exit_for(parsed["state"], parsed.get("exit_code"))
                 typer.echo(data)
         # The stream ended without a terminal event (job deleted mid-wait, broker
         # restarted): there is no outcome to report, and that is not success.
         typer.secho(f"job {job_id}: wait ended with no terminal state", fg="red", err=True)
-        sys.exit(1)
+        return 1
 
 
 def _worker_health_banner(client: JobdClient) -> None:

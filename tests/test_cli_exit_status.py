@@ -102,3 +102,57 @@ def test_exit_for_refuses_a_non_terminal_state():
 def test_exit_for_never_wraps_a_failure_to_zero():
     assert cli_mod.exit_for("failed", 256) == 1  # sys.exit(256) reads as 0 in a shell
     assert cli_mod.exit_for("completed", None) == 0
+
+
+def test_a_signal_death_exits_128_plus_the_signal():
+    """The worker records a signal death as Popen's negative returncode. Passed
+    straight to sys.exit, -15 read as 241 in the shell; the convention every
+    shell and `timeout` use is 128+N, so `$? -eq 143` means SIGTERM."""
+    assert cli_mod.exit_for("cancelled", -15) == 143
+    assert cli_mod.exit_for("failed", -9) == 137
+    assert cli_mod.exit_for("failed", 3) == 3  # a positive exit code still passes through
+
+
+def _array_on_broker(cli_on_broker, monkeypatch, outcomes: list[tuple[str, int | None]]):
+    """Make the in-process broker's array members end as `outcomes` the moment
+    /submit returns, so `job submit --count N --wait` streams real terminal events."""
+    real_post = JobdClient.post
+
+    def post(self, path, *, json=None, params=None):
+        r = real_post(self, path, json=json, params=params)
+        if path == "/submit" and "job_ids" in r.json():
+            with cli_on_broker.app.state.engine.begin() as conn:
+                for jid, (state, code) in zip(r.json()["job_ids"], outcomes, strict=True):
+                    conn.execute(
+                        update(Job).where(Job.id == jid).values(state=state, exit_code=code)
+                    )
+        return r
+
+    monkeypatch.setattr(JobdClient, "post", post)
+
+
+def test_array_wait_waits_on_every_member_and_fails_if_any_did(cli_on_broker, monkeypatch):
+    """`job submit --count N --wait` exited from inside the FIRST member's wait
+    (the shared wait helper calls sys.exit on its terminal event), so members 1..N-1
+    were never waited on and their outcome never reached the exit status:
+    `job submit --count 3 --wait ... && next` ran `next` with member 1 failed."""
+    _array_on_broker(
+        cli_on_broker, monkeypatch, [("completed", 0), ("failed", None), ("completed", 0)]
+    )
+    r = CliRunner().invoke(
+        cli_mod.app,
+        ["submit", "-p", "project-a", "--cwd", "/tmp", "--count", "3", "--wait", "--", "true"],
+    )
+    assert r.output.count("[terminal]") == 3, f"not every member was waited on: {r.output!r}"
+    assert r.exit_code == 1, f"a failed member did not reach the exit status: {r.output!r}"
+
+
+def test_array_wait_exits_zero_when_every_member_completed(cli_on_broker, monkeypatch):
+    """Positive control in the same harness."""
+    _array_on_broker(cli_on_broker, monkeypatch, [("completed", 0)] * 3)
+    r = CliRunner().invoke(
+        cli_mod.app,
+        ["submit", "-p", "project-a", "--cwd", "/tmp", "--count", "3", "--wait", "--", "true"],
+    )
+    assert r.output.count("[terminal]") == 3, r.output
+    assert r.exit_code == 0, r.output

@@ -36,6 +36,11 @@ WALL_CLOCK_BACKSTOP_GRACE_SECONDS = 120
 # finding: 2 stale workers on server. Configurable via env so operators can
 # tune for heartbeat cadence.
 STALE_WORKER_THRESHOLD_S_DEFAULT = 60
+# An any-exit child does not start on a worker_died/worker_restarted orphan until
+# the orphan settles (broker.state._unsettled_orphans): its worker heartbeats
+# without reporting it, or this long passes with no word. Bounds how long a
+# worker that never returns holds up the child. Override: JOBD_ORPHAN_SETTLE_S.
+ORPHAN_SETTLE_S_DEFAULT = 1800.0
 SWEEP_INTERVAL_SECONDS = 30
 # Retention runs on TWO independent clocks (audit 2026-07-12), because job rows
 # and job logs have wildly different cost/value profiles. Measured on the live

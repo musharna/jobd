@@ -9,6 +9,7 @@ so this module isn't fully web-framework-free.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,11 +22,12 @@ from jobd.broker.constants import (
     _DEPENDS_TERMINAL_ANY,
     _FAILED_SIDE_TERMINAL,
     _PARENT_FAILED_WARNING_PREFIX,
+    ORPHAN_SETTLE_S_DEFAULT,
     RECONCILE_MIN_AGE_SECONDS,
     RECONCILE_MISS_THRESHOLD,
 )
 from jobd.broker.events import _emit_event
-from jobd.db import Job
+from jobd.db import Job, Worker
 from jobd.models import JobRequires, JobState
 
 
@@ -38,7 +40,10 @@ def _deps_satisfied(job: Job, session) -> bool:
         If any parent is FAILED/CANCELLED/ORPHANED/PREEMPTED/SCHEDULING_TIMEOUT,
         the child will be cascade-cancelled elsewhere — return False here so the
         matcher doesn't dispatch it while the cascade is still pending.
-      - depends_on_any_exit=True: any terminal state unblocks.
+      - depends_on_any_exit=True: any terminal state unblocks, except an
+        UNSETTLED orphan (`_unsettled_orphans`): ORPHANED for a worker-gone reason
+        is the one terminal a heartbeat can turn back into RUNNING, so until that
+        is ruled out the parent may still be running beside the child.
 
     Single-job convenience wrapper over `_deps_satisfied_bulk`, which is the one
     implementation of this policy. Keeping two copies of the terminal-state rules in
@@ -78,13 +83,17 @@ def _deps_satisfied_bulk(jobs: Sequence[Job], session) -> set[int]:
         parent_ids.update(deps)
 
     parent_state: dict[int, str] = {}
+    unsettled: set[int] = set()
     if parent_ids:
-        parent_state = {
-            pid: pstate
-            for pid, pstate in session.execute(
-                select(Job.id, Job.state).where(Job.id.in_(parent_ids))
-            ).all()
-        }
+        rows = session.execute(
+            select(Job.id, Job.state, Job.termination_reason, Job.finished_at, Job.worker).where(
+                Job.id.in_(parent_ids)
+            )
+        ).all()
+        parent_state = {r[0]: r[1] for r in rows}
+        gone = [r for r in rows if r[1] == JobState.ORPHANED.value and r[2] in _WORKER_GONE_REASONS]
+        if gone and any(j.depends_on_any_exit for j in jobs):
+            unsettled = _unsettled_orphans(session, gone)
 
     satisfied: set[int] = set()
     for job in jobs:
@@ -100,9 +109,59 @@ def _deps_satisfied_bulk(jobs: Sequence[Job], session) -> set[int]:
                 continue
             if parent_state[dep_id] not in terminal:
                 break
+            if dep_id in unsettled and job.depends_on_any_exit:
+                break
         else:
             satisfied.add(job.id)
     return satisfied
+
+
+def _naive_utc(dt: datetime | None) -> datetime | None:
+    if dt is None or dt.tzinfo is None:
+        return dt
+    return dt.astimezone(UTC).replace(tzinfo=None)
+
+
+def _unsettled_orphans(session, rows) -> set[int]:
+    """Ids of worker-gone orphans whose worker could still resurrect them.
+
+    `rows` are (id, state, termination_reason, finished_at, worker) for ORPHANED
+    parents with a `_WORKER_GONE_REASONS` reason. Such an orphan SETTLES when either:
+      - its worker has heartbeated since the orphan was written: that heartbeat ran
+        `_resurrect_reported_orphans` in the same transaction that stamped
+        `last_heartbeat`, so a job still ORPHANED after it was not reported, or
+      - JOBD_ORPHAN_SETTLE_S has passed since the orphan (a worker that never
+        returns must not strand the child; a freeze longer than this can still
+        resurrect a parent beside a running child — the bounded residual).
+    An orphan with no finished_at (no writer leaves one) is treated as settled,
+    which is the pre-0.5.54 behavior. Both reads are direct row selects, so they
+    are as fresh as the parent-state read (see the freshness note above).
+    """
+    try:
+        settle_s = float(os.environ.get("JOBD_ORPHAN_SETTLE_S", ORPHAN_SETTLE_S_DEFAULT))
+    except ValueError:
+        settle_s = ORPHAN_SETTLE_S_DEFAULT
+    now = datetime.now(UTC).replace(tzinfo=None)
+    hosts = {r[4] for r in rows if r[4]}
+    last_hb = (
+        dict(
+            session.execute(
+                select(Worker.host, Worker.last_heartbeat).where(Worker.host.in_(hosts))
+            ).all()
+        )
+        if hosts
+        else {}
+    )
+    unsettled: set[int] = set()
+    for jid, _state, _reason, finished_at, worker in rows:
+        fin = _naive_utc(finished_at)
+        if fin is None or (now - fin).total_seconds() >= settle_s:
+            continue
+        hb = _naive_utc(last_hb.get(worker))
+        if hb is not None and hb > fin:
+            continue
+        unsettled.add(jid)
+    return unsettled
 
 
 def _job_requires_idempotent(job: Job) -> bool:
