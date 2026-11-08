@@ -1,1 +1,0 @@
-- **`job submit --count N --wait` waits on every member.** It exited on the first member's verdict (the shared wait helper called `sys.exit`), so members 1..N-1 were never waited on and `job submit --count 3 --wait ... && next` ran `next` with a later member failed or still running. It now waits on all of them and exits 1 if any did not complete, as `job status A<id>` does.

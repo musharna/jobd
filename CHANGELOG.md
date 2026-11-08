@@ -4,6 +4,14 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.54] — 2026-11-08
+
+### Fixed
+
+- **A `depends_on_any_exit` child no longer starts while its parent may still be running.** A parent orphaned as `worker_died`/`worker_restarted` is terminal, but its worker may only have been frozen, and the next heartbeat resurrects it to RUNNING; the any-exit child had already dispatched on the orphan and ran beside it. Such an orphan now releases any-exit children only once it settles: its worker heartbeats without reporting the job, or `JOBD_ORPHAN_SETTLE_S` (default 1800) passes. Default-policy children are unchanged (cascade-cancelled, restored on resurrect).
+- **`job submit --count N --wait` waits on every member.** It exited on the first member's verdict (the shared wait helper called `sys.exit`), so members 1..N-1 were never waited on and `job submit --count 3 --wait ... && next` ran `next` with a later member failed or still running. It now waits on all of them and exits 1 if any did not complete, as `job status A<id>` does.
+- **A job killed by a signal exits 128+N from `job wait` / `submit --wait` / `logs -f` / `status`.** The worker records a signal death as a negative exit code (-15 for SIGTERM), which the CLI passed to `sys.exit` and the shell read as 241. It is now the shell's convention, 143.
+
 ## [0.5.53] — 2026-11-07
 
 ### Fixed

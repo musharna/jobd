@@ -1,1 +1,0 @@
-- **A job killed by a signal exits 128+N from `job wait` / `submit --wait` / `logs -f` / `status`.** The worker records a signal death as a negative exit code (-15 for SIGTERM), which the CLI passed to `sys.exit` and the shell read as 241. It is now the shell's convention, 143.
