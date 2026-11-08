@@ -33,6 +33,7 @@ Security-sensitive variables (`JOBD_API_TOKEN`, `JOBD_ALLOW_NO_AUTH`,
 | `JOBD_ENV_SCRUB_HOURS` | `1` | Mask a terminal job's stored `env` values (keys kept) this many hours after it finishes; negative disables. See [security.md](security.md). |
 | `JOBD_VERSION_DRIFT_WARN_HOURS` | `24` | Emit one `version_drift` event per episode for an online worker whose version has mismatched the broker's continuously this long; negative disables. |
 | `JOBD_STALE_WORKER_THRESHOLD_S` | `60` | Heartbeat age past which an online worker is marked `stale` (fully-dead workers go `offline` on their own clock). |
+| `JOBD_ORPHAN_SETTLE_S` | `1800` | A `depends_on_any_exit` child waits on a parent orphaned as `worker_died`/`worker_restarted` (which its worker can still resurrect) until that worker heartbeats without reporting it, or this many seconds pass. |
 | `JOBD_CTEST_PARSE` | off | `=1` enables the ctest cost-data ETA predictor for `ctest -R` jobs. |
 
 ## Worker (`jobd-worker`)
