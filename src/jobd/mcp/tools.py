@@ -243,14 +243,18 @@ def jobd_cancel(client: JobdClient, args: dict) -> dict:
     finished between that read and the cancel was reported as signalled). The
     broker's cancel handler either moves a queued job straight to cancelled,
     or stamps signal='cancel' on a running/assigned one in the same
-    transaction that produced the reply — so a reply still running/assigned
-    means a cancel signal is pending (the worker SIGTERMs on its next poll),
-    and anything else means no signal was queued. prior_state is informational.
+    transaction that produced the reply — so a reply still running/assigned,
+    or an orphaned one carrying signal='cancel', means a cancel signal is
+    pending (the worker SIGTERMs on its next poll), and anything else means no
+    signal was queued. prior_state is informational.
     """
     job_id = args["job_id"]
     prior = _status(client, job_id)
     after = xlate_job_info(client.cancel(job_id, reason=args.get("reason")))
-    signal_sent = "cancel" if after["state"] in ("running", "assigned") else None
+    in_flight = after["state"] in ("running", "assigned")
+    # A worker-gone orphan reply with signal='cancel' is also a pending SIGTERM:
+    # its worker may thaw and resume it (broker _arm_cancel_signal).
+    signal_sent = "cancel" if in_flight or after.get("signal") == "cancel" else None
     return {
         "job_id": job_id,
         "prior_state": prior["state"],
