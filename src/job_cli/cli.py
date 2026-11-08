@@ -18,7 +18,7 @@ import typer
 from jobd import __version__, procident
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
 from jobd.config import project_key
-from jobd.models import TERMINAL_FAIL_STATES, TERMINAL_STATES
+from jobd.models import TERMINAL_FAIL_STATES, TERMINAL_STATES, JobState
 
 # Default cap for `job list` (audit 2026-07-12): a long-lived broker with
 # retention off holds every job ever run, and `list` used to print all of them.
@@ -603,6 +603,27 @@ def _print_resolved(resolved: dict) -> None:
         typer.echo(f"  identity by spelling: registered name (submitted as {submitted_as})")
 
 
+def exit_for(state: str, exit_code: int | None) -> int:
+    """The CLI exit status for a job that ended in `state`. Every command that
+    reports a job's outcome uses this one mapping: `job wait`, `job submit
+    --wait`, `job logs -f`, `job status` (and --watch), and arrays.
+
+    0 only for `completed`. Every other terminal state (failed, cancelled,
+    preempted, orphaned, scheduling_timeout) is nonzero, even when its writer
+    left exit_code NULL, as the sweeper's orphan, a scheduling timeout, a queued
+    cancel, cwd_unreachable and a drain-refused preempt all do. A real nonzero
+    exit_code passes through; otherwise it is 1. cancelled and preempted are
+    deliberately nonzero: the job did not finish its work, so
+    `job submit --wait ... && next` must not run `next`.
+    """
+    if state not in TERMINAL_STATES:
+        raise ValueError(f"exit_for: {state!r} is not a terminal state")
+    # sys.exit keeps the low 8 bits only; a multiple of 256 would read as success.
+    if exit_code and exit_code % 256:
+        return exit_code
+    return 0 if state == JobState.COMPLETED and not exit_code else 1
+
+
 def _stream_wait(job_id: int) -> None:
     with _client() as c, c.stream("GET", f"/wait/{job_id}", timeout=None) as s:
         # An unknown job id used to stream nothing and exit 0 — `job logs -f 99`
@@ -613,23 +634,28 @@ def _stream_wait(job_id: int) -> None:
             s.read()
             typer.secho(f"job {job_id}: {s.text.strip()[:300]}", fg="red", err=True)
             raise typer.Exit(1)
-        exit_code = 0
+        # The verdict comes from the `terminal` event alone. A log line is never
+        # parsed: a workload that prints `{"state": ...}` used to end the wait
+        # early with an exit status read out of its own output.
+        event = None
         for line in s.iter_lines():
             if not line:
+                event = None  # a blank line ends an SSE event
                 continue
-            if line.startswith("event: log"):
+            if line.startswith("event: "):
+                event = line[7:].strip()
                 continue
             if line.startswith("data: "):
                 data = line[6:]
-                try:
+                if event == "terminal":
                     parsed = json.loads(data)
-                    if "state" in parsed:
-                        exit_code = parsed.get("exit_code") or 0
-                        typer.echo(f"[terminal] {parsed}", err=True)
-                        break
-                except json.JSONDecodeError:
-                    typer.echo(data)
-        sys.exit(exit_code)
+                    typer.echo(f"[terminal] {parsed}", err=True)
+                    sys.exit(exit_for(parsed["state"], parsed.get("exit_code")))
+                typer.echo(data)
+        # The stream ended without a terminal event (job deleted mid-wait, broker
+        # restarted): there is no outcome to report, and that is not success.
+        typer.secho(f"job {job_id}: wait ended with no terminal state", fg="red", err=True)
+        sys.exit(1)
 
 
 def _worker_health_banner(client: JobdClient) -> None:
@@ -782,12 +808,11 @@ def _render_status(j: dict) -> str:
 
 
 # Array aggregation needs every terminal state so --watch can't hang on a
-# preempted/orphaned/scheduling_timeout member. These now alias the canonical
-# models.TERMINAL_STATES / TERMINAL_FAIL_STATES — the single-job TERMINAL_STATES
-# above used to be a narrow {completed, failed, cancelled} copy that diverged
-# from this set; unifying on models.py removed that split.
+# preempted/orphaned/scheduling_timeout member. This aliases the canonical
+# models.TERMINAL_STATES — the single-job TERMINAL_STATES above used to be a
+# narrow {completed, failed, cancelled} copy that diverged from this set;
+# unifying on models.py removed that split. The exit status goes through exit_for.
 _ARRAY_TERMINAL = TERMINAL_STATES
-_ARRAY_FAILURE = TERMINAL_FAIL_STATES
 
 
 def _render_array_status(jobs: list[dict], array_id: int) -> str:
@@ -812,8 +837,8 @@ def _status_array(c, array_id: int, watch: bool, interval: float) -> None:
         return c.get("/jobs", params={"array_id": array_id}).json()
 
     def exit_code(jobs: list[dict]) -> int:
-        # 1 if any member ended in a non-completed terminal state, else 0.
-        return 1 if any(j["state"] in _ARRAY_FAILURE for j in jobs) else 0
+        # 1 if any member did not succeed (see exit_for), else 0.
+        return 1 if any(exit_for(j["state"], j.get("exit_code")) for j in jobs) else 0
 
     if not watch:
         jobs = fetch()
@@ -864,7 +889,10 @@ def status(
             r = c.get(f"/jobs/{job_id}")
             j = r.json()
             typer.echo(_render_status(j))
-            sys.exit(j.get("exit_code") or 0 if j["state"] in TERMINAL_STATES else 0)
+            # A live job's status is a read, not a verdict: 0.
+            sys.exit(
+                exit_for(j["state"], j.get("exit_code")) if j["state"] in TERMINAL_STATES else 0
+            )
         try:
             while True:
                 r = c.get(f"/jobs/{job_id}")
@@ -873,7 +901,7 @@ def status(
                 sys.stdout.write(_render_status(j) + "\n")
                 sys.stdout.flush()
                 if j["state"] in TERMINAL_STATES:
-                    sys.exit(j.get("exit_code") or 0)
+                    sys.exit(exit_for(j["state"], j.get("exit_code")))
                 time.sleep(interval)
         except KeyboardInterrupt:
             sys.exit(130)
@@ -981,8 +1009,9 @@ def preempt_blockers(
 
 @app.command()
 def wait(job_id: int):
-    """Block until a job reaches a terminal state, streaming its log. Exits with
-    the job's own exit code, so it composes in a shell pipeline."""
+    """Block until a job reaches a terminal state, streaming its log. Exits 0
+    only if it completed; otherwise its own nonzero exit code, else 1, so it
+    composes in a shell pipeline."""
     _stream_wait(job_id)
 
 
