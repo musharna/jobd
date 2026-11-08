@@ -4,6 +4,13 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.53] — 2026-11-07
+
+### Fixed
+
+- **A cancel on a job orphaned as `worker_died`/`worker_restarted` is no longer dropped.** The cancel route treated it as terminal: 200, no signal. If the frozen worker thawed, the heartbeat resurrected the job with nothing to poll and it ran to completion. The route now stamps `signal=cancel` on such a resurrectable orphan (one write, `_arm_cancel_signal`), so a resurrect hands the worker the cancel and the job ends `cancelled`. MCP `jobd_cancel` reports `signal_sent="cancel"` for it.
+- **`job wait`, `job submit --wait`, `job logs -f` and `job status` exit nonzero for every terminal state but `completed`.** They used to exit `exit_code or 0`, and several terminal writers leave `exit_code` NULL (sweeper `orphaned`, `scheduling_timeout`, a queued cancel, `cwd_unreachable`, a drain-refused `preempted`), so `job submit --wait ... && next` ran `next` after a job that never succeeded. One mapping, `exit_for(state, exit_code)`, now serves every call site: `completed` is 0, a real nonzero `exit_code` passes through, anything else is 1 (including `cancelled`, `preempted`, and an adopted job's `orphaned`). The wait also reads its verdict from the SSE `terminal` event only (a log line printing `{"state": ...}` no longer ends it), and a stream that ends with no terminal event exits 1.
+
 ## [0.5.52] — 2026-10-19
 
 ### Security
