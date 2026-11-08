@@ -455,3 +455,52 @@ def test_the_cascade_write_loses_cleanly_to_a_concurrent_user_cancel(client, mon
     _hb(client, "laptop", in_flight=[parent])  # the resurrect must not restore it
     assert _row(client, parent).state == "running"
     assert _row(client, child).state == "cancelled"
+
+
+# --- a cancel issued AFTER the orphan, while the job is resurrectable --------
+#
+# The tests above cancel BEFORE sweep_once, while the row is still RUNNING, so the
+# cancel route stamps signal='cancel'. Cancel AFTER the sweeper has orphaned it
+# used to be the route's "terminal-state cancel is a no-op": 200, no signal. Then
+# the worker thawed, the job resurrected with nothing to poll, and ran to
+# completion: a cancel the user was told succeeded, undone by a heartbeat.
+
+
+def test_a_cancel_issued_after_the_orphan_is_delivered_after_resurrect(client):
+    job_id = _claim(client, "laptop")
+    _dead(client, "laptop")
+    client.app.state.sweep_once()
+    assert _row(client, job_id).state == "orphaned"
+    assert _row(client, job_id).termination_reason == "worker_died"
+
+    r = client.post(f"/jobs/{job_id}/cancel")
+    assert r.status_code == 200, r.text
+    assert r.json()["signal"] == "cancel", (
+        "cancel on a resurrectable orphan returned 200 but recorded no signal; "
+        "if the worker thaws, nothing tells it to stop"
+    )
+
+    _hb(client, "laptop", in_flight=[job_id])  # the thaw
+    assert client.get(f"/jobs/{job_id}/signal").json()["signal"] == "cancel", (
+        "the resurrected job has no pending cancel: its worker will run it to completion"
+    )
+
+    # What the real worker does on that poll: SIGTERM, then report cancelled.
+    r = client.post(
+        f"/jobs/{job_id}/complete",
+        json={"exit_code": -15, "final_state": "cancelled"},
+        headers={"X-Jobd-Worker": "laptop"},
+    )
+    assert r.status_code == 200, r.text
+    assert _row(client, job_id).state == "cancelled"
+
+
+def test_a_cancel_on_a_non_resurrectable_terminal_is_still_a_no_op(client):
+    """Control on the scope: only a worker-gone orphan can come back, so only it
+    takes a signal. A real outcome keeps its row untouched."""
+    job_id = _claim(client, "laptop")
+    _force(client, job_id, state="orphaned", termination_reason="wall_clock_exceeded")
+    assert client.post(f"/jobs/{job_id}/cancel").json()["signal"] is None
+    done = _claim(client, "laptop")
+    _force(client, done, state="completed", exit_code=0)
+    assert client.post(f"/jobs/{done}/cancel").json()["signal"] is None

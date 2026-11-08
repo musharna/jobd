@@ -55,6 +55,7 @@ it again.
   `exit_code = null` — "we lost sight of the outcome", which is the truth. It
   is never reported `completed`. Consequence: default-policy dependents are
   cascade-cancelled; "run this after it ends" is `--depends-on ID --depends-on-any-exit`.
+  For the same reason `job wait` / `job status` on it exit 1, not 0.
 - **Its output.** stdout/stderr belong to whoever started it. `job logs` is
   empty for an adopted job.
 - **Its start.** `started_at` is the adoption time, not the process's.

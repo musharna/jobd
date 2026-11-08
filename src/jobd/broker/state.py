@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
 from jobd.broker.constants import (
     _DEPENDS_TERMINAL,
@@ -455,6 +455,44 @@ def _reconcile_worker_in_flight(
 _WORKER_GONE_REASONS = ("worker_died", "worker_restarted")
 
 
+def _resurrectable_orphan():
+    """SQL predicate for the one terminal row that can still change: ORPHANED for
+    a worker-gone reason. Its worker may be alive (frozen, not dead) and bring it
+    back on a heartbeat (`_resurrect_reported_orphans`), so it is the resurrect's
+    input set and a cancel on it must be recorded (`_arm_cancel_signal`)."""
+    return and_(
+        Job.state == JobState.ORPHANED.value,
+        Job.termination_reason.in_(_WORKER_GONE_REASONS),
+    )
+
+
+def _arm_cancel_signal(session, job_id: int) -> bool:
+    """Stamp signal='cancel' on a job whose workload may be running: ASSIGNED,
+    RUNNING, or a resurrectable orphan. The one write for a signal-based cancel.
+
+    The worker polls GET /jobs/{id}/signal and SIGTERMs the workload. A
+    resurrectable orphan needs the signal as much as a running job: if its
+    worker thaws, the resurrect puts it back to RUNNING and this signal is the
+    only thing that stops it. Without it the cancel route answered 200, recorded
+    nothing, and the job resurrected and ran to completion.
+
+    A CAS on the same predicate, so a row that reached a real terminal between
+    the caller's read and this write gets no stale signal. Returns True if the
+    signal was armed."""
+    result = session.execute(
+        Job.__table__.update()  # type: ignore[attr-defined]  # SQLAlchemy: Table.update on __table__
+        .where(
+            Job.id == job_id,
+            or_(
+                Job.state.in_([JobState.RUNNING.value, JobState.ASSIGNED.value]),
+                _resurrectable_orphan(),
+            ),
+        )
+        .values(signal="cancel")
+    )
+    return bool(result.rowcount)
+
+
 def _resurrect_reported_orphans(
     session,
     host: str,
@@ -483,7 +521,10 @@ def _resurrect_reported_orphans(
 
     A user CANCEL is deliberately NOT undoable here: the worker learns about it
     through `GET /jobs/{id}/signal` and kills the workload. Resurrecting it would
-    override a human.
+    override a human. That holds whether the cancel landed before the orphan
+    (the orphan write preserves the signal) or after it (`_arm_cancel_signal`
+    stamps it on the orphan): the resurrect keeps `signal`, so the revived
+    worker's next poll SIGTERMs the job and it reports `cancelled`.
     """
     unclaimed = reported - claimed_ids
     if not unclaimed:
@@ -494,8 +535,7 @@ def _resurrect_reported_orphans(
             select(Job).where(
                 Job.id.in_(unclaimed),
                 Job.worker == host,
-                Job.state == JobState.ORPHANED.value,
-                Job.termination_reason.in_(_WORKER_GONE_REASONS),
+                _resurrectable_orphan(),
             )
         )
         .scalars()

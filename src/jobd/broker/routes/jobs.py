@@ -33,6 +33,7 @@ from jobd.broker.jobinfo import _build_eta_ctx, _to_info
 from jobd.broker.joblog import job_log_path
 from jobd.broker.scheduling import _build_snapshots
 from jobd.broker.state import (
+    _arm_cancel_signal,
     _cas_state,
     _cascade_on_parent_terminal,
     _emit_cascade_cancellations,
@@ -438,20 +439,14 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                     # Lost the race to the claim — re-read and fall through to
                     # the running/assigned signal path below.
                     session.refresh(job)
-            if cancel_event_kw is None and job.state in (JobState.RUNNING, JobState.ASSIGNED):
+            if cancel_event_kw is None:
                 # Signal-based cancel: the worker honors it on its next poll.
-                # Guarded so a job that reached a terminal state between our read
-                # and here doesn't get a stale 'cancel' signal stamped on it.
+                # Covers ASSIGNED/RUNNING and a resurrectable orphan, whose
+                # worker may thaw and resume it (see _arm_cancel_signal).
                 prior_state = job.state.value if hasattr(job.state, "value") else job.state
-                won = _cas_state(
-                    session,
-                    job_id,
-                    (JobState.RUNNING, JobState.ASSIGNED),
-                    signal="cancel",
-                )
-                if won:
+                if _arm_cancel_signal(session, job_id):
                     cancel_event_kw = dict(prior_state=prior_state, by="user_signal_pending")
-            # else: terminal-state cancel is a no-op; don't emit
+            # else: a cancel on any other terminal row is a no-op; don't emit
             session.commit()
             session.refresh(job)
             if cancel_event_kw is not None:

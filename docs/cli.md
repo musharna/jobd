@@ -47,7 +47,7 @@ Most verbs map directly; the queue just spans every machine you own.
 | You ran…                          | With jobd                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------- |
 | `tsp <cmd>` / `pueue add -- <cmd>`| `job submit -p <project> -- <cmd>`                                          |
-| `tsp -w` / `pueue follow <id>`    | `job logs -f <id>` (or `job wait <id>`) — streams, exits with the job's own exit code |
+| `tsp -w` / `pueue follow <id>`    | `job logs -f <id>` (or `job wait <id>`) — streams; exits 0 only if it completed, else its own nonzero exit code, else 1 |
 | `tsp` / `pueue status`            | `job list`                                                                  |
 | `pueue log <id>`                  | `job logs <id>`                                                             |
 | commands piped to `simple_gpu_scheduler` | `... \| job submit -p <project> --stdin` — one job per line, fleet-wide |
