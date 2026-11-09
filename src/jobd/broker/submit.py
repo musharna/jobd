@@ -142,9 +142,9 @@ def submit_job(
         snapshots = _build_snapshots(online)
         all_workers = list(session.execute(select(Worker)).scalars().all())
         all_snapshots = _build_snapshots(all_workers)
-        ser_warn = _serialization_warning(requires, host_pin, snapshots, session)
+        ser_warn = _serialization_warning(requires, host_pin, snapshots, session, vram_gb=vram_gb)
         gpu_warn = gpu_contention_warning(requires, host_pin, snapshots)
-        preflight_warn = submit_preflight(requires, host_pin, all_snapshots)
+        preflight_warn = submit_preflight(requires, host_pin, all_snapshots, vram_gb=vram_gb)
         mnt_c_msg = mnt_c_pin_error(req.cwd, host_pin, all_snapshots)
         if mnt_c_msg is not None:
             raise HTTPException(status_code=400, detail=mnt_c_msg)
@@ -203,7 +203,7 @@ def submit_job(
         # member (routing ignores the per-member substitution); array_count
         # tells the caller how many members the live submit would create.
         if req.dry_run:
-            eligible = eligible_workers(requires, host_pin, snapshots)
+            eligible = eligible_workers(requires, host_pin, snapshots, vram_gb=vram_gb)
             # would_route_to: hostnames the matcher would currently
             # consider (capability + host_pin match, ignores load). Empty
             # list = unmatcheable right now (preflight_warn explains why).

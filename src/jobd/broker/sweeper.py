@@ -837,14 +837,17 @@ def sweep_once(session_local, logs_dir: Path, wake_dispatchers: Callable[[], Non
                 requires=sq_req,
             )
             # sq_req=None means job matches any worker by definition — an empty
-            # fleet is a queueing delay, not a capability mismatch.
-            matcheable = sq_req is None or any(selectors_only_match(shim, ws) for ws in snapshots)
+            # fleet is a queueing delay, not a capability mismatch. Unless it asks
+            # for VRAM: then a fleet of GPU-opted-out workers can never take it.
+            matcheable = (sq_req is None and j.vram_gb <= 0) or any(
+                selectors_only_match(shim, ws) for ws in snapshots
+            )
 
             blocker_warning: str | None = None
             if matcheable:
                 age_s = (now - j.submitted_at).total_seconds()
                 if age_s >= QUEUE_BLOCKED_THRESHOLD_SECONDS:
-                    elig = eligible_workers(sq_req, j.host_pin, snapshots)
+                    elig = eligible_workers(sq_req, j.host_pin, snapshots, vram_gb=j.vram_gb)
                     if elig:
                         candidate = _find_preemptible_candidate(elig, j, session, now)
                         if candidate is not None:

@@ -103,9 +103,14 @@ def effective_vram_request_gb(job: QueuedJob) -> float:
       3. `GPU_IMPLICIT_FLOOR_GB` (2 GB) when `requires.gpu is True`
       4. 0 — non-GPU jobs don't gate on VRAM
     """
-    if job.vram_gb > 0:
-        return float(job.vram_gb)
-    requires = job.requires
+    return _vram_request_gb(job.vram_gb, job.requires)
+
+
+def _vram_request_gb(vram_gb: float, requires: JobRequires | None) -> float:
+    """`effective_vram_request_gb` on the two fields it reads, for callers
+    (eligibility, preflight) that hold a submit's fields rather than a job."""
+    if vram_gb > 0:
+        return float(vram_gb)
     if requires is not None:
         tier_max = 0
         for tag in requires.needs:
@@ -123,21 +128,30 @@ def effective_vram_request_gb(job: QueuedJob) -> float:
     return 0.0
 
 
-def fits_on_worker(job: QueuedJob, w: WorkerSnapshot) -> bool:
-    """True iff selectors + host_pin + resource floor all allow the job.
+def _gpu_opt_out_blocks(vram_request_gb: float, host_pin: str, w: WorkerSnapshot) -> bool:
+    """True iff `w` opted out of GPU work and the job asks for a GPU anyway.
 
     `w.gpu` is the worker's GPU opt-in, not just NVML presence: a worker set to
     `gpu: false` still reports free VRAM and the `any-gpu` alias. Asking for VRAM
     (explicitly or via a cuda-Ngb tag) or pinning to `any-gpu` is asking for a
     GPU, so neither may land on an opted-out worker -- the same reading adopt.py
-    already gives `vram_gb > 0`.
+    already gives `vram_gb > 0`. ONE predicate for the dispatch path
+    (fits_on_worker / explain_skip) and every eligibility view (eligible_workers,
+    selectors_only_match, submit_preflight): when they disagreed, a job the
+    dispatcher would never place was reported as queued behind, or blocked by,
+    the opted-out host.
     """
+    return not w.gpu and (vram_request_gb > 0 or host_pin == "any-gpu")
+
+
+def fits_on_worker(job: QueuedJob, w: WorkerSnapshot) -> bool:
+    """True iff selectors + host_pin + resource floor all allow the job."""
     if not _selectors_match(job.requires, w):
         return False
     if job.host_pin not in (w.host, "any", *w.host_aliases):
         return False
     effective_request = effective_vram_request_gb(job)
-    if not w.gpu and (effective_request > 0 or job.host_pin == "any-gpu"):
+    if _gpu_opt_out_blocks(effective_request, job.host_pin, w):
         return False
     if effective_request > 0:
         effective_vram = _effective_vram_gb(w)
@@ -195,7 +209,7 @@ def _first_failing_predicate(j: QueuedJob, w: WorkerSnapshot) -> str | None:
     if j.host_pin not in (w.host, "any", *w.host_aliases):
         return "host_pin"
     effective_request = effective_vram_request_gb(j)
-    if not w.gpu and (effective_request > 0 or j.host_pin == "any-gpu"):
+    if _gpu_opt_out_blocks(effective_request, j.host_pin, w):
         return "no_gpu"
     if effective_request > 0:
         effective_vram = _effective_vram_gb(w)
@@ -209,29 +223,41 @@ def _first_failing_predicate(j: QueuedJob, w: WorkerSnapshot) -> str | None:
 
 
 def selectors_only_match(job: QueuedJob, w: WorkerSnapshot) -> bool:
-    """Capability-only check (ignores resource floor + host_pin).
+    """Capability-only check (ignores resource floor + host_pin membership).
 
     Used by the 'soft unmatcheable' warning: if no worker's capabilities can
     ever match regardless of current load, surface a warning instead of silently
-    queuing forever.
+    queuing forever. A GPU opt-out is a capability, so it counts here.
     """
-    return _selectors_match(job.requires, w)
+    return _selectors_match(job.requires, w) and not _gpu_opt_out_blocks(
+        effective_vram_request_gb(job), job.host_pin, w
+    )
 
 
 def eligible_workers(
-    requires: JobRequires | None, host_pin: str, snapshots: list[WorkerSnapshot]
+    requires: JobRequires | None,
+    host_pin: str,
+    snapshots: list[WorkerSnapshot],
+    *,
+    vram_gb: float,
 ) -> list[WorkerSnapshot]:
     """Workers that match capability + host_pin (ignores current load).
 
     Used by scheduler-awareness warnings: a job whose `eligible_workers` is
     {} is unmatcheable; one with exactly one entry is single-slot serialized;
     one whose only entries all hold non-preemptible jobs is queue-blocked.
+
+    `vram_gb` is required (no default) so no caller can silently skip the GPU
+    opt-out that fits_on_worker applies.
     """
+    request = _vram_request_gb(vram_gb, requires)
     out: list[WorkerSnapshot] = []
     for w in snapshots:
         if not _selectors_match(requires, w):
             continue
         if host_pin not in (w.host, "any", *w.host_aliases):
+            continue
+        if _gpu_opt_out_blocks(request, host_pin, w):
             continue
         out.append(w)
     return out
@@ -241,6 +267,8 @@ def submit_preflight(
     requires: JobRequires | None,
     host_pin: str,
     all_known_workers: list[WorkerSnapshot],
+    *,
+    vram_gb: float,
 ) -> str | None:
     """Submit-time unsatisfiable-placement check.
 
@@ -277,9 +305,21 @@ def submit_preflight(
     ]
     if not candidates:
         return None
-    if any(_selectors_match(requires, w) for w in candidates):
+    request = _vram_request_gb(vram_gb, requires)
+    if any(
+        _selectors_match(requires, w) and not _gpu_opt_out_blocks(request, host_pin, w)
+        for w in candidates
+    ):
         return None
     bits: list[str] = []
+    if any(_selectors_match(requires, w) for w in candidates):
+        # The selectors match somewhere; only the GPU opt-out rules them out.
+        return (
+            f"unsatisfiable: every known worker for "
+            f"{'any worker' if host_pin == 'any' else f'host_pin={host_pin!r}'} "
+            "that matches has GPU work switched off (gpu: false), and this job "
+            "asks for a GPU (VRAM, a cuda-Ngb tag, or host any-gpu)"
+        )
     if requires is not None:
         for need in requires.needs:
             if not any(need in w.tags for w in candidates):
@@ -402,7 +442,9 @@ def gpu_contention_warning(
     queue."""
     if requires is None or requires.gpu is not True:
         return None
-    elig = eligible_workers(requires, host_pin, snapshots)
+    # requires.gpu is True here, so the 2 GB floor already makes this a GPU
+    # request; an explicit vram_gb would not change who is eligible.
+    elig = eligible_workers(requires, host_pin, snapshots, vram_gb=0.0)
     if not elig:
         return None
     saturated: list[tuple[str, float]] = []

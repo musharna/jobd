@@ -552,7 +552,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                 session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
             )
             snapshots = _build_snapshots(list(workers))
-            elig = eligible_workers(req, job.host_pin, snapshots)
+            elig = eligible_workers(req, job.host_pin, snapshots, vram_gb=job.vram_gb)
             if not elig:
                 return {"signaled": None, "reason": "no eligible workers online"}
 
