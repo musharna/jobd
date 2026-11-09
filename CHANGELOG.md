@@ -4,6 +4,13 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.56] — 2026-11-08
+
+### Fixed
+
+- **A worker set to `gpu: false` no longer gets GPU work through a side door.** The `--gpu` selector already respected the opt-out, but two other routes ignored it. A `--vram-required N` job without `--gpu` only compared free VRAM, which made the opted-out host the best fit when it had the most free VRAM. A job with `--host any-gpu` matched the alias, which NVML presence sets regardless of the opt-out. The matcher now reads any VRAM request (explicit, or a `cuda-Ngb` tag) and any `any-gpu` pin as a GPU request (`explain_skip` reason `no_gpu`), as `adopt` already did for `vram_gb > 0`.
+- **`update-worker.sh` no longer strands a staged upgrade.** When a job was claimed between the install and the restart, the new version stayed in the venv while the old process kept running, and every later tick read "installed == broker" as "already on" and never restarted (gt76 sat on 0.5.54 under a 0.5.55 broker). "Done" now means the worker *process* reports the broker's version in its heartbeat; a staged version is restarted onto at the next idle tick, and the post-restart check reads that heartbeat instead of the venv. The idle gate still counts job rows, never the `/workers` gauge.
+
 ## [0.5.55] — 2026-11-08
 
 ### Fixed
