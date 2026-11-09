@@ -279,7 +279,13 @@ def _honor_pending_cancel(
 
 
 def _reject_stale_worker(
-    job_worker: str | None, reporting: str | None, job_id: int, action: str
+    job_worker: str | None,
+    reporting: str | None,
+    job_id: int,
+    action: str,
+    *,
+    job_seq: int | None = None,
+    reporting_seq: int | None = None,
 ) -> None:
     """Raise 409 if a worker other than the job's current owner is reporting.
 
@@ -290,13 +296,26 @@ def _reject_stale_worker(
     the re-dispatched job under the wrong worker (M2 double-execution). The
     reporting worker is carried in the `X-Jobd-Worker` header; `reporting is
     None` means a pre-header worker binary — skip the check (backward
-    compatible), preserving the old best-effort behavior for old workers."""
+    compatible), preserving the old best-effort behavior for old workers.
+
+    The hostname alone cannot tell two runs on the SAME host apart: a job
+    requeued and re-claimed by the host that ran it first gets reports from both
+    runs under one X-Jobd-Worker. So the claim's `dispatch_seq` is compared too
+    (X-Jobd-Dispatch); absent = an older worker, hostname check only."""
     if reporting is not None and reporting != job_worker:
         raise HTTPException(
             status_code=409,
             detail=(
                 f"job {job_id} is owned by worker {job_worker!r}, not {reporting!r}; "
                 f"refusing stale {action}"
+            ),
+        )
+    if reporting_seq is not None and reporting_seq != (job_seq or 0):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job {job_id} is on dispatch {job_seq or 0}, not {reporting_seq}; "
+                f"refusing stale {action} from an earlier claim"
             ),
         )
 

@@ -164,6 +164,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         job_id: int,
         request: Request,
         x_jobd_worker: str | None = Header(default=None),
+        x_jobd_dispatch: int | None = Header(default=None),
     ):
         with SessionLocal() as session:
             job = session.get(Job, job_id)
@@ -172,7 +173,14 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             # Drop log chunks from a stale worker (M2): a partition-reclaimed job
             # re-dispatched elsewhere must not have the original worker's output
             # interleaved into the new run's log file.
-            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "log append")
+            _reject_stale_worker(
+                job.worker,
+                x_jobd_worker,
+                job_id,
+                "log append",
+                job_seq=job.dispatch_seq,
+                reporting_seq=x_jobd_dispatch,
+            )
         # Bounded read: reject an oversized chunk from the Content-Length header
         # when one is declared, and cap the streamed read either way — the old
         # `await request.body()` buffered an arbitrarily large body into memory
@@ -208,7 +216,11 @@ def build_router(deps: BrokerDeps) -> APIRouter:
         return {"bytes": len(body)}
 
     @router.post("/jobs/{job_id}/started", response_model=JobInfo)
-    def started_job(job_id: int, x_jobd_worker: str | None = Header(default=None)):
+    def started_job(
+        job_id: int,
+        x_jobd_worker: str | None = Header(default=None),
+        x_jobd_dispatch: int | None = Header(default=None),
+    ):
         """Worker reports subprocess.Popen returned: assigned -> running.
 
         The matcher flips queued->assigned at dispatch and stamps started_at,
@@ -225,7 +237,14 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             job = session.get(Job, job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
-            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "started")
+            _reject_stale_worker(
+                job.worker,
+                x_jobd_worker,
+                job_id,
+                "started",
+                job_seq=job.dispatch_seq,
+                reporting_seq=x_jobd_dispatch,
+            )
             # Guarded assigned->running: win only if the row is still ASSIGNED,
             # so a /started that races a concurrent sweeper orphan (or a cancel
             # that already went terminal) can't re-open a job that has left
@@ -307,7 +326,10 @@ def build_router(deps: BrokerDeps) -> APIRouter:
 
     @router.post("/jobs/{job_id}/complete", response_model=JobInfo)
     def complete_job(
-        job_id: int, payload: CompletePayload, x_jobd_worker: str | None = Header(default=None)
+        job_id: int,
+        payload: CompletePayload,
+        x_jobd_worker: str | None = Header(default=None),
+        x_jobd_dispatch: int | None = Header(default=None),
     ):
         exit_code = payload.exit_code
         final_state = payload.final_state
@@ -326,7 +348,14 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             # terminal-ized (or have its outcome overwritten) by the original
             # worker that kept running. Checked before the CAS so the stale
             # /complete never wins the transition.
-            _reject_stale_worker(job.worker, x_jobd_worker, job_id, "completion")
+            _reject_stale_worker(
+                job.worker,
+                x_jobd_worker,
+                job_id,
+                "completion",
+                job_seq=job.dispatch_seq,
+                reporting_seq=x_jobd_dispatch,
+            )
             # final_state must name a valid terminal state. Reject garbage so a
             # typo'd worker payload can't strand the job in a non-enum state that
             # later raises ValueError in JobState(job.state) on every read.
@@ -615,7 +644,10 @@ def build_router(deps: BrokerDeps) -> APIRouter:
 
     @router.post("/jobs/{job_id}/refuse-admission", response_model=JobInfo)
     def refuse_admission(
-        job_id: int, payload: AdmissionRefusal, x_jobd_worker: str | None = Header(default=None)
+        job_id: int,
+        payload: AdmissionRefusal,
+        x_jobd_worker: str | None = Header(default=None),
+        x_jobd_dispatch: int | None = Header(default=None),
     ):
         # Thin adapter. The admission decision tree — stale-worker rejection, the
         # ASSIGNED guard, pending-cancel honouring, and the requeue / terminal-fail /
@@ -625,6 +657,7 @@ def build_router(deps: BrokerDeps) -> APIRouter:
             job_id,
             payload,
             x_jobd_worker,
+            x_jobd_dispatch=x_jobd_dispatch,
             session_factory=SessionLocal,
             logs_dir=logs_dir,
             wake_dispatchers=_wake_dispatchers,

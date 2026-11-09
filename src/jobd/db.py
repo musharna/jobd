@@ -116,6 +116,11 @@ class Job(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=0)
     retry_delay_s: Mapped[int] = mapped_column(Integer, default=0)
     attempt: Mapped[int] = mapped_column(Integer, default=0)
+    # Bumped on every claim (/next-job). The worker echoes the value it was
+    # handed in X-Jobd-Dispatch, so a report from an earlier claim of this job by
+    # the SAME host (requeued, then re-claimed) is told apart from the live run.
+    # A resurrect is not a claim and keeps it. NULL on old rows reads as 0.
+    dispatch_seq: Mapped[int] = mapped_column(Integer, default=0)
     not_before: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Adoption (docs/adoption.md): both NULL for every job jobd launched. Set
     # together on a job created by POST /adopt — the foreign pid being watched
@@ -227,6 +232,7 @@ _JOB_ADDS = [
     ("max_retries", "INTEGER DEFAULT 0"),
     ("retry_delay_s", "INTEGER DEFAULT 0"),
     ("attempt", "INTEGER DEFAULT 0"),
+    ("dispatch_seq", "INTEGER DEFAULT 0"),
     ("not_before", "DATETIME"),
     ("adopt_pid", "INTEGER"),
     ("adopt_start_ticks", "BIGINT"),
