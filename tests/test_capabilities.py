@@ -4,7 +4,20 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from jobd.worker.capabilities import Capabilities, detect
+
+
+@pytest.fixture(autouse=True)
+def _no_host_worker_config(tmp_path, monkeypatch):
+    """detect() reads ~/.config/jobd/worker.yaml when JOBD_WORKER_CONFIG is unset,
+    so a real worker config on the machine running the tests (e.g. `gpu: false`
+    on a host held off GPU work) overrode the mocked detection and failed five
+    of these tests. Point the default at a file that does not exist; tests that
+    exercise a config set JOBD_WORKER_CONFIG themselves, which wins."""
+    monkeypatch.setenv("JOBD_WORKER_CONFIG", str(tmp_path / "absent-worker.yaml"))
+    monkeypatch.delenv("JOBD_WORKER_TAGS", raising=False)
 
 
 def test_detect_arch_x86_64():
