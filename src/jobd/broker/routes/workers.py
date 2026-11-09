@@ -15,7 +15,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from jobd.broker.adopt import adopted_jobs_for_host, adoption_fills_host
 from jobd.broker.constants import _LONGPOLL_RECHECK_S
@@ -403,6 +403,9 @@ def build_router(deps: BrokerDeps) -> APIRouter:
                         signal=None,
                         # A retry's hold is spent once it is claimed.
                         not_before=None,
+                        # Every claim is a new run: reports from an earlier
+                        # claim (same host or not) are fenced off by it.
+                        dispatch_seq=func.coalesce(Job.__table__.c.dispatch_seq, 0) + 1,
                     )
                 )
                 session.commit()

@@ -286,6 +286,8 @@ class JobInfo(BaseModel):
     attempt: int = 0
     max_retries: int = 0
     retry_delay_s: int = 0
+    # Claim counter; the worker echoes it as X-Jobd-Dispatch (see db.Job).
+    dispatch_seq: int = 0
     not_before: datetime | None = None
     termination_reason: str | None = None
     # A cancel/preempt the worker has not honoured yet ('cancel' | 'preempt');

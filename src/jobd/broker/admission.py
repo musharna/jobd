@@ -54,6 +54,7 @@ def refuse_admission(
     payload: AdmissionRefusal,
     x_jobd_worker: str | None,
     *,
+    x_jobd_dispatch: int | None = None,
     session_factory: Callable[[], Any],
     logs_dir: Path,
     wake_dispatchers: Callable[[], None],
@@ -76,7 +77,14 @@ def refuse_admission(
         job = session.get(Job, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
-        _reject_stale_worker(job.worker, x_jobd_worker, job_id, "admission refusal")
+        _reject_stale_worker(
+            job.worker,
+            x_jobd_worker,
+            job_id,
+            "admission refusal",
+            job_seq=job.dispatch_seq,
+            reporting_seq=x_jobd_dispatch,
+        )
         if job.state != JobState.ASSIGNED:
             raise HTTPException(
                 status_code=409,
