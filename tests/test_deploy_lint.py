@@ -380,9 +380,17 @@ def test_update_worker_gate_reads_job_rows_not_the_heartbeat_gauge():
         "the gate must count BOTH assigned and running rows: an assigned job is a "
         "claim the restart would kill just as dead as a running one"
     )
-    assert "/workers" not in body, (
-        "update-worker.sh consults /workers again — that gauge is heartbeat-lagged; "
-        "the gate must read job rows"
+    # /workers is read, but only by worker_version() for the RUNNING version (the
+    # venv cannot say which code the process runs). It must never feed the gate.
+    for fn in ("busy", "count_state"):
+        start = body.index(f"\n{fn}() {{\n")
+        fn_body = body[start : body.index("\n}\n", start)]
+        assert "/workers" not in fn_body, (
+            f"update-worker.sh's {fn}() consults /workers again — that gauge is "
+            "heartbeat-lagged; the gate must read job rows"
+        )
+    assert body.count("/workers") == 1 and "\nworker_version() {\n" in body, (
+        "/workers may appear only in worker_version(), for the running version"
     )
 
 

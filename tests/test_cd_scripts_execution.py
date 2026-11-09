@@ -60,6 +60,7 @@ case "$url" in
   */health) printf '{{"status":"ok","version":"%s"}}' "$(cat {version_file})" ;;
   */jobs*state_filter=assigned*) cat "{jobs_dir}/assigned.json" 2>/dev/null || echo '[]' ;;
   */jobs*state_filter=running*)  cat "{jobs_dir}/running.json"  2>/dev/null || echo '[]' ;;
+  */workers) cat "{jobs_dir}/workers.json" 2>/dev/null || echo '[]' ;;
   *) echo '{{}}' ;;
 esac
 """,
@@ -237,6 +238,66 @@ def test_update_worker_prints_the_diagnostic_when_the_broker_is_unreachable(cd_e
     assert "could not read the broker version" in r.stderr, (
         f"the unreachable-broker diagnostic never printed:\nstdout:{r.stdout}\nstderr:{r.stderr}"
     )
+
+
+def _staged_venv(tmp_path, env, version: str) -> None:
+    """A venv whose `python -c 'import jobd;print(jobd.__version__)'` prints `version`."""
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _write_exec(venv_bin / "python", f"#!/usr/bin/env bash\necho {version}\n")
+    env["JOBD_WORKER_VENV"] = str(tmp_path / "venv")
+
+
+def _worker_reports(jobs_dir, version: str) -> None:
+    (jobs_dir / "workers.json").write_text(json.dumps([{"host": "testhost", "version": version}]))
+
+
+def test_update_worker_restarts_onto_a_version_staged_by_a_deferred_upgrade(cd_env):
+    """A tick that installs and then finds a job claimed mid-upgrade leaves the
+    new version staged in the venv and the old process running. The next tick
+    compared only the INSTALLED version with the broker's, printed "already on"
+    and exited, so the worker ran the old code until something else restarted it
+    (gt76, 2026-11-09: 0.5.55 staged at 02:25, still serving 0.5.54 at 02:53)."""
+    tmp_path, env, version_file, jobs_dir = _worker_env(cd_env)
+    version_file.write_text("0.5.99")
+    _staged_venv(tmp_path, env, "0.5.99")
+    _worker_reports(jobs_dir, "0.5.98")
+
+    r = _run(_UPDATE, env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "already on" not in r.stdout, (
+        f"a staged-but-not-running version read as done:\n{r.stdout}"
+    )
+    assert "would restart" in r.stdout, r.stdout
+    assert "would install" not in r.stdout, "the staged version must not be reinstalled"
+
+
+def test_update_worker_does_nothing_when_the_running_worker_matches(cd_env):
+    """Control: installed AND running at the broker's version is the only "done"."""
+    tmp_path, env, version_file, jobs_dir = _worker_env(cd_env)
+    version_file.write_text("0.5.99")
+    _staged_venv(tmp_path, env, "0.5.99")
+    _worker_reports(jobs_dir, "0.5.99")
+
+    r = _run(_UPDATE, env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "already on 0.5.99" in r.stdout, r.stdout
+    assert "would" not in r.stdout
+
+
+def test_update_worker_leaves_a_worker_the_broker_cannot_see_alone(cd_env):
+    """Installed at target but the broker has no running version for this host
+    (worker stopped on purpose, or never registered): do not start it."""
+    tmp_path, env, version_file, jobs_dir = _worker_env(cd_env)
+    version_file.write_text("0.5.99")
+    _staged_venv(tmp_path, env, "0.5.99")
+
+    r = _run(_UPDATE, env)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "would" not in r.stdout, f"a worker the broker cannot see was restarted:\n{r.stdout}"
 
 
 # --- healthcheck.py ----------------------------------------------------------
