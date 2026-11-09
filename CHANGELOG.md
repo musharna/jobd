@@ -4,6 +4,13 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.55] — 2026-11-08
+
+### Fixed
+
+- **A stale report from an earlier run of the same job on the same host is refused.** The broker fenced worker reports (`/log`, `/started`, `/complete`, `/refuse-admission`) by hostname only, so when a job was requeued and the same host claimed it again (a frozen worker that thawed), the first run's `/complete` was accepted into the re-run and recorded its outcome. Every claim now bumps a `dispatch_seq` (returned in the job), the worker sends it back as `X-Jobd-Dispatch`, and a mismatch gets 409. A resurrected orphan keeps its seq. A worker that sends no header (older than this release) gets the hostname check alone, as before.
+- **A job that closes its stdout can still be cancelled and still hits `max_wall_s`.** The worker stopped polling for signals and running the wall-clock watchdog at stdout EOF, so a workload that redirects its own output (`exec >log 2>&1`, a daemon that closes its fds) could not be cancelled and had no wall limit while it kept running. Polling now stops when the process exits. After EOF the idle and first-output watchdogs stand down, since a closed stdout can never produce output.
+
 ## [0.5.54] — 2026-11-08
 
 ### Fixed
