@@ -124,12 +124,21 @@ def effective_vram_request_gb(job: QueuedJob) -> float:
 
 
 def fits_on_worker(job: QueuedJob, w: WorkerSnapshot) -> bool:
-    """True iff selectors + host_pin + resource floor all allow the job."""
+    """True iff selectors + host_pin + resource floor all allow the job.
+
+    `w.gpu` is the worker's GPU opt-in, not just NVML presence: a worker set to
+    `gpu: false` still reports free VRAM and the `any-gpu` alias. Asking for VRAM
+    (explicitly or via a cuda-Ngb tag) or pinning to `any-gpu` is asking for a
+    GPU, so neither may land on an opted-out worker -- the same reading adopt.py
+    already gives `vram_gb > 0`.
+    """
     if not _selectors_match(job.requires, w):
         return False
     if job.host_pin not in (w.host, "any", *w.host_aliases):
         return False
     effective_request = effective_vram_request_gb(job)
+    if not w.gpu and (effective_request > 0 or job.host_pin == "any-gpu"):
+        return False
     if effective_request > 0:
         effective_vram = _effective_vram_gb(w)
         if effective_request > effective_vram:
@@ -186,6 +195,8 @@ def _first_failing_predicate(j: QueuedJob, w: WorkerSnapshot) -> str | None:
     if j.host_pin not in (w.host, "any", *w.host_aliases):
         return "host_pin"
     effective_request = effective_vram_request_gb(j)
+    if not w.gpu and (effective_request > 0 or j.host_pin == "any-gpu"):
+        return "no_gpu"
     if effective_request > 0:
         effective_vram = _effective_vram_gb(w)
         if effective_request > effective_vram:
