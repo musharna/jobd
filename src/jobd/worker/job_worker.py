@@ -1277,6 +1277,12 @@ class _WorkloadRun:
         # in this surface (BACKLOG smoke piece 2; user picked worker-only).
         self.first_output_timeout_s = _env_int("JOBD_WORKER_FIRST_OUTPUT_TIMEOUT_S")
         self.first_output_landed = False
+        # Set (under last_log_lock) at stdout EOF. EOF is not exit: a workload
+        # that redirects its own output (`exec >log 2>&1`) hits it at once and
+        # keeps running, so poll_signals must keep polling /signal and the wall
+        # clock until the process exits. Only the two OUTPUT watchdogs (idle,
+        # first-output) stand down — a closed stdout can never speak again.
+        self.stdout_closed = False
 
         # SIGKILL-escalation timers scheduled by poll_signals (one per cancel/preempt
         # signal). Cancelled once the process exits so the timer thread doesn't
@@ -1395,8 +1401,11 @@ class _WorkloadRun:
             # for steady-state silence. Catches the silent-hang-from-start
             # mode that idle_timeout (typically configured for steady-state
             # cadence) is too slow to catch.
+            with self.last_log_lock:
+                stdout_closed = self.stdout_closed
             if (
                 self.first_output_timeout_s is not None
+                and not stdout_closed
                 and not self.first_output_landed
                 and (now - self.job_started) > self.first_output_timeout_s
             ):
@@ -1410,7 +1419,7 @@ class _WorkloadRun:
             # Idle watchdog: no log bytes for N seconds. Trips on hung jobs
             # whose process is alive but making no progress (the 2026-04-25
             # project-c failure mode — heartbeats green, output silent).
-            if self.idle_timeout_s is not None:
+            if self.idle_timeout_s is not None and not stdout_closed:
                 with self.last_log_lock:
                     silent_for = now - self.last_log_monotonic
                 if silent_for > self.idle_timeout_s:
@@ -1487,7 +1496,9 @@ class _WorkloadRun:
                     log.error("log POST error: %s", e)
         finally:
             self.proc.stdout.close()
-            self.stop_signal.set()
+            # NOT stop_signal: the process may still be running (see stdout_closed).
+            with self.last_log_lock:
+                self.stdout_closed = True
 
     def wait_with_grace(self) -> int:
         """Wait for the workload to exit; a signaled job gets its grace window
@@ -1586,8 +1597,32 @@ class _WorkloadRun:
         return "completed"
 
 
+def _dispatch_headers(job: dict) -> dict[str, str]:
+    """X-Jobd-Dispatch for this claim, if the broker handed one out (>= v0.5.55)."""
+    seq = job.get("dispatch_seq")
+    return {"X-Jobd-Dispatch": str(int(seq))} if seq else {}
+
+
+class _DispatchClient:
+    """The worker's client for ONE run: every POST carries that run's
+    X-Jobd-Dispatch, so the broker can refuse a report from an earlier claim of
+    the same job on this same host (the hostname alone cannot tell them apart)."""
+
+    def __init__(self, client, headers: dict[str, str]) -> None:
+        self._client = client
+        self._headers = headers
+
+    def post(self, *args, headers=None, **kwargs):
+        return self._client.post(*args, headers={**(headers or {}), **self._headers}, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
 def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     job_id = job["id"]
+    if _dispatch_headers(job):
+        client = _DispatchClient(client, _dispatch_headers(job))
     cmd = job["cmd"]
     cwd = job["cwd"]
 
@@ -1674,6 +1709,8 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
 
         run.stream_output()
         rc = run.wait_with_grace()
+        # The process has exited: now the signal poll and wall watchdog can stop.
+        run.stop_signal.set()
 
         if run.got_signal == "preempt" and run.checkpoint_complete:
             try:
@@ -1696,7 +1733,7 @@ def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
         log.error("job %s: run_job raised after dispatch: %r", job_id, _exc)
     finally:
         # F2 (audit 2026-07-12): stop the signal-poll thread. The normal path
-        # sets this in stream_output's finally, but a raise BEFORE that loop
+        # sets this once the process exits (after wait_with_grace), but a raise BEFORE that loop
         # (e.g. sig_thread.start() under thread exhaustion) would leave
         # poll_signals spinning on GET /signal forever for an already-terminal
         # job. Idempotent, so harmless on the success path.
@@ -1867,6 +1904,7 @@ def main():
                     try:
                         client.post(
                             f"/jobs/{job_id}/refuse-admission",
+                            headers=_dispatch_headers(job),
                             json={
                                 "required_gb": admission["required_gb"],
                                 "free_gb": admission["free_gb"],
