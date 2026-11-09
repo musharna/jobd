@@ -396,7 +396,7 @@ def _w(host: str, *, gpu=True, tags=None, aliases=None, arch="x86_64", os="linux
 def test_preflight_unknown_host_pin_typo():
     # `--host desktop-vm` typo for `desktop` → no known worker matches.
     snaps = [_w("desktop", aliases=["any-gpu"]), _w("laptop", gpu=False)]
-    msg = submit_preflight(None, "desktop-vm", snaps)
+    msg = submit_preflight(None, "desktop-vm", snaps, vram_gb=0)
     assert msg is not None
     assert "desktop-vm" in msg
     assert "desktop" in msg
@@ -405,28 +405,28 @@ def test_preflight_unknown_host_pin_typo():
 
 def test_preflight_unknown_host_pin_empty_fleet():
     # No registered workers at all → still flags typo (don't silently queue).
-    msg = submit_preflight(None, "desktop", [])
+    msg = submit_preflight(None, "desktop", [], vram_gb=0)
     assert msg is not None
     assert "desktop" in msg
 
 
 def test_preflight_any_host_with_no_workers_is_silent():
     # `--host any` with no workers is a transient empty-fleet, not a typo.
-    msg = submit_preflight(None, "any", [])
+    msg = submit_preflight(None, "any", [], vram_gb=0)
     assert msg is None
 
 
 def test_preflight_known_host_alias_resolves():
     # alias matches → not a typo.
     snaps = [_w("desktop", aliases=["desktop-vm"])]
-    msg = submit_preflight(None, "desktop-vm", snaps)
+    msg = submit_preflight(None, "desktop-vm", snaps, vram_gb=0)
     assert msg is None
 
 
 def test_preflight_unmet_needs_tag():
     # `--needs nonexistent-tag` → flagged at submit, not 60s later.
     snaps = [_w("desktop", tags=["cuda-32gb", "python3"])]
-    msg = submit_preflight(JobRequires(needs=["nonexistent-tag"]), "any", snaps)
+    msg = submit_preflight(JobRequires(needs=["nonexistent-tag"]), "any", snaps, vram_gb=0)
     assert msg is not None
     assert "nonexistent-tag" in msg
 
@@ -434,7 +434,7 @@ def test_preflight_unmet_needs_tag():
 def test_preflight_unmet_gpu_true():
     # No GPU workers → `gpu=True` is unsatisfiable.
     snaps = [_w("cpu-only", gpu=False)]
-    msg = submit_preflight(JobRequires(gpu=True), "any", snaps)
+    msg = submit_preflight(JobRequires(gpu=True), "any", snaps, vram_gb=0)
     assert msg is not None
     assert "gpu=True" in msg
 
@@ -442,7 +442,7 @@ def test_preflight_unmet_gpu_true():
 def test_preflight_unmet_arch():
     # arm64 requested, fleet is x86_64.
     snaps = [_w("desktop")]
-    msg = submit_preflight(JobRequires(arch="arm64"), "any", snaps)
+    msg = submit_preflight(JobRequires(arch="arm64"), "any", snaps, vram_gb=0)
     assert msg is not None
     assert "arm64" in msg
 
@@ -450,14 +450,14 @@ def test_preflight_unmet_arch():
 def test_preflight_satisfiable_silent():
     # Anything that can route stays silent — no spurious warnings.
     snaps = [_w("desktop", tags=["cuda-32gb"])]
-    msg = submit_preflight(JobRequires(gpu=True, needs=["cuda-32gb"]), "any", snaps)
+    msg = submit_preflight(JobRequires(gpu=True, needs=["cuda-32gb"]), "any", snaps, vram_gb=0)
     assert msg is None
 
 
 def test_preflight_host_pin_known_but_caps_unmet():
     # `--host laptop --needs cuda-32gb` but laptop only has cuda-12gb.
     snaps = [_w("desktop", tags=["cuda-32gb"]), _w("laptop", tags=["cuda-12gb"])]
-    msg = submit_preflight(JobRequires(needs=["cuda-32gb"]), "laptop", snaps)
+    msg = submit_preflight(JobRequires(needs=["cuda-32gb"]), "laptop", snaps, vram_gb=0)
     assert msg is not None
     assert "cuda-32gb" in msg
     assert "laptop" in msg
@@ -468,7 +468,7 @@ def test_preflight_offline_worker_still_counts():
     # capability the fleet has — don't false-positive a typo when the only
     # matching worker is rebooting.
     snaps = [_w("desktop", aliases=["any-gpu"])]  # caller passes ALL workers
-    msg = submit_preflight(None, "desktop", snaps)
+    msg = submit_preflight(None, "desktop", snaps, vram_gb=0)
     assert msg is None
 
 

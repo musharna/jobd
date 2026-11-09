@@ -82,12 +82,14 @@ def _serialization_warning(
     host_pin: str,
     snapshots: list[WorkerSnapshot],
     session,
+    *,
+    vram_gb: float,
 ) -> str | None:
     """At submit time: if exactly one online worker can route this job AND
     that worker has a non-terminal job, return a 'will queue behind' string.
     Returns None otherwise.
     """
-    elig = eligible_workers(requires, host_pin, snapshots)
+    elig = eligible_workers(requires, host_pin, snapshots, vram_gb=vram_gb)
     if len(elig) != 1:
         return None
     only = elig[0]

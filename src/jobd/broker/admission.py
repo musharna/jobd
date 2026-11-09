@@ -148,7 +148,9 @@ def refuse_admission(
             online = session.execute(select(Worker).where(Worker.state == "online")).scalars().all()
             snapshots = _build_snapshots(list(online))
             elig = [
-                w for w in eligible_workers(req, job.host_pin, snapshots) if w.host not in excluded
+                w
+                for w in eligible_workers(req, job.host_pin, snapshots, vram_gb=job.vram_gb)
+                if w.host not in excluded
             ]
 
             # cwd_refused is emitted AFTER the commit in each branch below,

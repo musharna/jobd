@@ -243,8 +243,10 @@
      "jobd/matcher.py:_covers": 1,
      "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
      "jobd/matcher.py:_effective_vram_gb": 2,
+     "jobd/matcher.py:_gpu_opt_out_blocks": 5,
      "jobd/matcher.py:_selectors_match": 9,
      "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 7,
+     "jobd/matcher.py:_vram_request_gb": 3,
      "jobd/matcher.py:cwd_routability": 1,
      "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
      "jobd/matcher.py:eligible_workers": 2,
@@ -263,8 +265,8 @@
     }
    },
    "http": 1,
-   "matcher_calls": 28,
-   "py_calls": 69,
+   "matcher_calls": 36,
+   "py_calls": 77,
    "sql": 6,
    "witness": {
     "id": 41,
@@ -295,8 +297,10 @@
      "jobd/matcher.py:_covers": 1,
      "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
      "jobd/matcher.py:_effective_vram_gb": 2,
+     "jobd/matcher.py:_gpu_opt_out_blocks": 7,
      "jobd/matcher.py:_selectors_match": 13,
      "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 10,
+     "jobd/matcher.py:_vram_request_gb": 4,
      "jobd/matcher.py:cwd_routability": 1,
      "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
      "jobd/matcher.py:eligible_workers": 3,
@@ -311,8 +315,8 @@
     }
    },
    "http": 1,
-   "matcher_calls": 36,
-   "py_calls": 52,
+   "matcher_calls": 47,
+   "py_calls": 63,
    "sql": 2,
    "witness": {
     "state": "dry-run",
@@ -647,7 +651,9 @@
      "jobd/events.py:max_bytes": 1,
      "jobd/matcher.py:_covers": 1,
      "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
+     "jobd/matcher.py:_gpu_opt_out_blocks": 5,
      "jobd/matcher.py:_selectors_match": 5,
+     "jobd/matcher.py:_vram_request_gb": 2,
      "jobd/matcher.py:cwd_routability": 1,
      "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
      "jobd/matcher.py:eligible_workers": 1,
@@ -674,8 +680,8 @@
     }
    },
    "http": 1,
-   "matcher_calls": 14,
-   "py_calls": 67,
+   "matcher_calls": 21,
+   "py_calls": 74,
    "sql": 6,
    "witness": {
     "job_id": 41,
@@ -708,8 +714,10 @@
      "jobd/matcher.py:_covers": 1,
      "jobd/matcher.py:_covers.<locals>.<genexpr>": 1,
      "jobd/matcher.py:_effective_vram_gb": 2,
+     "jobd/matcher.py:_gpu_opt_out_blocks": 7,
      "jobd/matcher.py:_selectors_match": 13,
      "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 10,
+     "jobd/matcher.py:_vram_request_gb": 4,
      "jobd/matcher.py:cwd_routability": 1,
      "jobd/matcher.py:cwd_routability.<locals>.<genexpr>": 1,
      "jobd/matcher.py:eligible_workers": 3,
@@ -730,8 +738,8 @@
     }
    },
    "http": 1,
-   "matcher_calls": 36,
-   "py_calls": 61,
+   "matcher_calls": 47,
+   "py_calls": 72,
    "sql": 2,
    "witness": {
     "state": "dry-run",
@@ -807,8 +815,10 @@
      "jobd/events.py:append_event": 4,
      "jobd/events.py:max_bytes": 4,
      "jobd/matcher.py:_effective_vram_gb": 3,
+     "jobd/matcher.py:_gpu_opt_out_blocks": 5,
      "jobd/matcher.py:_selectors_match": 13,
      "jobd/matcher.py:_selectors_match.<locals>.<genexpr>": 11,
+     "jobd/matcher.py:_vram_request_gb": 5,
      "jobd/matcher.py:effective_vram_request_gb": 5,
      "jobd/matcher.py:fits_on_worker": 13,
      "jobd/matcher.py:pick_next_job": 4,
@@ -823,8 +833,8 @@
     }
    },
    "http": 4,
-   "matcher_calls": 91,
-   "py_calls": 277,
+   "matcher_calls": 101,
+   "py_calls": 287,
    "sql": 20,
    "witness": [
     [
