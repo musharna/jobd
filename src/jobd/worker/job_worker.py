@@ -25,6 +25,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import cast
 
 import httpx
 import psutil
@@ -1622,7 +1623,10 @@ class _DispatchClient:
 def run_job(client: httpx.Client, job: dict, tracked_pids: set[int]) -> None:
     job_id = job["id"]
     if _dispatch_headers(job):
-        client = _DispatchClient(client, _dispatch_headers(job))
+        # A forwarding proxy, not an httpx.Client subclass: every attribute but
+        # post() is the wrapped client's, so the helpers typed httpx.Client below
+        # get the same object behavior with the run's header added.
+        client = cast(httpx.Client, _DispatchClient(client, _dispatch_headers(job)))
     cmd = job["cmd"]
     cwd = job["cwd"]
 
