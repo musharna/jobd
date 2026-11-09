@@ -63,15 +63,43 @@ api() {
 target=$(api "${JOBD_URL}/health" | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])' || true)
 installed=$("$VENV/bin/python" -c 'import jobd;print(jobd.__version__)' 2>/dev/null || echo "none")
 
+# The version the worker PROCESS runs, from its own heartbeat. `installed` alone
+# is not "done": a tick that installs and then finds a job claimed mid-upgrade
+# (below) leaves the new version staged in the venv and the old process running,
+# and the next tick used to read installed == target as "already on" and never
+# restart (gt76, 2026-11-09). Empty = the broker cannot see this worker.
+worker_version() {
+  api "${JOBD_URL}/workers" | python3 -c "
+import sys, json
+me = ${HOST@Q}
+for w in json.load(sys.stdin):
+    if w.get('host') == me:
+        print(w.get('version') or '')
+        break
+" || true
+}
+live=$(worker_version)
+
 if [ -z "$target" ]; then
   echo "update-worker: could not read the broker version; doing nothing" >&2
   exit 1
 fi
+staged=0
 if [ "$target" = "$installed" ]; then
-  echo "update-worker: $HOST already on $installed"
-  exit 0
+  if [ "$live" = "$target" ]; then
+    echo "update-worker: $HOST already on $installed"
+    exit 0
+  fi
+  if [ -z "$live" ]; then
+    # Stopped on purpose, or never registered: starting it is not ours to do.
+    echo "update-worker: $HOST has $installed installed; the broker sees no running worker — doing nothing"
+    exit 0
+  fi
+  staged=1
+  echo "update-worker: $HOST has $installed staged but the worker runs $live — restart pending"
+else
+  echo "update-worker: $HOST $installed -> $target"
 fi
-echo "update-worker: $HOST $installed -> $target"
 
 # --- the gate: never restart a worker that is running a job ---------------
 # Counts JOB ROWS (assigned/running, owned by this host), not the worker
@@ -106,7 +134,11 @@ if [ "${running:-1}" != "0" ]; then
 fi
 
 if [ "$DRY" = "1" ]; then
-  echo "update-worker: [dry] would install jobd[worker]==$target into $VENV and restart $UNIT"
+  if [ "$staged" = "1" ]; then
+    echo "update-worker: [dry] would restart $UNIT onto the staged $target"
+  else
+    echo "update-worker: [dry] would install jobd[worker]==$target into $VENV and restart $UNIT"
+  fi
   exit 0
 fi
 
@@ -128,6 +160,7 @@ install_jobd() {
     return 1
   fi
 }
+# Also on the staged path: pip then only confirms the pinned version is there.
 install_jobd
 
 # Re-check. The worker long-polls, so it can claim a job at any moment; this
@@ -146,12 +179,18 @@ fi
 
 systemctl --user restart "$UNIT"
 
-# Verify the thing actually took. A restart that silently failed to change the
-# version is the failure mode this whole script exists to end.
-sleep 5
-now=$("$VENV/bin/python" -c 'import jobd;print(jobd.__version__)' 2>/dev/null || echo "none")
+# Verify the thing actually took — from the restarted PROCESS's own heartbeat,
+# not the venv (which said "done" before the restart too). A restart that
+# silently failed to change the version is the failure mode this script exists
+# to end. Heartbeats are ~5 s apart; allow a few.
+now=""
+for _ in 1 2 3 4 5 6; do
+  sleep 5
+  now=$(worker_version)
+  [ "$now" = "$target" ] && break
+done
 if [ "$now" != "$target" ]; then
-  echo "update-worker: FAILED — $HOST still reports $now after restart (wanted $target)" >&2
+  echo "update-worker: FAILED — $HOST still reports ${now:-nothing} after restart (wanted $target)" >&2
   exit 1
 fi
 echo "update-worker: $HOST now on $now"
