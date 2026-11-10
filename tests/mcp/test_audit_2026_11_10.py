@@ -88,3 +88,27 @@ def test_jl_broker_refusals_set_is_error(app):
     assert not e and out["state"] == "queued", out
     e, out = _call(server, "jobd_events", {"since": "1h"})
     assert not e and out["events"], out
+
+
+# --- J-L: jobd_submit refuses an empty command and a negative wait ------------
+
+
+def test_jl_submit_refuses_empty_command_and_negative_wait(app):
+    c, tc, server = _rig(app)
+    for args in [
+        {"command": "", **_SUBMIT},
+        {"command": "   \n", **_SUBMIT},
+        {"command": "true", **_SUBMIT, "wait": True, "wait_timeout_s": -3},
+    ]:
+        e, out = _call(server, "jobd_submit", args)
+        assert e and out["error"]["kind"] == "invalid_arguments", (args, out)
+    e, out = _call(server, "jobd_status", {"job_id": 1, "wait": True, "wait_timeout_s": -1})
+    assert e and out["error"]["kind"] == "invalid_arguments", out
+    assert tc.get("/jobs").json() == [], "a refused submit still queued a job"
+    # Positive control: a real command with a zero wait is accepted and queued.
+    e, out = _call(server, "jobd_submit", {"command": "true", **_SUBMIT})
+    assert not e and out["state"] == "queued", out
+    e, out = _call(
+        server, "jobd_status", {"job_id": out["job_id"], "wait": True, "wait_timeout_s": 0}
+    )
+    assert not e and out["timed_out"] is True, out

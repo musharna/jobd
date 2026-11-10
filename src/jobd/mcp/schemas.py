@@ -53,7 +53,13 @@ SUBMIT_INPUT = {
     "required": ["command", "project", "cwd"],
     "$defs": _SUBMIT_DEFS,
     "properties": {
-        "command": {"type": "string", "description": "Shell command run by the worker shell."},
+        "command": {
+            "type": "string",
+            # An empty or blank command queued a job that ran nothing and
+            # "completed" (audit 2026-11-10 J-L).
+            "pattern": "\\S",
+            "description": "Shell command run by the worker shell. Must not be blank.",
+        },
         "project": {
             "type": "string",
             "description": (
@@ -91,7 +97,8 @@ SUBMIT_INPUT = {
         "wait_timeout_s": {
             "type": "integer",
             "default": 90,
-            "description": "Seconds; permissive — server clamps to 270.",
+            "minimum": 0,
+            "description": "Seconds, 0 or more; permissive — server clamps to 270.",
         },
         "dry_run": {
             "type": "boolean",
@@ -117,7 +124,8 @@ STATUS_INPUT = {
         "wait_timeout_s": {
             "type": "integer",
             "default": 90,
-            "description": "Server clamps to 270.",
+            "minimum": 0,
+            "description": "Seconds, 0 or more. Server clamps to 270.",
         },
     },
 }
