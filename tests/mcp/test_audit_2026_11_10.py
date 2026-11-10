@@ -8,11 +8,15 @@ starts the real `jobd-mcp` process and speaks MCP to it over stdio.
 
 from __future__ import annotations
 
+import asyncio
+import os
+import sys
 from collections import Counter
 
 import httpx
 import respx
 
+from jobd import __version__
 from jobd.client import JobdClient
 from jobd.mcp.server import build_server
 from jobd.models import JobState
@@ -156,3 +160,47 @@ def test_jl_events_tool_clamps_even_without_the_schema():
     jobd_events(client, {"limit": 7})
     sent = [int(call.request.url.params["limit"]) for call in route.calls]
     assert sent == [_EVENTS_LIMIT_MAX, 1, 7], sent
+
+
+# --- B4: real version and tool annotations, over real stdio --------------------
+
+_READ_ONLY = {"jobd_status", "jobd_logs", "jobd_list", "jobd_events", "jobd_workers"}
+_DESTRUCTIVE = {"jobd_cancel", "jobd_preempt", "jobd_worker_delete"}
+
+
+def test_b4_initialize_reports_version_and_tools_carry_annotations(tmp_path):
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    # A broker that cannot be reached: initialize and tools/list never call it.
+    # The env is built from scratch so no JOBD_URL/JOBD_API_TOKEN leaks in.
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "JOBD_URL": "http://127.0.0.1:9",
+        "JOBD_MCP_LOG_DIR": str(tmp_path / "mcp-log"),
+    }
+    params = StdioServerParameters(command=sys.executable, args=["-m", "jobd.mcp.server"], env=env)
+
+    async def go():
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                init = await asyncio.wait_for(session.initialize(), 30)
+                tools = await asyncio.wait_for(session.list_tools(), 30)
+                return init, tools
+
+    init, tools = asyncio.run(go())
+    assert init.server_info.name == "jobd"
+    assert init.server_info.version == __version__ and __version__, init.server_info
+    by_name = {tl.name: tl for tl in tools.tools}
+    assert len(by_name) == 9, sorted(by_name)
+    for name, tool in by_name.items():
+        ann = tool.annotations
+        assert ann is not None, f"{name} has no annotations"
+        if name in _READ_ONLY:
+            assert ann.read_only_hint is True, (name, ann)
+        else:
+            assert ann.read_only_hint is False, (name, ann)
+        assert ann.destructive_hint is (name in _DESTRUCTIVE), (name, ann)
+    # Positive control on the split itself: it names every tool exactly once.
+    assert _READ_ONLY | _DESTRUCTIVE | {"jobd_submit"} == set(by_name)

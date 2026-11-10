@@ -16,6 +16,7 @@ from mcp import types
 from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
 
+from jobd import __version__
 from jobd.client import BrokerRefusal, BrokerServerError, BrokerUnreachable, JobdClient
 from jobd.mcp import tools as t
 from jobd.mcp.errors import map_broker_refusal
@@ -108,6 +109,40 @@ _TOOLS = [
         "worker",
     ),
 ]
+
+
+# MCP tool annotations (audit 2026-11-10 B4: none were set, so a client could
+# not tell jobd_list from jobd_cancel). Hints, not enforcement. Read tools say
+# read-only; cancel/preempt/worker_delete say destructive (they end a run or
+# drop a registration); submit is additive and open-world (it runs an
+# arbitrary command). Keyed by name and checked against _TOOLS below.
+_READ_ONLY = types.ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, open_world_hint=False
+)
+_ANNOTATIONS: dict[str, types.ToolAnnotations] = {
+    "jobd_submit": types.ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+    ),
+    "jobd_status": _READ_ONLY,
+    "jobd_logs": _READ_ONLY,
+    "jobd_list": _READ_ONLY,
+    "jobd_events": _READ_ONLY,
+    "jobd_workers": _READ_ONLY,
+    "jobd_cancel": types.ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+    ),
+    "jobd_preempt": types.ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False
+    ),
+    "jobd_worker_delete": types.ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+    ),
+}
+if set(_ANNOTATIONS) != {entry[0] for entry in _TOOLS}:
+    raise RuntimeError(
+        "_ANNOTATIONS and _TOOLS disagree: "
+        f"{sorted(set(_ANNOTATIONS) ^ {entry[0] for entry in _TOOLS})}"
+    )
 
 
 class UnknownTool(Exception):
@@ -258,7 +293,12 @@ def build_server(client: JobdClient | None = None) -> Server:
     ) -> types.ListToolsResult:
         return types.ListToolsResult(
             tools=[
-                types.Tool(name=name, description=desc, input_schema=schema)
+                types.Tool(
+                    name=name,
+                    description=desc,
+                    input_schema=schema,
+                    annotations=_ANNOTATIONS[name],
+                )
                 for name, desc, schema, _, _ in _TOOLS
             ]
         )
@@ -352,6 +392,8 @@ def build_server(client: JobdClient | None = None) -> Server:
 
     server = Server(
         "jobd",
+        # Reported in initialize's serverInfo; it was "" (audit 2026-11-10 B4).
+        version=__version__,
         instructions=_INSTRUCTIONS,
         on_list_tools=_list,
         on_call_tool=_call,
