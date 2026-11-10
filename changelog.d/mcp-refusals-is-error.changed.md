@@ -1,0 +1,1 @@
+- **MCP: a broker refusal now sets `isError=true`.** `not_found`, `conflict`, `invalid_submit` and the other broker 4xx kinds came back as a successful tool result with an `{"error": …}` body, while schema errors and transport failures set `isError`. They now set it too, so a client that checks the flag sees the failure. The JSON body is unchanged.

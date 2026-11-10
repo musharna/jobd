@@ -278,14 +278,20 @@ def build_server(client: JobdClient | None = None) -> Server:
             # (audit 2026-09-02). UnknownTool / InvalidArguments are raised
             # inside the thread too and propagate through `to_thread` unchanged.
             payload = await asyncio.to_thread(_dispatch, name, arguments)
-            if (
+            refused = (
                 isinstance(payload, dict)
                 and "error" in payload
                 and isinstance(payload["error"], dict)
-            ):
-                error_kind = payload["error"].get("kind")
+            )
+            if refused:
+                error_kind = payload["error"].get("kind") or "unknown"
+            # A broker refusal (not_found, conflict, invalid_submit, ...) is a
+            # failed call like a schema error, so it sets isError the same way
+            # (audit 2026-11-10 J-L: it used to come back as a success with an
+            # `error` body). The body is unchanged.
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(payload))]
+                content=[types.TextContent(type="text", text=json.dumps(payload))],
+                is_error=refused,
             )
         except (BrokerUnreachable, BrokerServerError) as e:
             # Under 1.x an exception raised here was converted by the MCP layer

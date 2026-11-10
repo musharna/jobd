@@ -63,3 +63,28 @@ def test_jh1_all_states_counts_cover_every_job_not_just_the_page(app):
     # Positive control: naming the states gave the right counts before the fix.
     e, out = _call(server, "jobd_list", {"state": ["queued", "cancelled"], "limit": 3})
     assert not e and out["counts"] == dict(truth), out
+
+
+# --- J-L: broker refusals are tool errors (isError=true) -----------------------
+
+
+def test_jl_broker_refusals_set_is_error(app):
+    c, tc, server = _rig(app)
+    for name, args, kind in [
+        ("jobd_status", {"job_id": 999999}, "not_found"),
+        ("jobd_cancel", {"job_id": 999999}, "not_found"),
+        ("jobd_worker_delete", {"host": "box"}, "conflict"),  # still online
+        ("jobd_worker_delete", {"host": "nope"}, "not_found"),
+        ("jobd_events", {"since": "banana"}, "invalid_submit"),
+    ]:
+        e, out = _call(server, name, args)
+        assert e, f"{name} {args}: a broker refusal came back as a success: {out}"
+        assert out["error"]["kind"] == kind, out
+        assert out["error"]["hint"], out
+    # Positive control: the same tools on things that exist are not errors.
+    e, out = _call(server, "jobd_submit", {"command": "true", **_SUBMIT})
+    assert not e, out
+    e, out = _call(server, "jobd_status", {"job_id": out["job_id"]})
+    assert not e and out["state"] == "queued", out
+    e, out = _call(server, "jobd_events", {"since": "1h"})
+    assert not e and out["events"], out
