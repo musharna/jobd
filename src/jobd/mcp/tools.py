@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 import time
-from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -457,8 +456,7 @@ def jobd_list(client: JobdClient, args: dict) -> dict:
     # implementation forwarded at most one state and pulled the ENTIRE job
     # history to compute counts — the very transfer the broker's pagination
     # was built to end. X-Total-Count keeps the per-state counts exact while
-    # the rows stay capped. Explicit []=all is a single bounded request whose
-    # counts cover the returned page (noted via `total`).
+    # the rows stay capped.
     project = args.get("project")
     if states:
         rows = []
@@ -473,8 +471,16 @@ def jobd_list(client: JobdClient, args: dict) -> dict:
         rows.sort(key=lambda j: j.get("id") or 0, reverse=True)  # newest-first across states
         total_all = sum(counts.values())
     else:
+        # Explicit [] = all states: one bounded request for the rows, then one
+        # limit=1 request per state for its X-Total-Count. Tallying the returned
+        # rows instead (the old code) counted only the page, so with the newest
+        # `limit` jobs all queued, `cancelled` vanished from `counts` (audit
+        # 2026-11-10 J-H1).
         rows, total_all = client.list_jobs_with_total(project=project, limit=limit)
-        counts = dict(Counter(j.get("state") for j in rows))
+        counts = {}
+        for s in JobState:
+            _, n = client.list_jobs_with_total(state=s.value, project=project, limit=1)
+            counts[s.value] = n or 0
 
     wrapped = wrap_jobs(rows)
     jobs = [{k: j.get(k) for k in _LIST_SUMMARY_FIELDS} for j in wrapped["jobs"]]

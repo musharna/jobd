@@ -1,0 +1,65 @@
+"""Regression tests for the 2026-11-10 jobd-mcp audit (J-H1, J-L, B4).
+
+Same rules as test_audit_2026_09_22: every refusal is paired with a positive
+control in the same test; agent-visible claims go over the real MCP protocol;
+broker-side claims use the real FastAPI app behind TestClient. The B4 check
+starts the real `jobd-mcp` process and speaks MCP to it over stdio.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+
+from jobd.mcp.server import build_server
+from jobd.models import JobState
+from tests.mcp.test_audit_2026_09_22 import _call, _hb, _real_broker_client
+
+_SUBMIT = {"project": "p", "cwd": "/tmp"}
+
+
+def _rig(app):
+    c = _real_broker_client(app)
+    _hb(c._client, "box")
+    return c, c._client, build_server(client=c)
+
+
+# --- J-H1: state=[] counts must cover every job, not the returned page -------
+
+
+def test_jh1_all_states_counts_cover_every_job_not_just_the_page(app):
+    c, tc, server = _rig(app)
+    ids = []
+    for i in range(12):
+        e, out = _call(server, "jobd_submit", {"command": f"echo {i}", **_SUBMIT})
+        assert not e, out
+        ids.append(out["job_id"])
+    # Cancel the 8 OLDEST, so the newest page of 3 is all `queued` and a
+    # page-only count would miss `cancelled` entirely.
+    for j in ids[:8]:
+        e, out = _call(server, "jobd_cancel", {"job_id": j})
+        assert not e, out
+    truth = Counter(r["state"] for r in tc.get("/jobs").json())
+    assert truth == {"queued": 4, "cancelled": 8}, truth  # the rig did what we think
+
+    limits: list[int | None] = []
+    real = c.list_jobs_with_total
+
+    def spy(**kw):
+        limits.append(kw.get("limit"))
+        return real(**kw)
+
+    c.list_jobs_with_total = spy  # type: ignore[method-assign]
+
+    e, out = _call(server, "jobd_list", {"state": [], "limit": 3})
+    assert not e, out
+    assert {k: v for k, v in out["counts"].items() if v} == dict(truth), out["counts"]
+    # Every state is reported, zeroes included, as for a named-state call.
+    assert set(out["counts"]) == {s.value for s in JobState}, out["counts"]
+    assert [j["job_id"] for j in out["jobs"]] == sorted(ids, reverse=True)[:3]
+    assert out["truncated"] == 9, out
+    # Exact counts without pulling the history: every broker request is bounded.
+    assert limits and all(lim is not None and lim <= 3 for lim in limits), limits
+
+    # Positive control: naming the states gave the right counts before the fix.
+    e, out = _call(server, "jobd_list", {"state": ["queued", "cancelled"], "limit": 3})
+    assert not e and out["counts"] == dict(truth), out
