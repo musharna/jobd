@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from jobd.mcp.tools import _EVENTS_LIMIT_DEFAULT, _EVENTS_LIMIT_MAX
 from jobd.models import KNOWN_EVENTS, JobRequires, JobState, JobSubmit
 
 # Every schema below is CLOSED (additionalProperties: false) and the server
@@ -246,8 +247,13 @@ EVENTS_INPUT = {
         },
         "limit": {
             "type": "integer",
-            "default": 200,
-            "description": "Max rows, newest-last. Broker clamps to 10000.",
+            "default": _EVENTS_LIMIT_DEFAULT,
+            "minimum": 1,
+            "maximum": _EVENTS_LIMIT_MAX,
+            "description": (
+                f"Max rows, newest-last (1..{_EVENTS_LIMIT_MAX}). Narrow with since, "
+                "event or job_id rather than raising it."
+            ),
         },
     },
 }

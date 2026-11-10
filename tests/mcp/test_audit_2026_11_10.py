@@ -10,9 +10,13 @@ from __future__ import annotations
 
 from collections import Counter
 
+import httpx
+import respx
+
+from jobd.client import JobdClient
 from jobd.mcp.server import build_server
 from jobd.models import JobState
-from tests.mcp.test_audit_2026_09_22 import _call, _hb, _real_broker_client
+from tests.mcp.test_audit_2026_09_22 import BROKER, _call, _hb, _real_broker_client
 
 _SUBMIT = {"project": "p", "cwd": "/tmp"}
 
@@ -112,3 +116,43 @@ def test_jl_submit_refuses_empty_command_and_negative_wait(app):
         server, "jobd_status", {"job_id": out["job_id"], "wait": True, "wait_timeout_s": 0}
     )
     assert not e and out["timed_out"] is True, out
+
+
+# --- J-L: jobd_events is bounded like jobd_list --------------------------------
+
+
+def test_jl_events_limit_is_bounded(app):
+    from jobd.mcp.tools import _EVENTS_LIMIT_MAX
+
+    c, tc, server = _rig(app)
+    for _ in range(30):
+        assert tc.post("/submit", json={"cmd": ["true"], **_SUBMIT}).status_code == 200
+    n_all = len(tc.get("/events", params={"limit": 10000}).json())
+    assert n_all > 30, n_all  # enough rows that a cap is observable
+    for bad in (-1, 0, _EVENTS_LIMIT_MAX + 1, 1_000_000):
+        e, out = _call(server, "jobd_events", {"limit": bad})
+        assert e and out["error"]["kind"] == "invalid_arguments", (bad, out)
+    # Positive controls: an in-range limit returns exactly that many rows, and
+    # the max is accepted.
+    e, out = _call(server, "jobd_events", {"limit": 5})
+    assert not e and len(out["events"]) == 5, out
+    e, out = _call(server, "jobd_events", {"limit": _EVENTS_LIMIT_MAX})
+    assert not e and len(out["events"]) == min(n_all, _EVENTS_LIMIT_MAX), len(out["events"])
+
+
+@respx.mock
+def test_jl_events_tool_clamps_even_without_the_schema():
+    """The schema refuses an out-of-range limit before the tool runs; the tool
+    clamps too, so a direct call can never ask the broker for its 10000 rows."""
+    from jobd.mcp.tools import _EVENTS_LIMIT_MAX, jobd_events
+
+    # The cap itself has an upper edge: at ~250 B per event, 1000 rows is
+    # already ~250 KB of context. Raising it is a decision, not a drift.
+    assert 1 < _EVENTS_LIMIT_MAX <= 1000, _EVENTS_LIMIT_MAX
+    route = respx.get(f"{BROKER}/events").mock(return_value=httpx.Response(200, json=[]))
+    client = JobdClient(base_url=BROKER)
+    jobd_events(client, {"limit": 1_000_000})
+    jobd_events(client, {"limit": -1})
+    jobd_events(client, {"limit": 7})
+    sent = [int(call.request.url.params["limit"]) for call in route.calls]
+    assert sent == [_EVENTS_LIMIT_MAX, 1, 7], sent

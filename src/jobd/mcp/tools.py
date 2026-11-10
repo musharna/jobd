@@ -517,6 +517,14 @@ def jobd_worker_delete(client: JobdClient, args: dict) -> dict:
     return client.delete_worker(args["host"])
 
 
+# Bounded here like jobd_list (audit 2026-11-10 J-L): the broker clamps to
+# [1, 10000] without saying so, so limit=1000000 put up to 10000 events (about
+# 2.5 MB) into the model's context and limit=-1 quietly returned one row. The
+# schema refuses values outside [1, _EVENTS_LIMIT_MAX]; this clamp backs it up.
+_EVENTS_LIMIT_DEFAULT = 200
+_EVENTS_LIMIT_MAX = 1000
+
+
 def jobd_events(client: JobdClient, args: dict) -> dict:
     """The broker's event stream — the only surface that explains WHY, not just what.
 
@@ -529,5 +537,5 @@ def jobd_events(client: JobdClient, args: dict) -> dict:
         event=args.get("event"),
         job_id=args.get("job_id"),
         source=args.get("source"),
-        limit=int(args.get("limit", 200)),
+        limit=max(1, min(int(args.get("limit", _EVENTS_LIMIT_DEFAULT)), _EVENTS_LIMIT_MAX)),
     )
