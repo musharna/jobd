@@ -1,1 +1,0 @@
-- **MCP `jobd_submit` refuses a blank command and a negative `wait_timeout_s`.** An empty or whitespace-only command was queued as a job that ran nothing, and a negative wait returned at once as `timed_out`. Both are now `invalid_arguments` before anything is queued. `jobd_status` refuses a negative `wait_timeout_s` the same way; 0 still means "check once".

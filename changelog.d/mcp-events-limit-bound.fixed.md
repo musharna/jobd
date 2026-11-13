@@ -1,1 +1,0 @@
-- **MCP `jobd_events` bounds `limit` to 1..1000.** The tool passed `limit` straight to the broker, which clamps to [1, 10000] without saying so: `limit=1000000` put up to 10000 events (about 2.5 MB) into the agent's context, and `limit=-1` quietly returned one row. Out-of-range values are now `invalid_arguments`, and the tool clamps as a backstop. The default stays 200.
