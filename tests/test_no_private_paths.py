@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,9 +30,32 @@ _raw = os.environ.get(_ENV) or (_FILE.read_text(encoding="utf-8") if _FILE.is_fi
 FORBIDDEN = [line.strip() for line in _raw.splitlines() if line.strip()]
 
 
+# Set by ci.yml to "dependabot" only on a Dependabot-triggered pull_request run.
+_NO_SECRET_ENV = "JOBD_PRIVACY_NO_SECRET"
+
+
+def _dependabot_run_without_secrets() -> bool:
+    """True only on a run the workflow marked AND GitHub says is Dependabot's
+    pull_request. GITHUB_ACTOR and GITHUB_EVENT_NAME are set by the runner and
+    a workflow cannot override them, so the marker alone cannot open the skip."""
+    return (
+        os.environ.get(_NO_SECRET_ENV) == "dependabot"
+        and os.environ.get("GITHUB_ACTOR") == "dependabot[bot]"
+        and os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+    )
+
+
 def _require_list() -> None:
-    if not FORBIDDEN:
-        pytest.fail(f"no forbidden list: set {_ENV} or write {_FILE} (one identifier per line)")
+    if FORBIDDEN:
+        return
+    if _dependabot_run_without_secrets():
+        pytest.skip(
+            "no forbidden list on a Dependabot pull_request run: GitHub gives "
+            "Dependabot runs no Actions secrets. The scan runs on the push to main "
+            "after merge; to scan here as well, add PRIVACY_FORBIDDEN as a "
+            "Dependabot secret."
+        )
+    pytest.fail(f"no forbidden list: set {_ENV} or write {_FILE} (one identifier per line)")
 
 
 def scan(paths: list[Path]) -> list[str]:
@@ -86,3 +110,81 @@ def test_the_private_overlay_is_gitignored():
         ["git", "check-ignore", "-q", "config/projects.local.yaml"], cwd=ROOT, check=False
     )
     assert r.returncode == 0, "config/projects.local.yaml is not gitignored"
+
+
+# --- Dependabot runs (audit 2026-11-10 J-M1) ----------------------------------
+# GitHub gives Dependabot-triggered runs no Actions secrets, so the list above is
+# empty there and both scan tests failed every security-update PR. The workflow
+# marks such a run explicitly; the scans skip, with a reason, only when the list
+# is missing AND the run is marked AND GitHub itself says the actor is
+# Dependabot on a pull_request. Anywhere else a missing list still fails.
+
+_DEPENDABOT_ENV = {
+    "JOBD_PRIVACY_NO_SECRET": "dependabot",
+    "GITHUB_ACTOR": "dependabot[bot]",
+    "GITHUB_EVENT_NAME": "pull_request",
+}
+
+
+@pytest.mark.parametrize(
+    "drop,override",
+    [
+        ("JOBD_PRIVACY_NO_SECRET", None),  # not marked by the workflow
+        (None, ("GITHUB_ACTOR", "musharna")),  # the owner's PR
+        (None, ("GITHUB_EVENT_NAME", "push")),  # a push to main
+        (None, ("JOBD_PRIVACY_NO_SECRET", "1")),  # marked with anything but the agreed value
+    ],
+)
+def test_a_missing_list_still_fails_outside_a_dependabot_run(monkeypatch, drop, override):
+    env = dict(_DEPENDABOT_ENV)
+    if drop:
+        env.pop(drop)
+    if override:
+        env[override[0]] = override[1]
+    for k in _DEPENDABOT_ENV:
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setitem(globals(), "FORBIDDEN", [])
+    # Catch skip too: a skip is not an exception pytest.raises(Failed) sees,
+    # so a wrongly opened skip would report this test as SKIPPED, not failed.
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as outcome:
+        _require_list()
+    assert outcome.type is pytest.fail.Exception, f"skipped where it must fail: {outcome.value}"
+    assert "no forbidden list" in str(outcome.value)
+
+
+def test_a_marked_dependabot_run_skips_only_when_the_list_is_missing(monkeypatch):
+    for k, v in _DEPENDABOT_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setitem(globals(), "FORBIDDEN", [])
+    with pytest.raises(pytest.skip.Exception, match="Dependabot"):
+        _require_list()
+    # Positive control: with a list present, a marked run still scans.
+    monkeypatch.setitem(globals(), "FORBIDDEN", ["x"])
+    _require_list()
+
+
+def test_the_real_scan_tests_skip_on_a_marked_run_and_fail_on_an_unmarked_one(tmp_path):
+    """The two cases above, through a real pytest process with no list at all
+    (HOME points at an empty directory, so the fallback file is absent)."""
+    node = f"{Path(__file__).relative_to(ROOT)}::test_tracked_tree_has_no_private_paths"
+    base = {k: v for k, v in os.environ.items() if k not in _DEPENDABOT_ENV and k != _ENV}
+    base["HOME"] = str(tmp_path)
+
+    def run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", node, "-q", "-rs", "-p", "no:cacheprovider"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    marked = run({**base, **_DEPENDABOT_ENV})
+    assert marked.returncode == 0 and "1 skipped" in marked.stdout, marked.stdout
+    assert "Dependabot" in marked.stdout, marked.stdout  # the reason is printed
+    unmarked = run({**base, "GITHUB_ACTOR": "musharna", "GITHUB_EVENT_NAME": "pull_request"})
+    assert unmarked.returncode == 1 and "1 failed" in unmarked.stdout, unmarked.stdout

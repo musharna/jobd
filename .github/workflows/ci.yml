@@ -33,6 +33,14 @@ jobs:
     env:
       # tests/test_no_private_paths.py reads its identifier list from here.
       JOBD_PRIVACY_FORBIDDEN: ${{ secrets.PRIVACY_FORBIDDEN }}
+      # Dependabot-triggered runs get no Actions secrets, so the list above is
+      # empty there and the scan failed every security-update PR. Mark those
+      # runs, and only those; the test skips (with a reason) only when the list
+      # is missing AND this is set AND the runner's own GITHUB_ACTOR /
+      # GITHUB_EVENT_NAME say Dependabot + pull_request. Pushes to main and the
+      # owner's PRs are never marked, so a missing list still fails there.
+      # Alternative: add PRIVACY_FORBIDDEN as a Dependabot secret.
+      JOBD_PRIVACY_NO_SECRET: ${{ (github.actor == 'dependabot[bot]' && github.event_name == 'pull_request') && 'dependabot' || '' }}
     strategy:
       fail-fast: false
       matrix:
