@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from jobd.mcp.tools import _EVENTS_LIMIT_DEFAULT, _EVENTS_LIMIT_MAX
 from jobd.models import KNOWN_EVENTS, JobRequires, JobState, JobSubmit
 
 # Every schema below is CLOSED (additionalProperties: false) and the server
@@ -53,7 +54,13 @@ SUBMIT_INPUT = {
     "required": ["command", "project", "cwd"],
     "$defs": _SUBMIT_DEFS,
     "properties": {
-        "command": {"type": "string", "description": "Shell command run by the worker shell."},
+        "command": {
+            "type": "string",
+            # An empty or blank command queued a job that ran nothing and
+            # "completed" (audit 2026-11-10 J-L).
+            "pattern": "\\S",
+            "description": "Shell command run by the worker shell. Must not be blank.",
+        },
         "project": {
             "type": "string",
             "description": (
@@ -91,7 +98,8 @@ SUBMIT_INPUT = {
         "wait_timeout_s": {
             "type": "integer",
             "default": 90,
-            "description": "Seconds; permissive — server clamps to 270.",
+            "minimum": 0,
+            "description": "Seconds, 0 or more; permissive — server clamps to 270.",
         },
         "dry_run": {
             "type": "boolean",
@@ -117,7 +125,8 @@ STATUS_INPUT = {
         "wait_timeout_s": {
             "type": "integer",
             "default": 90,
-            "description": "Server clamps to 270.",
+            "minimum": 0,
+            "description": "Seconds, 0 or more. Server clamps to 270.",
         },
     },
 }
@@ -238,8 +247,13 @@ EVENTS_INPUT = {
         },
         "limit": {
             "type": "integer",
-            "default": 200,
-            "description": "Max rows, newest-last. Broker clamps to 10000.",
+            "default": _EVENTS_LIMIT_DEFAULT,
+            "minimum": 1,
+            "maximum": _EVENTS_LIMIT_MAX,
+            "description": (
+                f"Max rows, newest-last (1..{_EVENTS_LIMIT_MAX}). Narrow with since, "
+                "event or job_id rather than raising it."
+            ),
         },
     },
 }
