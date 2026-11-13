@@ -4,6 +4,23 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.58] — 2026-11-13
+
+### Fixed
+
+- **MCP `jobd_events` bounds `limit` to 1..1000.** The tool passed `limit` straight to the broker, which clamps to [1, 10000] without saying so: `limit=1000000` put up to 10000 events (about 2.5 MB) into the agent's context, and `limit=-1` quietly returned one row. Out-of-range values are now `invalid_arguments`, and the tool clamps as a backstop. The default stays 200.
+- **`jobd_list` with `state: []` (all states) now counts every job, not just the returned page.** It tallied the rows it returned, so with `limit=3` and the newest three jobs queued it answered `counts: {"queued": 3}` and dropped the eight cancelled jobs, although the schema says `counts` covers every job matching the filters. Counts now come from the broker's `X-Total-Count`, one `limit=1` request per state, so they are exact without fetching the history, and every state is listed with zeroes included, as for a named-state call.
+- **MCP `jobd_submit` refuses a blank command and a negative `wait_timeout_s`.** An empty or whitespace-only command was queued as a job that ran nothing, and a negative wait returned at once as `timed_out`. Both are now `invalid_arguments` before anything is queued. `jobd_status` refuses a negative `wait_timeout_s` the same way; 0 still means "check once".
+- **`jobd-mcp` reports its version and annotates its tools.** `initialize` returned an empty `serverInfo.version`; it now carries the package version. Every tool now has MCP annotations: the five read tools (`jobd_status`, `jobd_logs`, `jobd_list`, `jobd_events`, `jobd_workers`) are read-only, and `jobd_cancel`, `jobd_preempt` and `jobd_worker_delete` are marked destructive, so a client can tell them apart before calling.
+
+### Security
+
+- **Locked dependencies raised past open advisories.** `certifi` 2026.7.22 → 2026.10.23 in `uv.lock` and `docker/requirements-docker.txt` (GHSA-6q48-6c7w-9gw2, compromised emSign intermediates); `mcp` 2.0.0 → 2.3.0 (GHSA-w4fh-qvv9-3v23, GHSA-5h93-6whr-6q8j, GHSA-rwrf-2pqf-9j8j, GHSA-84m7-p3x7-pcfv); `opentelemetry-api` 1.44.0 → 1.45.2 (GHSA-xcq7-p3pf-p88h). The Dependabot PRs for these could not go green because their CI runs do not receive the privacy-check secret.
+
+### Changed
+
+- **MCP: a broker refusal now sets `isError=true`.** `not_found`, `conflict`, `invalid_submit` and the other broker 4xx kinds came back as a successful tool result with an `{"error": …}` body, while schema errors and transport failures set `isError`. They now set it too, so a client that checks the flag sees the failure. The JSON body is unchanged.
+
 ## [0.5.57] — 2026-11-09
 
 ### Fixed

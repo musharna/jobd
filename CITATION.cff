@@ -26,8 +26,8 @@ identifiers:
 repository-code: "https://github.com/musharna/jobd"
 url: "https://pypi.org/project/jobd/"
 license: MIT
-version: 0.5.57
-date-released: "2026-11-09"
+version: 0.5.58
+date-released: "2026-11-13"
 keywords:
   - job-scheduler
   - job-queue
