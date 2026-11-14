@@ -49,15 +49,23 @@ def _dependabot_run_without_secrets() -> bool:
 # The workflows repo-template owns. They are the same file in every repo, so
 # they cannot name this repo's secret; ci.yml's test jobs carry the scan.
 _TEMPLATE_WORKFLOWS = ("guardrails", "nightly-guardrails")
+# Where scripts/guardrails-setup.sh leaves that workflow's name for the step
+# that re-runs the suite through sudo (GITHUB_* is dropped there, HOME is kept).
+_NO_LIST_MARKER = Path.home() / ".config/jobd/privacy-no-list"
 
 
 def _template_workflow_run() -> str | None:
     """The workflow's name on a GitHub run of a template-owned workflow, else
     None. GITHUB_ACTIONS and GITHUB_WORKFLOW are set by the runner and a
-    workflow cannot override them."""
+    workflow cannot override them; the marker file is written from those two
+    by scripts/guardrails-setup.sh and counts only when it names one of them."""
     name = os.environ.get("GITHUB_WORKFLOW")
     if os.environ.get("GITHUB_ACTIONS") == "true" and name in _TEMPLATE_WORKFLOWS:
         return name
+    if _NO_LIST_MARKER.is_file():
+        marked = _NO_LIST_MARKER.read_text(encoding="utf-8").strip()
+        if marked in _TEMPLATE_WORKFLOWS:
+            return marked
     return None
 
 
@@ -169,7 +177,8 @@ def _env_without_the_list(home: Path) -> dict[str, str]:
         (None, ("JOBD_PRIVACY_NO_SECRET", "1")),  # marked with anything but the agreed value
     ],
 )
-def test_a_missing_list_still_fails_outside_a_dependabot_run(monkeypatch, drop, override):
+def test_a_missing_list_still_fails_outside_a_dependabot_run(monkeypatch, tmp_path, drop, override):
+    monkeypatch.setitem(globals(), "_NO_LIST_MARKER", tmp_path / "absent")
     env = dict(_DEPENDABOT_ENV)
     if drop:
         env.pop(drop)
@@ -188,7 +197,8 @@ def test_a_missing_list_still_fails_outside_a_dependabot_run(monkeypatch, drop, 
     assert "no forbidden list" in str(outcome.value)
 
 
-def test_a_marked_dependabot_run_skips_only_when_the_list_is_missing(monkeypatch):
+def test_a_marked_dependabot_run_skips_only_when_the_list_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setitem(globals(), "_NO_LIST_MARKER", tmp_path / "absent")
     for k in _TEMPLATE_RUN_ENV:
         monkeypatch.delenv(k, raising=False)
     for k, v in _DEPENDABOT_ENV.items():
@@ -236,7 +246,10 @@ def test_the_real_scan_tests_skip_on_a_marked_run_and_fail_on_an_unmarked_one(tm
 
 
 @pytest.mark.parametrize("workflow", ["guardrails", "nightly-guardrails"])
-def test_a_template_workflow_run_skips_only_when_the_list_is_missing(monkeypatch, workflow):
+def test_a_template_workflow_run_skips_only_when_the_list_is_missing(
+    monkeypatch, tmp_path, workflow
+):
+    monkeypatch.setitem(globals(), "_NO_LIST_MARKER", tmp_path / "absent")
     for k in _DEPENDABOT_ENV:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
@@ -260,7 +273,8 @@ def test_a_template_workflow_run_skips_only_when_the_list_is_missing(monkeypatch
         {"GITHUB_WORKFLOW": "guardrails"},  # a shell with a stray variable, not a runner
     ],
 )
-def test_a_missing_list_still_fails_outside_a_template_workflow_run(monkeypatch, env):
+def test_a_missing_list_still_fails_outside_a_template_workflow_run(monkeypatch, tmp_path, env):
+    monkeypatch.setitem(globals(), "_NO_LIST_MARKER", tmp_path / "absent")
     for k in (*_DEPENDABOT_ENV, *_TEMPLATE_RUN_ENV):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
@@ -293,3 +307,93 @@ def test_the_real_scan_tests_skip_in_a_template_workflow_and_fail_in_ci(tmp_path
     assert "template-owned" in nightly.stdout, nightly.stdout  # the reason is printed
     ci = run({**base, "GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "CI"})
     assert ci.returncode == 1 and "1 failed" in ci.stdout, ci.stdout
+
+
+# --- The same fact across the sudo hop ----------------------------------------
+# guardrails.yml re-runs the suite with no network through sudo, which keeps a
+# short list of variables (KEEP=... in the workflow) and drops GITHUB_*. On the
+# adoption PR's first CI run the skip above held in the plain test step and
+# both scans failed in the no-network one. scripts/guardrails-setup.sh, which
+# the template workflows run first, now leaves the workflow's name in a file
+# under HOME (HOME is kept), and the scans accept that file as well.
+
+
+@pytest.mark.parametrize("workflow", ["guardrails", "nightly-guardrails"])
+def test_the_marker_file_skips_only_when_the_list_is_missing(monkeypatch, tmp_path, workflow):
+    for k in (*_DEPENDABOT_ENV, *_TEMPLATE_RUN_ENV):
+        monkeypatch.delenv(k, raising=False)
+    marker = tmp_path / "privacy-no-list"
+    marker.write_text(workflow + "\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "_NO_LIST_MARKER", marker)
+    monkeypatch.setitem(globals(), "FORBIDDEN", [])
+    with pytest.raises(pytest.skip.Exception, match=f"template-owned '{workflow}' workflow"):
+        _require_list()
+    # Positive control: with a list present, the same run still scans.
+    monkeypatch.setitem(globals(), "FORBIDDEN", ["x"])
+    _require_list()
+
+
+@pytest.mark.parametrize("content", ["", "CI\n", "Guardrails\n", "guardrails-lite\n", "1\n"])
+def test_a_marker_file_naming_anything_else_still_fails(monkeypatch, tmp_path, content):
+    for k in (*_DEPENDABOT_ENV, *_TEMPLATE_RUN_ENV):
+        monkeypatch.delenv(k, raising=False)
+    marker = tmp_path / "privacy-no-list"
+    marker.write_text(content, encoding="utf-8")
+    monkeypatch.setitem(globals(), "_NO_LIST_MARKER", marker)
+    monkeypatch.setitem(globals(), "FORBIDDEN", [])
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as outcome:
+        _require_list()
+    assert outcome.type is pytest.fail.Exception, f"skipped where it must fail: {outcome.value}"
+
+
+def _kept_by_the_no_network_step() -> list[str]:
+    """The variable names guardrails.yml carries across its sudo hop, read from
+    the workflow itself so this test runs under the step's real environment."""
+    text = (ROOT / ".github/workflows/guardrails.yml").read_text(encoding="utf-8")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("KEEP=")]
+    assert len(lines) == 1, lines
+    kept = lines[0].removeprefix("KEEP=").split(",")
+    assert "HOME" in kept and not any(k.startswith("GITHUB_") for k in kept), kept
+    return kept
+
+
+def test_the_setup_script_carries_the_skip_across_the_sudo_hop(tmp_path):
+    """The real script, then the real scan test in a real pytest process whose
+    environment holds only what the no-network step keeps."""
+    node = f"{Path(__file__).relative_to(ROOT)}::test_tracked_tree_has_no_private_paths"
+    script = ROOT / "scripts/guardrails-setup.sh"
+    kept = _kept_by_the_no_network_step()
+
+    def scan_after_setup(home: Path, workflow: str) -> subprocess.CompletedProcess[str]:
+        home.mkdir()
+        runner = {
+            **_env_without_the_list(home),
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_WORKFLOW": workflow,
+        }
+        subprocess.run(["bash", str(script)], cwd=ROOT, env=runner, check=True, timeout=60)
+        across = {k: v for k, v in runner.items() if k in kept}
+        assert "GITHUB_WORKFLOW" not in across and across["HOME"] == str(home)
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", node, "-q", "-rs", "-p", "no:cacheprovider"],
+            cwd=ROOT,
+            env=across,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    template = scan_after_setup(tmp_path / "template", "guardrails")
+    assert template.returncode == 0 and "1 skipped" in template.stdout, template.stdout
+    assert "template-owned 'guardrails' workflow" in template.stdout, template.stdout
+    # The same script on this repo's own workflow leaves nothing, and the scan fails.
+    ci = scan_after_setup(tmp_path / "ci", "CI")
+    assert not (tmp_path / "ci/.config/jobd/privacy-no-list").exists()
+    assert ci.returncode == 1 and "1 failed" in ci.stdout, ci.stdout
+    # Nor does a shell that merely has the variable set, with no runner behind it.
+    stray = tmp_path / "stray"
+    stray.mkdir()
+    shell = {**_env_without_the_list(stray), "GITHUB_WORKFLOW": "guardrails"}
+    subprocess.run(["bash", str(script)], cwd=ROOT, env=shell, check=True, timeout=60)
+    assert not (stray / ".config/jobd/privacy-no-list").exists()
