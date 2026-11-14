@@ -64,8 +64,10 @@ mcp = ["mcp>=2,<3", "httpx>=0.27", "jsonschema>=4.18"]
 [project.scripts]
 jobd = "jobd.main:run"
 job = "job_cli.cli:main"
-jobd-mcp = "jobd.mcp.server:main"
-jobd-worker = "jobd.worker.job_worker:main"
+# Through jobd._entry, which loads on a base install: without the extra the
+# command names it instead of dying on a missing-module traceback.
+jobd-mcp = "jobd._entry:mcp"
+jobd-worker = "jobd._entry:worker"
 
 [build-system]
 requires = ["hatchling"]
@@ -128,3 +130,22 @@ extend-immutable-calls = ["typer.Argument", "typer.Option"]
 # Branch-coverage floor enforced by ci.yml's coverage leg (the workflow flag
 # must agree; tests/test_deploy_lint.py checks). Measured 86.8% on 2026-09-02.
 fail_under = 83
+
+[tool.mutmut]
+source_paths = ["src"]
+# mutmut runs the suite inside its own copy, mutants/. Every tracked top-level
+# entry goes into it, so a test that reads one still collects there
+# (tests/test_mutmut_copy.py keeps this list complete).
+also_copy = [".dockerignore", ".editorconfig", ".env.example", ".github", ".gitignore", ".mcp.json", ".pre-commit-config.yaml", ".zenodo.json", "CHANGELOG.md", "CITATION.cff", "CLAUDE.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "Dockerfile", "LESSONS.md", "LICENSE", "README.md", "REVIEW.md", "SECURITY.md", "assets", "benchmarks", "changelog.d", "config", "docker", "docker-compose.build.yml", "docker-compose.yml", "docs", "examples", "glama.json", "scripts", "server.json"]
+# These two scan src/ as text (every JOBD_* name, every emitted event name).
+# mutmut's copy repeats each function once per mutant with the mutated strings
+# in it, so the scans find names that exist in no real source file.
+pytest_add_cli_args = [
+    "--deselect", "tests/test_config_catalog.py::test_every_source_variable_has_a_catalog_row",
+    "--deselect", "tests/test_metrics_event_counter.py::test_every_emitted_event_name_is_in_the_known_vocabulary",
+    # The perf ratchet counts calls in a new interpreter and refuses to run unless
+    # jobd is imported from the tree it sits in. mutmut puts its copy first on
+    # the path of its own process only, so the new interpreter finds the
+    # installed checkout and the ratchet stops. ci.yml runs it on every PR.
+    "--deselect", "tests/test_perf_ratchet.py::test_the_counted_workloads_equal_the_committed_baseline",
+]

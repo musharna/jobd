@@ -30,3 +30,7 @@ htmlcov/
 
 # Machine-specific project roots/names; the tracked projects.yaml stays generic.
 config/projects.local.yaml
+
+# mutmut's working copy of the tree (nightly-guardrails.yml, or `mutmut run`
+# locally). Left untracked it is linted and scanned as if it were source.
+mutants/

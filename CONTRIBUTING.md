@@ -50,6 +50,21 @@ Ruff is configured in `pyproject.toml` (`line-length = 100`, `target-version = p
 
 `uv run mypy src/jobd src/job_cli` runs in CI but is **non-blocking** (the codebase is mid-typing-adoption). Don't regress it — prefer adding annotations to new/changed code so we can tighten it to a hard gate later.
 
+### Guardrails (shared with the other repos)
+
+[`CLAUDE.md`](CLAUDE.md) is the contract for code in this repo. Two workflows from
+`repo-template` enforce it, alongside `ci.yml`:
+
+- `guardrails.yml`, on every PR and push: house-rule hooks, bandit, the suite again
+  with no network, a wheel install check, a dependency audit when the lock changes,
+  and an automated review whose result the `review-gate` check holds a merge on.
+- `nightly-guardrails.yml`, scheduled: mutation testing, a dependency audit and a
+  weekly fuzz run. Each opens or updates an issue.
+
+Run the hooks before pushing: `uvx pre-commit run --all-files`. Those two workflow
+files, `.pre-commit-config.yaml`, `CLAUDE.md`, `REVIEW.md` and the `scripts/` they
+call are template-owned: change them in `repo-template` and resync, not here.
+
 ### The quickstart dry-run (run this before and after every release)
 
 Nothing in CI installs jobd the way a new user does, so run it yourself:
