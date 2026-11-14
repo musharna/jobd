@@ -843,7 +843,8 @@ def _configured_aliases() -> list[str]:
     return base
 
 
-_ROOT_CANDIDATES = ["/home", "/tmp", "/mnt/c", "/mnt/d", "/opt", "/var", "/data", "/scratch"]
+_TMP_ROOT = "/tmp"  # nosec B108 - a directory name tested for existence; no file is made in it
+_ROOT_CANDIDATES = ["/home", _TMP_ROOT, "/mnt/c", "/mnt/d", "/opt", "/var", "/data", "/scratch"]
 
 
 def _detect_mount_roots() -> list[str]:

@@ -1,0 +1,174 @@
+# Guardrails pre-commit config (from ~/repo-template; sync with scripts/guardrails-sync.sh).
+# Setup once per clone:  uvx pre-commit install
+# Every rev is a commit SHA verified to exist on 2026-09-11; bump deliberately.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: e8f7d69b957a30acb2c875078d5fd012de24b64c # v0.16.7
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: detect-private-key
+      - id: check-merge-conflict
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
+    hooks:
+      - id: shellcheck
+        args: [--severity=warning]
+
+  # House rules: each one is a bug class that has actually shipped here.
+  # Negative controls for every hook live in scripts/guardrails-selftest.sh.
+  - repo: local
+    hooks:
+      - id: no-bare-replace
+        name: "AST rules: bare str.replace() no-op; except ParseError with defusedxml imported"
+        language: system
+        types: [python]
+        entry: python3 scripts/guardrails-hooks.py
+
+      - id: nosec-needs-reason
+        name: "# nosec must name the test id AND a traced reason: '# nosec B608 - why this value is safe'"
+        language: pygrep
+        types: [python]
+        entry: '#\s*nosec(?!:?\s*B\d+(\s*,\s*B\d+)*\s+-\s+\S)'
+
+      - id: no-raises-bare-exception
+        name: "pytest.raises(Exception) cannot tell a wrapped error from a leaked one; name the type"
+        language: pygrep
+        types: [python]
+        # Anchored to the statement so a comment or docstring that MENTIONS the
+        # anti-pattern (phylokit test_mcp_protocol.py:205, breedsim
+        # test_diagnostics_and_server.py:159, both explaining why they don't do it)
+        # is not a hit. A pygrep cannot tell a mention from a use; the anchor can.
+        entry: '^\s*with\s+pytest\.raises\(\s*(Exception|BaseException)\s*[,)]'
+
+      - id: no-nested-lazy
+        name: "NESTED lazy quantifier (a quantified group containing *? / +?) = catastrophic backtracking"
+        language: pygrep
+        types: [python]
+        entry: '\([^()]*[\*\+]\?[^()]*\)[\*\+\{]'
+
+      - id: no-nohup-background
+        name: "nohup ... & dies with the shell scope; use systemd-run --user --unit"
+        language: pygrep
+        types: [shell]
+        entry: '^\s*nohup\b.*&\s*(#.*)?$'
+
+      - id: no-uppercase-transform
+        name: "text-transform: uppercase maps µ (U+00B5) to LATIN M; units read 1000x wrong"
+        language: pygrep
+        files: '\.(css|scss|html|svelte|vue|jsx|tsx)$'
+        # Anchored to a DECLARATION (line start, `{` or `;` before it): a comment
+        # that mentions the rule (wildeye style.css:9553 explains why it is
+        # avoided) is not a use of it. A use over text that can never hold a
+        # unit (a page title, a button) is allowed with a traced reason on the
+        # same line: `/* uppercase-ok: page title, no unit text */`.
+        entry: '(^\s*|[;{]\s*)text-transform\s*:\s*uppercase(?!.*uppercase-ok:\s*[^\s*/])'
+
+      - id: no-sleep-then-interact
+        name: "a fixed sleep, then a click/focus/hover/tap/key press: wait for the state instead"
+        language: pygrep
+        files: '\.(m?js|cjs|m?ts|jsx|tsx)$'
+        args: [--multiline]
+        # wildeye 2026-09-27/28: four browser-test misses were a fixed sleep lost
+        # to a transition or a pending timer, and 16 "sleep 12 s, press Escape"
+        # boot steps had nothing left to act on. An awaited sleep (sleep/delay/
+        # wait/pause(N), new Promise(r => setTimeout(r, N)), x.waitForTimeout(N))
+        # whose NEXT line interacts is flagged. A duration that is the point is
+        # allowed with a reason on the sleep's line: `// qa-wait-ok: <why>`.
+        # Adjacent lines only (pygrep has no parser); wildeye's
+        # scripts/lint-qa-waits.mjs is the statement-level version.
+        entry: '^[ \t]*await[ \t]+(?:(?:sleep|delay|wait|pause)\([^()\n]*\)|new[ \t]+Promise\([^\n]*setTimeout[^\n]*|[\w.$]+\.waitForTimeout\([^()\n]*\))(?![^\n]*qa-wait-ok:[ \t]*\S)[^\n]*\n[^\n]*\.(?:click|focus|hover|tap|press|type)\('
+
+      - id: no-fixed-wait-py
+        name: "Python: Playwright wait_for_timeout, or a sleep then a click/key press: wait for the state instead"
+        language: system
+        types: [python]
+        entry: python3 scripts/guardrails-hooks.py --fixed-wait
+        # plant-genomics-mcp #234 (2026-10-16): a README card renderer ported in
+        # from another project slept `page.wait_for_timeout(800)` and then
+        # measured layout; review caught it, not this file, because the JS hook
+        # above reads no .py and only flags a sleep before an interaction.
+        # Playwright documents wait_for_timeout as for debugging only, so in
+        # Python it is flagged wherever it is called; time.sleep / asyncio.sleep
+        # are flagged only when the NEXT statement interacts (a backoff before an
+        # HTTP retry is not a browser wait). Same escape as the JS hook, as a
+        # comment on any line of the call: `# qa-wait-ok: <why>`.
+        # AST, not pygrep, since taxon3d #221 (2026-10-17): ruff wrapped a call
+        # over three lines and the regex stopped seeing it, and pygrep
+        # --multiline reports only the first hit in a file.
+
+      - id: no-ignored-mutmut-pragma
+        name: "mutmut: a trailing '# pragma: no mutate' inside brackets or after a multi-line statement is ignored"
+        language: system
+        types: [python]
+        entry: python3 scripts/guardrails-hooks.py --mutmut-pragma
+        # data-aggregator-mcp #342 (2026-10-19): two pragmas sat inside a call's
+        # arguments and an `or` chain. mutmut 3 reads a trailing pragma only on
+        # the line its statement starts on, at the statement's end, so both
+        # suppressed nothing, and the PR checked them with a harness that never
+        # reads pragmas. Checked against mutmut 3.7's own PragmaVisitor: 25 of
+        # 25 trailing pragmas across the fleet agree. Several lines take a
+        # `# pragma: no mutate start` / `end` pair on lines of their own.
+
+      - id: no-pathscoped-write-rule
+        name: "Claude --allowed-tools: Write(path) matches nothing (use Edit(path)); Edit(/x) is project-relative (real root is //x)"
+        language: pygrep
+        files: '^(\.github/workflows|templates/workflows)/.*\.ya?ml$'
+        # 2026-09-30: the nightly fuzz step allowed Write(fuzz_scratch/**) and
+        # triage Write(/tmp/*). Path-scoped file-write rules are spelled Edit(...)
+        # (it governs the Write tool too); a path-scoped Write(...) rule matches
+        # nothing, and a single leading slash is relative to the project. Every
+        # fuzz test file was denied, fleet-wide, since the step was written.
+        # Read(...) is in scope on evidence, not by analogy: probed 2026-09-30
+        # (claude -p 2.1.286, file outside the project) Read(/tmp/x/**) was
+        # denied like no rule at all; Read(//tmp/x/**) and bare Read read it.
+        # Anchored INSIDE the --allowed-tools list (quoted: up to the closing
+        # quote; unquoted: up to a `#` comment, since `Read, Write(x)` with
+        # spaces is still one list), so a comment explaining the rule is not a
+        # hit. Bare `Write` (no path) is fine.
+        entry: '--allowed-?[Tt]ools[ =]+(["''][^"'']*|[^"''#]*)(\bWrite\(|\b(Edit|Read)\(/[^/])'
+
+      - id: no-dev-paths
+        name: "absolute developer-machine paths in tracked files (real machine names only; placeholder homes pass)"
+        language: pygrep
+        types: [text]
+        exclude: '^(\.pre-commit-config\.yaml|scripts/guardrails-selftest\.sh|\.github/workflows/.*)$'
+        # Bracketed last char so this file never contains the literal it hunts
+        # (a gate whose scope includes its own definition flags itself).
+        entry: '/home[/]mjarnol[d]|/mnt/c[/]Users/a2b3[2]|C:\\Users\\a2b3[2]'
+
+      # A tag (@v7) can be moved to different code after review; a commit SHA cannot. wildeye #79 added
+      # setup-node@v7 in a new workflow and ci.yml carried two more (2026-10-11): review caught one of three.
+      - id: no-unpinned-action
+        # Workflows and composite actions (action.yml). Local ./ actions are exempt; a docker:// image needs its
+        # @sha256: digest (a tag like :3.20 moves the same way). PR review found both gaps in the first version.
+        name: "GitHub Actions pinned (uses: owner/repo@<40-hex SHA> # vX.Y.Z, docker://image@sha256:<64 hex>)"
+        language: pygrep
+        files: '^((\.github/workflows|templates/workflows)/.*\.ya?ml|(.*/)?action\.ya?ml)$'
+        entry: '^\s*(-\s+)?uses:\s*["'']?(?:(?!\./|docker://)[^\s"''@]+@(?![0-9a-f]{40}(["''\s]|$))|docker://(?![^\s"'']*@sha256:[0-9a-f]{64}(["''\s]|$)))'
+
+      # The same rule set CI runs (guardrails.yml security job: bandit -ll =
+      # medium and up), on the files being committed. Until 2026-09-18 bandit
+      # ran ONLY in CI: figcite 70432c5 put a B324 High (hashlib.md5 without
+      # usedforsecurity=False) on master and the first anyone saw of it was a
+      # red default branch blocking an unrelated PR. A finding that a hook can
+      # catch belongs in the hook (CLAUDE.md section 4).
+      - id: bandit-medium-plus
+        name: "bandit, medium+ severity (same as CI); fix it or '# nosec Bxxx - reason'"
+        language: system
+        types: [python]
+        exclude: '^(tests/|mutants/|fuzz_scratch/)'
+        entry: uvx bandit -q -ll

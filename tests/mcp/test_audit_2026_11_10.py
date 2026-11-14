@@ -183,7 +183,11 @@ def test_b4_initialize_reports_version_and_tools_carry_annotations(tmp_path):
     params = StdioServerParameters(command=sys.executable, args=["-m", "jobd.mcp.server"], env=env)
 
     async def go():
-        async with stdio_client(params) as (read, write):
+        # errlog is passed, not defaulted: the library binds sys.stderr as the
+        # default when it is first imported, so a second pytest run in the same
+        # process (mutmut makes two) would hand the server the first run's
+        # closed capture file.
+        async with stdio_client(params, errlog=sys.stderr) as (read, write):
             async with ClientSession(read, write) as session:
                 init = await asyncio.wait_for(session.initialize(), 30)
                 tools = await asyncio.wait_for(session.list_tools(), 30)

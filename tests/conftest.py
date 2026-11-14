@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from jobd.app import build_app
+from tests.process_state import child_subreaper_bit_restored
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +34,18 @@ def _test_scope_namespace():
     job_worker.set_scope_namespace(f"http://jobd-test-suite.invalid:{os.getpid()}")
     yield
     job_worker._scope_ns = before
+
+
+@pytest.fixture(autouse=True)
+def _restore_child_subreaper_bit():
+    """Put the process's child-subreaper bit back after every test.
+
+    A test that really calls ``set_child_subreaper`` (or the worker's
+    ``main``) makes pytest itself a subreaper for the rest of the process;
+    tests/process_state.py has what that cost.
+    """
+    with child_subreaper_bit_restored():
+        yield
 
 
 @pytest.fixture(autouse=True)

@@ -62,8 +62,19 @@ jobs:
       # Shell scripts get the same lint gate as Python (ubuntu runners ship
       # shellcheck). Caught-in-the-wild class: an un-timeouted probe of a
       # stdio binary hanging scripts/fix-cli-shims.sh.
+      #
+      # jobd's own scripts, at shellcheck's default (strictest) level. The six
+      # that repo-template owns are linted by guardrails.yml at the template's
+      # level (warning) and are changed there, not here; two of them carry
+      # style/info notes that this stricter run fails on.
       - name: Lint (shellcheck)
-        run: shellcheck scripts/*.sh
+        run: |
+          template='scripts/(deps_changed|deps-changed-selftest|guardrails-selftest|lock_audit|lock-audit-selftest|wheel-smoke-selftest)\.sh'
+          listing=$(ls scripts/*.sh)
+          own_s=$(grep -v -x -E "$template" <<<"$listing")
+          mapfile -t own <<<"$own_s"
+          echo "shellcheck on ${#own[@]} of $(wc -l <<<"$listing") scripts"
+          shellcheck "${own[@]}"
 
       - name: Format check (ruff)
         run: uv run ruff format --check .

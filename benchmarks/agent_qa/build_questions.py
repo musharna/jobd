@@ -81,7 +81,7 @@ class Broker:
         plan = self._dry_run(
             {
                 "cmd": ["true"],
-                "cwd": "/tmp",
+                "cwd": "/tmp",  # nosec B108 - a dry-run job's cwd sent as data; nothing runs
                 "project": "agent-qa-dry-run",
                 "host_pin": "any",
                 "requires": {"needs": needs},

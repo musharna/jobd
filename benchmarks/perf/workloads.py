@@ -34,6 +34,11 @@ from fastapi.testclient import TestClient
 
 from jobd.app import build_app
 
+# Path strings a worker or a job reports. They travel as data in a request
+# body; nothing in this module creates or opens a file under them.
+_TMP_ROOT = "/tmp"  # nosec B108 - a mount-root label sent as data, never opened
+_WORK_DIR = "/tmp/work"  # nosec B108 - a job cwd sent as data, never created
+
 SEED = 20261016
 N_JOBS = 40
 N_FINISHED = 28
@@ -69,7 +74,7 @@ WORKERS: list[dict[str, Any]] = [
         "os": "linux",
         "gpu": True,
         "tags": ["python3", "R", "cuda", "cuda-12gb", "cuda-24gb", "cuda-32gb"],
-        "mount_roots": ["/home", "/tmp"],
+        "mount_roots": ["/home", _TMP_ROOT],
         "max_concurrent": 1,
         "running": 0,
     },
@@ -84,7 +89,7 @@ WORKERS: list[dict[str, Any]] = [
         "os": "linux",
         "gpu": True,
         "tags": ["python3", "R", "docker", "cuda", "cuda-8gb"],
-        "mount_roots": ["/home", "/tmp"],
+        "mount_roots": ["/home", _TMP_ROOT],
         "max_concurrent": 1,
         "running": 0,
     },
@@ -99,7 +104,7 @@ WORKERS: list[dict[str, Any]] = [
         "os": "linux",
         "gpu": True,
         "tags": ["python3", "ffmpeg", "cuda", "cuda-8gb", "cuda-24gb"],
-        "mount_roots": ["/home", "/tmp", "/mnt/c"],
+        "mount_roots": ["/home", _TMP_ROOT, "/mnt/c"],
         "max_concurrent": 3,
         "running": 0,
     },
@@ -114,7 +119,7 @@ WORKERS: list[dict[str, Any]] = [
         "os": "linux",
         "gpu": False,
         "tags": ["python3", "R"],
-        "mount_roots": ["/home", "/tmp"],
+        "mount_roots": ["/home", _TMP_ROOT],
         "max_concurrent": 1,
         "running": 0,
     },
@@ -146,7 +151,7 @@ def _submit_body(rng: random.Random, i: int) -> dict[str, Any]:
     needs, gpu, pin = rng.choice(_REQUIREMENTS)
     body: dict[str, Any] = {
         "cmd": ["python3", "train.py", f"--seed={i}"],
-        "cwd": "/tmp/work",
+        "cwd": _WORK_DIR,
         "project": rng.choice(["project-a", "project-b"]),
         "host_pin": pin,
         "max_wall_s": 3600,
@@ -299,7 +304,7 @@ def _probe_job(fx: Fixture) -> int:
 
 _NEW_JOB = {
     "cmd": ["python3", "eval.py"],
-    "cwd": "/tmp/work",
+    "cwd": _WORK_DIR,
     "project": "project-a",
     "host_pin": "any",
     "requires": {"needs": ["cuda-24gb"], "gpu": True},
@@ -401,7 +406,7 @@ def w_mcp_submit_dry_run(fx: Fixture) -> Any:
         {
             "command": "python3 eval.py",
             "project": "project-a",
-            "cwd": "/tmp/work",
+            "cwd": _WORK_DIR,
             "needs": ["cuda-24gb"],
             "gpu": True,
             "dry_run": True,
@@ -413,7 +418,7 @@ def w_mcp_submit_dry_run(fx: Fixture) -> Any:
 def w_mcp_submit(fx: Fixture) -> Any:
     out = _mcp(fx)(
         "jobd_submit",
-        {"command": "python3 eval.py", "project": "project-a", "cwd": "/tmp/work"},
+        {"command": "python3 eval.py", "project": "project-a", "cwd": _WORK_DIR},
     )
     return {"job_id": out["job_id"], "state": out["state"]}
 
