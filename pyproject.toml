@@ -136,7 +136,7 @@ source_paths = ["src"]
 # mutmut runs the suite inside its own copy, mutants/. Every tracked top-level
 # entry goes into it, so a test that reads one still collects there
 # (tests/test_mutmut_copy.py keeps this list complete).
-also_copy = [".dockerignore", ".editorconfig", ".env.example", ".github", ".gitignore", ".mcp.json", ".pre-commit-config.yaml", ".zenodo.json", "CHANGELOG.md", "CITATION.cff", "CLAUDE.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "Dockerfile", "LICENSE", "README.md", "REVIEW.md", "SECURITY.md", "assets", "benchmarks", "changelog.d", "config", "docker", "docker-compose.build.yml", "docker-compose.yml", "docs", "examples", "glama.json", "scripts", "server.json"]
+also_copy = [".dockerignore", ".editorconfig", ".env.example", ".github", ".gitignore", ".mcp.json", ".pre-commit-config.yaml", ".zenodo.json", "CHANGELOG.md", "CITATION.cff", "CLAUDE.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "Dockerfile", "LESSONS.md", "LICENSE", "README.md", "REVIEW.md", "SECURITY.md", "assets", "benchmarks", "changelog.d", "config", "docker", "docker-compose.build.yml", "docker-compose.yml", "docs", "examples", "glama.json", "scripts", "server.json"]
 # These two scan src/ as text (every JOBD_* name, every emitted event name).
 # mutmut's copy repeats each function once per mutant with the mutated strings
 # in it, so the scans find names that exist in no real source file.
