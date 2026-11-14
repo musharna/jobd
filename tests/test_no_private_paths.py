@@ -9,7 +9,8 @@ fragments, would publish them. They are read, one per line, from the
 environment variable JOBD_PRIVACY_FORBIDDEN (CI sets it from the
 PRIVACY_FORBIDDEN repository secret) or else from
 ~/.config/jobd/privacy-forbidden.txt. With neither, both scan tests FAIL rather
-than pass on an empty list. Hits are reported by entry number (#k), never by
+than pass on an empty list (two narrow, tested exceptions are at the bottom:
+Dependabot pull requests and the template-owned guardrails workflows). Hits are reported by entry number (#k), never by
 the matched text, so a CI log cannot print what it found.
 """
 
@@ -45,9 +46,31 @@ def _dependabot_run_without_secrets() -> bool:
     )
 
 
+# The workflows repo-template owns. They are the same file in every repo, so
+# they cannot name this repo's secret; ci.yml's test jobs carry the scan.
+_TEMPLATE_WORKFLOWS = ("guardrails", "nightly-guardrails")
+
+
+def _template_workflow_run() -> str | None:
+    """The workflow's name on a GitHub run of a template-owned workflow, else
+    None. GITHUB_ACTIONS and GITHUB_WORKFLOW are set by the runner and a
+    workflow cannot override them."""
+    name = os.environ.get("GITHUB_WORKFLOW")
+    if os.environ.get("GITHUB_ACTIONS") == "true" and name in _TEMPLATE_WORKFLOWS:
+        return name
+    return None
+
+
 def _require_list() -> None:
     if FORBIDDEN:
         return
+    workflow = _template_workflow_run()
+    if workflow:
+        pytest.skip(
+            f"no forbidden list in the template-owned '{workflow}' workflow: it is "
+            "the same file in every repo and cannot name this repo's secret. "
+            "ci.yml's test jobs scan every pull request and every push to main."
+        )
     if _dependabot_run_without_secrets():
         pytest.skip(
             "no forbidden list on a Dependabot pull_request run: GitHub gives "
@@ -124,6 +147,17 @@ _DEPENDABOT_ENV = {
     "GITHUB_ACTOR": "dependabot[bot]",
     "GITHUB_EVENT_NAME": "pull_request",
 }
+# What the runner sets on a run of a template-owned workflow (see below).
+_TEMPLATE_RUN_ENV = {"GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "guardrails"}
+
+
+def _env_without_the_list(home: Path) -> dict[str, str]:
+    """This process's environment with no list and no run markers; HOME points
+    at an empty directory, so the fallback file is absent too."""
+    drop = {*_DEPENDABOT_ENV, *_TEMPLATE_RUN_ENV, _ENV}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["HOME"] = str(home)
+    return env
 
 
 @pytest.mark.parametrize(
@@ -141,7 +175,7 @@ def test_a_missing_list_still_fails_outside_a_dependabot_run(monkeypatch, drop, 
         env.pop(drop)
     if override:
         env[override[0]] = override[1]
-    for k in _DEPENDABOT_ENV:
+    for k in (*_DEPENDABOT_ENV, *_TEMPLATE_RUN_ENV):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -155,6 +189,8 @@ def test_a_missing_list_still_fails_outside_a_dependabot_run(monkeypatch, drop, 
 
 
 def test_a_marked_dependabot_run_skips_only_when_the_list_is_missing(monkeypatch):
+    for k in _TEMPLATE_RUN_ENV:
+        monkeypatch.delenv(k, raising=False)
     for k, v in _DEPENDABOT_ENV.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setitem(globals(), "FORBIDDEN", [])
@@ -169,8 +205,7 @@ def test_the_real_scan_tests_skip_on_a_marked_run_and_fail_on_an_unmarked_one(tm
     """The two cases above, through a real pytest process with no list at all
     (HOME points at an empty directory, so the fallback file is absent)."""
     node = f"{Path(__file__).relative_to(ROOT)}::test_tracked_tree_has_no_private_paths"
-    base = {k: v for k, v in os.environ.items() if k not in _DEPENDABOT_ENV and k != _ENV}
-    base["HOME"] = str(tmp_path)
+    base = _env_without_the_list(tmp_path)
 
     def run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -188,3 +223,73 @@ def test_the_real_scan_tests_skip_on_a_marked_run_and_fail_on_an_unmarked_one(tm
     assert "Dependabot" in marked.stdout, marked.stdout  # the reason is printed
     unmarked = run({**base, "GITHUB_ACTOR": "musharna", "GITHUB_EVENT_NAME": "pull_request"})
     assert unmarked.returncode == 1 and "1 failed" in unmarked.stdout, unmarked.stdout
+
+
+# --- Template-owned workflows (guardrails adoption, 2026-11-14) ----------------
+# guardrails.yml and nightly-guardrails.yml come from repo-template and are the
+# same file in every repo, so they cannot name this repo's PRIVACY_FORBIDDEN
+# secret: the list is empty on their runs. The scans skip there, with a reason,
+# only when the list is missing AND the runner itself says the run is one of
+# those two workflows (GITHUB_ACTIONS and GITHUB_WORKFLOW are set by the runner;
+# a workflow cannot override them). ci.yml's test jobs still scan every pull
+# request and every push to main, and a missing list still fails there.
+
+
+@pytest.mark.parametrize("workflow", ["guardrails", "nightly-guardrails"])
+def test_a_template_workflow_run_skips_only_when_the_list_is_missing(monkeypatch, workflow):
+    for k in _DEPENDABOT_ENV:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_WORKFLOW", workflow)
+    monkeypatch.setitem(globals(), "FORBIDDEN", [])
+    with pytest.raises(pytest.skip.Exception, match=f"template-owned '{workflow}' workflow"):
+        _require_list()
+    # Positive control: with a list present, the same run still scans.
+    monkeypatch.setitem(globals(), "FORBIDDEN", ["x"])
+    _require_list()
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "CI"},  # this repo's own workflow
+        {"GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "release"},
+        {"GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "Guardrails"},  # not the name
+        {"GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "guardrails-lite"},
+        {"GITHUB_ACTIONS": "true"},  # no workflow name
+        {"GITHUB_WORKFLOW": "guardrails"},  # a shell with a stray variable, not a runner
+    ],
+)
+def test_a_missing_list_still_fails_outside_a_template_workflow_run(monkeypatch, env):
+    for k in (*_DEPENDABOT_ENV, *_TEMPLATE_RUN_ENV):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setitem(globals(), "FORBIDDEN", [])
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as outcome:
+        _require_list()
+    assert outcome.type is pytest.fail.Exception, f"skipped where it must fail: {outcome.value}"
+    assert "no forbidden list" in str(outcome.value)
+
+
+def test_the_real_scan_tests_skip_in_a_template_workflow_and_fail_in_ci(tmp_path):
+    """The two cases above, through a real pytest process with no list at all."""
+    node = f"{Path(__file__).relative_to(ROOT)}::test_tracked_tree_has_no_private_paths"
+    base = _env_without_the_list(tmp_path)
+
+    def run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", node, "-q", "-rs", "-p", "no:cacheprovider"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    nightly = run({**base, "GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "nightly-guardrails"})
+    assert nightly.returncode == 0 and "1 skipped" in nightly.stdout, nightly.stdout
+    assert "template-owned" in nightly.stdout, nightly.stdout  # the reason is printed
+    ci = run({**base, "GITHUB_ACTIONS": "true", "GITHUB_WORKFLOW": "CI"})
+    assert ci.returncode == 1 and "1 failed" in ci.stdout, ci.stdout

@@ -44,7 +44,8 @@ def main() -> int:
         req.add_header("Authorization", f"Bearer {token}")
 
     try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        # The scheme is the literal http:// in the Request above, never file:.
+        with urllib.request.urlopen(req, timeout=3) as resp:  # nosec B310 - literal http scheme
             if resp.status != 200:
                 print(f"/health returned HTTP {resp.status}", file=sys.stderr)
                 return 1
