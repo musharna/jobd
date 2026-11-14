@@ -64,8 +64,10 @@ mcp = ["mcp>=2,<3", "httpx>=0.27", "jsonschema>=4.18"]
 [project.scripts]
 jobd = "jobd.main:run"
 job = "job_cli.cli:main"
-jobd-mcp = "jobd.mcp.server:main"
-jobd-worker = "jobd.worker.job_worker:main"
+# Through jobd._entry, which loads on a base install: without the extra the
+# command names it instead of dying on a missing-module traceback.
+jobd-mcp = "jobd._entry:mcp"
+jobd-worker = "jobd._entry:worker"
 
 [build-system]
 requires = ["hatchling"]
