@@ -4,6 +4,12 @@ All notable changes to jobd. Format roughly follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.5.59] — 2026-11-15
+
+### Fixed
+
+- **`jobd-worker` and `jobd-mcp` say which extra they need instead of crashing.** A plain `pip install jobd` installs both commands, but their dependencies live in the `worker` and `mcp` extras, so running either one ended in a `ModuleNotFoundError` traceback (`psutil`, `jsonschema`). Each now exits with one line naming the missing module and the fix, `pip install 'jobd[worker]'` or `pip install 'jobd[mcp]'`. With the extra installed nothing changes. Found by the wheel install check adopted in this release.
+
 ## [0.5.58] — 2026-11-13
 
 ### Fixed
