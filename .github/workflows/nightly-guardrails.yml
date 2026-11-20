@@ -279,13 +279,47 @@ jobs:
             done
           ) &
           watcher=$!
+          # In a memory-capped scope (scripts/memory_cap.sh says how and why): a
+          # mutant that allocates without end fills the runner's memory, and a
+          # runner out of memory shuts down with every result of the night
+          # unsaved. In the scope the kernel kills that one worker, mutmut
+          # records its mutant (exit -9, "segfault") and goes on. A scope that
+          # cannot be made fails this step; mutmut never runs uncapped.
           set +e
-          timeout 90m uv run mutmut run
+          bash scripts/memory_cap.sh "$RUNNER_TEMP/memory-cap.txt" -- timeout 90m uv run mutmut run
           rc=$?
           set -e
           kill "$watcher"
+          if ! grep -q '^limit_bytes=' "$RUNNER_TEMP/memory-cap.txt" 2>/dev/null; then
+            echo "::error::mutmut did not run: the memory-capped scope could not be made (exit $rc, the reason is above). Uncapped, one runaway mutant can take the runner's memory and shut it down."
+            exit 1
+          fi
           echo "mutmut exit: $rc (124 = wall-clock cap, fine if mutants were checked)"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # The mutants killed this run, by name. No exit -9 survives the carry
+          # step ("segfault" is rechecked every run), so each one is tonight's.
+          # The OOM killer is one source of -9 and mutmut's CPU deadline the
+          # other (SIGKILL one second after its SIGXCPU); the kernel's own count
+          # for the scope is printed beside the names, so a difference shows.
+          python3 - <<'PY'
+          import json, os, pathlib
+          tmp = os.environ["RUNNER_TEMP"]
+          cap = dict(line.split("=", 1) for line in pathlib.Path(tmp, "memory-cap.txt").read_text().splitlines())
+          killed = sorted(k for m in pathlib.Path("mutants").rglob("*.meta")
+                          for k, c in json.loads(m.read_text())["exit_code_by_key"].items() if c == -9)
+          pathlib.Path(tmp, "oom-killed.txt").write_text("".join(k + "\n" for k in killed))
+          limit = int(cap["limit_bytes"]) // 2**20
+          line = (f"memory cap {limit} MiB: {cap['oom_kill']} OOM kill(s) in the scope; "
+                  f"{len(killed)} mutant(s) recorded killed by SIGKILL (exit -9, mutmut's \"segfault\")")
+          print(line + "".join(f"\n  killed: {k}" for k in killed))
+          if killed or cap["oom_kill"] != "0":
+              print(f"::warning::{line}" + (f": {', '.join(killed[:20])}" + (f" and {len(killed) - 20} more" if len(killed) > 20 else "") if killed else ""))
+          if cap["oom_kill"] != str(len(killed)):
+              print("  the counts differ: an OOM kill of a process that is not a mutant's worker (a test's own subprocess; "
+                    "mutmut itself, which ends the run) records no mutant, and a mutant past mutmut's CPU deadline exits -9 too")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"## M{line[1:]}\n" + "".join(f"- `{k}`\n" for k in killed[:200]))
+          PY
       - name: A mutant the cap cuts off two nights running is a timeout
         # mutmut's own deadline is (estimated test time + 1) x timeout_multiplier
         # (15) seconds, so a mutant most tests cover gets hours: data-aggregator-mcp's
