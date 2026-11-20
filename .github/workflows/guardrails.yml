@@ -5,6 +5,7 @@ name: guardrails
 #   test      pytest, then pytest again with NO network (empty netns)
 #   wheel     build the wheel, install it in a clean venv outside the repo, import it
 #   security  uv audit (every package in uv.lock, every Python) + bandit
+#   memory-cap  the nightly's memory-capped mutmut scope, made and tested on this runner
 #   review    Claude code review posted on the PR (needs CLAUDE_CODE_OAUTH_TOKEN)
 # Action SHAs verified to exist on 2026-09-11.
 
@@ -135,6 +136,22 @@ jobs:
         run: |
           if [ -x scripts/guardrails-setup.sh ]; then bash scripts/guardrails-setup.sh; fi
           python3 scripts/wheel_smoke.py .
+
+  memory-cap:
+    # The nightly runs mutmut in a memory-capped systemd scope
+    # (scripts/memory_cap.sh), so a mutant that allocates without end is killed
+    # alone instead of shutting the runner down. Whether such a scope can be made
+    # at all, and holds, is a fact about the runner image, and only a
+    # GitHub-hosted runner can show it: here it is made for real, a runaway is
+    # killed while its siblings run on, and the nightly's run step, as written,
+    # names a planted runaway mutant. Under a minute.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: The nightly's memory cap kills a runaway and nothing else (real systemd, real mutmut)
+        run: bash scripts/memory-cap-selftest.sh
 
   security:
     runs-on: ubuntu-latest
