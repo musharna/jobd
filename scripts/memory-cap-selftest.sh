@@ -96,6 +96,7 @@ shift
 exec "$@"
 EOF
 cp "$t/noscope/systemd-run" "$t/noscope/setpriv"
+# shellcheck disable=SC2016  # writes a script: its $ expand when it runs, not here
 printf '#!/usr/bin/env bash\n[ "$1" = -n ] && shift\n[ "$1" = true ] && exit 0\nexec "$@"\n' >"$t/noscope/sudo"
 chmod +x "$t/noscope/"*
 want "a scope that is not made stops the command" "2 not run no report" "$(mark "$t/m2" MUTMUT_MEMORY_MAX=64M PATH="$t/noscope:$PATH")"
@@ -108,9 +109,11 @@ chmod +x "$t/nomanager/"*
 # controller delegated takes MemoryMax and enforces nothing): the real
 # systemd-run, minus MemoryMax.
 mkdir -p "$t/nolimit"
+# shellcheck disable=SC2016  # writes a script: its $ expand when it runs, not here
 printf '#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do case $a in MemoryMax=*) unset "args[-1]" ;; *) args+=("$a") ;; esac; done\nexec %q "${args[@]}"\n' \
 	"$(command -v systemd-run)" >"$t/nolimit/systemd-run"
 if command -v sudo >/dev/null; then
+	# shellcheck disable=SC2016  # writes a script: its $ expand when it runs, not here
 	printf '#!/usr/bin/env bash\n[ "$1" = -n ] && shift\nif [ "$1" = systemd-run ]; then shift; exec %q -n %q "$@"; fi\nexec %q -n "$@"\n' \
 		"$(command -v sudo)" "$t/nolimit/systemd-run" "$(command -v sudo)" >"$t/nolimit/sudo"
 fi
